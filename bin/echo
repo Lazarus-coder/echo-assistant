@@ -1,0 +1,165 @@
+#!/bin/bash
+# Echo 控制脚本：up / down / status / logs / open / dream / say / diag / selftest / forget / remember
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LABEL="com.echo.chat"
+MENUBAR_LABEL="com.echo.menubar"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
+PORT="${ECHO_PORT:-8787}"
+URL="http://127.0.0.1:$PORT"
+UID_NUM="$(id -u)"
+
+c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+c_warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+
+need_plist() {
+  if [ ! -f "$PLIST" ]; then
+    c_err "还没安装 launchd 服务。先运行：./install.sh"
+    exit 1
+  fi
+}
+
+local_token() {
+  [ -f "$ROOT/data/local.token" ] && cat "$ROOT/data/local.token" || echo ""
+}
+
+api() { # api METHOD PATH [JSON]
+  local method="$1" path="$2" body="${3:-}"
+  local tok; tok="$(local_token)"
+  if [ -n "$body" ]; then
+    curl -sS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
+      -H 'content-type: application/json' -H 'x-echo-request: echo' -H "x-echo-local: $tok" -d "$body"
+  else
+    curl -sS -m "${ECHO_API_TIMEOUT:-60}" -X "$method" "$URL/api/$path" -H "x-echo-local: $tok"
+  fi
+}
+
+case "${1:-status}" in
+  up)
+    need_plist
+    launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>/dev/null || launchctl kickstart -k "gui/$UID_NUM/$LABEL"
+    [ -f "$MENUBAR_PLIST" ] && launchctl bootstrap "gui/$UID_NUM" "$MENUBAR_PLIST" 2>/dev/null
+    sleep 1.2
+    "$0" status
+    ;;
+  down)
+    need_plist
+    launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null && c_warn "Echo 已停止（开机也不会自启）"
+    launchctl bootout "gui/$UID_NUM/$MENUBAR_LABEL" 2>/dev/null || true
+    ;;
+  restart)
+    need_plist
+    launchctl kickstart -k "gui/$UID_NUM/$LABEL"
+    sleep 1.2 && "$0" status
+    ;;
+  status)
+    printf '%-14s' "进程:"
+    if pgrep -f "node .*server\.mjs" >/dev/null; then c_ok "运行中"; else c_err "未运行"; fi
+    printf '%-14s' "健康检查:"
+    if curl -sf -m 4 "$URL/api/health" >/dev/null; then c_ok "$URL 有响应"; else c_err "$URL 无响应"; fi
+    printf '%-14s' "局域网地址:"
+    ipconfig getifaddr en0 2>/dev/null | sed "s|$|:$PORT|" || echo "（未取到 en0）"
+    if curl -sf -m 4 "$URL/api/health" >/dev/null; then
+      api GET summary 2>/dev/null | python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: print('   （无法解析 summary）'); raise SystemExit
+m=d.get('memory',{})
+print(f\"  未读 {d.get('unread',0)} · 主动今日 {d.get('proactiveToday',0)} · 跟进 {d.get('loops',0)} 条 · 记忆 {m.get('observations',0)} 条\")
+print(f\"  上次 Dream {d.get('dreamLastAt') or '从未'} · 搜索 {'开' if d.get('enabled',{}).get('search') else '关'} · 主动 {'开' if d.get('enabled',{}).get('proactive') else '关'}\")
+" 2>/dev/null
+    fi
+    ;;
+  logs)
+    shift
+    tail -n "${1:-40}" -f "$ROOT/data/logs/echo.out.log" "$ROOT/data/logs/echo.err.log" 2>/dev/null || \
+      tail -n "${1:-40}" "$ROOT/data/logs/"*.log
+    ;;
+  open)
+    open "$URL"
+    ;;
+  dream)
+    c_warn "触发 Dream 提炼（可能要 30–90 秒）…"
+    api POST dream '{}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin); r=d.get('result',{})
+print('  ok=',r.get('ok'),'|',('；'.join(r.get('summary',[])) or r.get('error','')))
+print('  跟进',len(r.get('loops',[])),'条 · 话题',len(r.get('nudges',[])),'条')" 2>/dev/null || c_err "Dream 调用失败"
+    ;;
+  say)
+    c_warn "让助手判断是否要主动开口…"
+    api POST proactive/run '{}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin); r=d.get('result',{})
+if r.get('acted'): print('  已发出：',r['message']['content'][:120])
+else: print('  这次没说：',r.get('skipped'),r.get('reason') or '')" 2>/dev/null || c_err "调用失败"
+    ;;
+  search)
+    shift
+    api POST search/test "{\"query\":\"${1:-今天美元汇率}\"}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(f\"  引擎 {d.get('engine')} · {d.get('ms')}ms · {len(d.get('results',[]))} 条\")
+for r in d.get('results',[])[:3]: print('   -',r['url'][:70])" 2>/dev/null || c_err "搜索失败"
+    ;;
+  mcp)
+    api POST mcp/reload '{}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for s in d.get('servers',[]): print(f\"  {s['name']:14s} {s['state']:9s} {s['tools']} 工具\")
+print('  （没有输出表示还没配置 MCP）')" 2>/dev/null
+    ;;
+  passwd)
+    printf '新口令（≥6 位）: '; read -rs NEW; echo
+    api POST password "{\"next\":\"$NEW\"}" >/dev/null && c_ok "口令已更新"
+    ;;
+  init)
+    "$ROOT/install.sh"
+    ;;
+  env)
+    if [ -f "$ROOT/data/echo.env" ]; then
+      c_ok "data/echo.env 存在，包含："
+      cut -d= -f1 "$ROOT/data/echo.env" | sed 's/^/  /'
+    else
+      c_warn "没有 data/echo.env，跑 ./install.sh 生成"
+    fi
+    ;;
+  selftest)
+    shift
+    node "$ROOT/tests/selftest.mjs" "$@"
+    ;;
+  forget)
+    api GET memory/forgetting | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print('  已淡出/已忘：',len(d.get('items',[])),'条')
+for o in d.get('items',[])[:6]: print(f\"   - [{o['status']}] {o['text'][:50]} ← {o['reason']}\")
+print('  遗忘日志最近 8 段：')
+for b in (d.get('log') or [])[:8]: print('   ',b.split(chr(10))[0])" 2>/dev/null || c_err "读取失败"
+    ;;
+  remember)
+    shift
+    api POST memory/observation "{\"text\":\"$*\",\"kind\":\"fact\",\"importance\":3}" >/dev/null && c_ok "已记住：$*"
+    ;;
+  diag)
+    api GET diagnostics | python3 -c "
+import sys,json
+d=json.load(sys.stdin);m=d['metrics'];t=m['turns']
+print(f\"  近 7 天生成 {t['count']} 次 · 失败率 {t['errorRate']*100:.0f}% · P95 {t['p95Ms']}ms · 平均 {t['avgRounds']} 轮\")
+print(f\"  tokens 入 {t['tokensIn']} / 出 {t['tokensOut']}\")
+for k,v in (m.get('tools') or {}).items(): print(f\"  工具 {k}: {v['count']} 次 成功 {v['okRate']*100:.0f}% P50 {v['p50Ms']}ms\")
+for k,v in (m.get('search') or {}).items(): print(f\"  搜索 {k}: {v['count']} 次 P50 {v['p50Ms']}ms\")
+p=m.get('proactive') or {}
+print(f\"  主动：开口 {p.get('acted',0)} 次 · 被接住率 {p.get('replyRate')}\")
+print(f\"  存储：截图 {d['storage']['screenshots']['mb']}MB/图片 {d['storage']['uploads']['mb']}MB · 记忆 {d['memory']['observations']} 条（淡出 {d['memory']['forgetting']['faded']}）· 图谱 {d['graph']['nodes']} 节点\")
+print(f\"  决策最优类型：{d['agency']['best']} · 屏幕感知 {'开' if d['screen']['enabled'] else '关'}\")" 2>/dev/null || c_err "诊断失败"
+    ;;
+  *)
+    sed -n '2,3p' "$0"
+    echo
+    echo "用法: ./bin/echo {up|down|restart|status|logs|open|dream|say|search|mcp|passwd|init|env|selftest|diag|forget|remember}"
+    ;;
+esac

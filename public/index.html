@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#131311" media="(prefers-color-scheme: dark)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Echo" />
+    <meta name="description" content="跑在自己机器上的私人对话窗口" />
+    <title>Echo · 本地对话</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/logo.svg" />
+    <link rel="apple-touch-icon" href="/logo.svg" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="gate" class="gate" hidden>
+      <form id="gateForm" class="gate-card" autocomplete="off">
+        <img src="/logo.svg" alt="" class="gate-logo" width="44" height="44" />
+        <h1 id="gateTitle">Echo</h1>
+        <p id="gateHint" class="gate-hint">输入访问口令</p>
+        <input id="gateInput" type="password" inputmode="text" placeholder="访问口令" minlength="6" required />
+        <button type="submit" class="btn primary block" id="gateSubmit">进入</button>
+        <p id="gateError" class="gate-error" hidden></p>
+      </form>
+    </div>
+
+    <div id="app" class="app" hidden>
+      <aside id="sidebar" class="sidebar">
+        <div class="brand">
+          <img src="/logo.svg" alt="" width="22" height="22" />
+          <span>Echo</span>
+          <button class="icon-btn" data-action="toggle-sidebar" title="收起侧栏 (⌘/)" aria-label="收起侧栏">
+            <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+        </div>
+
+        <button class="btn primary block" data-action="new-chat">
+          <svg viewBox="0 0 24 24" class="i"><path d="M12 5v14M5 12h14" /></svg>新对话
+        </button>
+        <label class="filter">
+          <svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+          <input id="convFilter" type="search" placeholder="搜索会话" />
+        </label>
+
+        <ul id="convList" class="conv-list"></ul>
+
+        <div class="sidebar-foot">
+          <button class="ghost" data-action="open-panel" data-panel="memory">
+            <svg viewBox="0 0 24 24" class="i"><path d="M12 4a4 4 0 00-4 4 3 3 0 00-1 5.8A3 3 0 009 19a3 3 0 003-1.5V4z" /><path d="M12 4a4 4 0 014 4 3 3 0 011 5.8A3 3 0 0115 19a3 3 0 01-3-1.5" /></svg>
+            记忆 <b id="memCount" class="chip-num">0</b>
+          </button>
+          <button class="ghost" data-action="open-panel" data-panel="proactive">
+            <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
+            主动服务 <b id="proCount" class="chip-num">0</b>
+          </button>
+          <button class="ghost" data-action="open-panel" data-panel="settings">
+            <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 00-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 00-1.7-1l-.3-2.6h-4l-.3 2.6a7 7 0 00-1.7 1l-2.3-1-2 3.4 2 1.5a7 7 0 000 2l-2 1.5 2 3.4 2.3-1a7 7 0 001.7 1l.3 2.6h4l.3-2.6a7 7 0 001.7-1l2.3 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z" /></svg>
+            设置
+          </button>
+          <div class="row-split">
+            <button class="ghost tiny" data-action="cycle-theme" id="themeBtn">主题</button>
+            <button class="ghost tiny" data-action="dream-now" id="dreamBtn">Dream</button>
+            <button class="ghost tiny" data-action="logout">退出</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button class="icon-btn only-mobile" data-action="toggle-sidebar" aria-label="打开侧栏">
+            <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
+          <div class="title-wrap">
+            <h2 id="convTitle" class="title" tabindex="0" title="点击重命名">主对话</h2>
+            <span id="badges" class="badges"></span>
+          </div>
+          <div class="topbar-right">
+            <label class="pill">
+              <select id="modelSelect" class="bare"></select>
+            </label>
+            <label class="pill" title="联网搜索">
+              <select id="searchSelect" class="bare">
+                <option value="off">搜索关</option>
+                <option value="auto">搜索自动</option>
+                <option value="on">搜索强制</option>
+              </select>
+            </label>
+            <button class="pill toggle" data-action="toggle-thinking" id="thinkingBtn" title="推理模型的思考过程">思考</button>
+          </div>
+        </header>
+
+        <div id="thread" class="thread" tabindex="-1"></div>
+
+        <div class="composer-wrap">
+          <div id="pending" class="pending" hidden></div>
+          <form id="composer" class="composer">
+            <div id="attachStrip" class="attach-strip" hidden></div>
+            <textarea id="input" rows="1" placeholder="随时问点什么…（Enter 发送，Shift+Enter 换行，可贴图）"></textarea>
+            <div class="composer-bar">
+              <div class="composer-meta">
+                <span id="ctxChip" class="muted"></span>
+              </div>
+              <div class="composer-actions">
+                <button type="button" class="btn ghost small" data-action="attach" title="添加图片（也可直接粘贴或拖进来）">图片</button>
+                <button type="button" class="btn ghost small" data-action="draw" title="直接出图">画图</button>
+                <button type="button" class="btn ghost" data-action="stop" id="stopBtn" hidden>停止</button>
+                <button type="submit" class="btn primary" id="sendBtn">发送</button>
+              </div>
+            </div>
+            <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
+          </form>
+        </div>
+      </main>
+
+      <section id="drawer" class="drawer" hidden>
+        <div class="drawer-head">
+          <div class="tabs" role="tablist">
+            <button class="tab" data-action="tab" data-panel="memory">记忆</button>
+            <button class="tab" data-action="tab" data-panel="proactive">主动服务</button>
+            <button class="tab" data-action="tab" data-panel="settings">设置</button>
+          </div>
+          <button class="icon-btn" data-action="close-drawer" aria-label="关闭">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+        <div id="panelMemory" class="panel" hidden></div>
+        <div id="panelProactive" class="panel" hidden></div>
+        <div id="panelSettings" class="panel" hidden></div>
+      </section>
+      <div id="scrim" class="scrim" hidden></div>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

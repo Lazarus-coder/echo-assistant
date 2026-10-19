@@ -1,0 +1,7 @@
+data/
+.snapshots/
+build/
+node_modules/
+*.log
+.DS_Store
+tests/last-report.json

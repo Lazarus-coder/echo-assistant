@@ -1,0 +1,11 @@
+{
+  "name": "Echo · 本地对话",
+  "short_name": "Echo",
+  "description": "跑在自己机器上的私人对话窗口",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f7f5",
+  "theme_color": "#2f6f57",
+  "icons": [{ "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
