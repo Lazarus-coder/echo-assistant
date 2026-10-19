@@ -77,6 +77,7 @@ Search is a **chain you configure**, tried in order; a failure (rate limit, miss
 | `searxng` | instance URL | your own aggregator |
 | `custom` | — | any HTTP endpoint returning `{results:[{title,url,snippet}]}` |
 
+<a id="the-chat-window"></a>
 ## The chat window
 
 Streaming answers with the thinking fold · visible tool steps and source chips · edit-and-resend · regenerate · per-conversation model choice · image paste/drag/upload · a draw button wired to your image model · conversation pin/export · token accounting · dark/light · phone-sized layout.
