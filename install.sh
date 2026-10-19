@@ -114,7 +114,7 @@ MENUBAR_BIN=""
 if [ "$WITH_MENUBAR" = "1" ]; then
   if command -v swiftc >/dev/null 2>&1; then
     info "编译状态栏 App（首次约 10–30 秒）…"
-    if swiftc -O -o "$ROOT/build/EchoBar" "$ROOT/menubar/EchoBar.swift" 2>"$ROOT/data/logs/swiftc.log"; then
+    if swiftc -O -o "$ROOT/build/EchoBar" "$ROOT/menubar/main.swift" "$ROOT/menubar/EchoBar.swift" "$ROOT/menubar/CompanionOverlay.swift" 2>"$ROOT/data/logs/swiftc.log"; then
       MENUBAR_BIN="$ROOT/build/EchoBar"
       ok "状态栏 App 编译完成：build/EchoBar"
     else

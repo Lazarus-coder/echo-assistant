@@ -62,6 +62,7 @@ import {
 import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
 import { polishText, MODES } from './lib/polish.mjs'
+import { ingestFrame, companionStatus, pendingBubbles, setCompanion, openBubble, dismissBubble } from './lib/companion.mjs'
 import {
   UPSTREAM_PRESETS,
   MEMORY_PROFILES,
@@ -217,6 +218,7 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
   '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
   '.png': 'image/png',
 }
 
@@ -228,6 +230,8 @@ async function serveStatic(req, res, urlPath) {
     '/style.css': 'style.css',
     '/manifest.webmanifest': 'manifest.webmanifest',
     '/logo.svg': 'logo.svg',
+    '/mini.html': 'mini.html',
+    '/mini.js': 'mini.js',
   }
   const file = map[urlPath]
   if (!file) return send(res, 404, 'not found')
@@ -237,7 +241,7 @@ async function serveStatic(req, res, urlPath) {
     // 资源带上 mtime 版本号，避免浏览器拿到旧 JS/CSS（升级后无需手动清缓存）
     if (file === 'index.html') {
       let html = await fs.readFile(full, 'utf8')
-      for (const asset of ['app.js', 'style.css', 'logo.svg']) {
+      for (const asset of ['app.js', 'style.css', 'logo.svg', 'mini.js']) {
         const st = await fs.stat(path.join(PUBLIC_DIR, asset)).catch(() => null)
         if (st) html = html.replaceAll(`"/${asset}"`, `"/${asset}?v=${Math.round(st.mtimeMs)}"`)
       }
@@ -554,7 +558,13 @@ async function api(req, res, url) {
         activity: screen.events[0]?.activity ?? null,
         app: screen.events[0]?.app ?? null,
       },
-      enabled: { proactive: cfg.proactive.enabled, dream: cfg.dream.enabled, search: cfg.search.enabled, memory: cfg.memory.enabled, screen: cfg.screen?.enabled },
+      enabled: { proactive: cfg.proactive.enabled, dream: cfg.dream.enabled, search: cfg.search.enabled, memory: cfg.memory.enabled, screen: cfg.screen?.enabled, companion: cfg.companion?.enabled },
+      companion: {
+        enabled: cfg.companion?.enabled === true,
+        paused: Boolean(state?.companion?.pausedUntil && Date.parse(state.companion.pausedUntil) > Date.now()),
+        intervalSeconds: cfg.companion?.intervalSeconds ?? 20,
+        pending: (await pendingBubbles()).length,
+      },
       mainTitle: main?.title ?? '主对话',
       lastPreview: clip(String(main?.messages?.at(-1)?.content ?? ''), 80),
     })
@@ -790,6 +800,44 @@ async function api(req, res, url) {
 
   if (method === 'GET' && p === 'permissions') return send(res, 200, await permissionsReport())
   if (method === 'POST' && p === 'permissions/screen-test') return send(res, 200, await screenPermissionProbe())
+
+  /* ------------------------------ 伴随模式 ------------------------------ */
+  if (method === 'POST' && p === 'companion/frame') {
+    const body = await readBody(req)
+    const result = await ingestFrame({
+      text: body.text,
+      app: body.app,
+      title: body.title,
+      ts: body.ts,
+      hidIdleSeconds: Number(body.hidIdleSeconds ?? 0),
+    })
+    return send(res, 200, result)
+  }
+  if (method === 'GET' && p === 'companion') return send(res, 200, await companionStatus({ includeBubbles: Number(url.searchParams.get('n') ?? 12) }))
+  if (method === 'GET' && p === 'companion/pending') return send(res, 200, { bubbles: await pendingBubbles() })
+  if (method === 'PATCH' && p === 'companion') {
+    const body = await readBody(req)
+    return send(res, 200, await setCompanion(body.companion ?? body))
+  }
+  if (method === 'POST' && p === 'companion/pause') {
+    const body = await readBody(req)
+    return send(res, 200, await setCompanion({ pauseMinutes: Number(body.minutes ?? 30) }))
+  }
+  if (seg[1] === 'companion' && seg[2] && seg[3]) {
+    const id = String(seg[2])
+    const action = String(seg[3])
+    if (method === 'POST' && action === 'open') {
+      const r = await openBubble(id)
+      if (!r) return send(res, 404, { error: 'not found' })
+      return send(res, 200, { conversationId: r.conversationId, bubble: r.bubble })
+    }
+    if (method === 'POST' && action === 'dismiss') {
+      const body = await readBody(req)
+      const b = await dismissBubble(id, { reason: body.reason })
+      if (!b) return send(res, 404, { error: 'not found' })
+      return send(res, 200, { ok: true, bubble: b, status: await companionStatus({ includeBubbles: 4 }) })
+    }
+  }
 
   /* -------------------------------- 图谱 ------------------------------- */
   if (method === 'GET' && p === 'graph') {

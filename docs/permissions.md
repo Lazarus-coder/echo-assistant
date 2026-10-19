@@ -40,6 +40,10 @@ How to grant it:
 
 Without the grant, Echo degrades quietly: captures are skipped, the log says so, and everything else keeps working.
 
+## 2b. Companion mode — same grant, higher frequency
+
+Companion mode (off by default, enabled from the menu bar or *Settings → 伴随模式*) reuses the same Screen Recording grant but captures far more often (default every 20 s instead of every 5 minutes). Everything above still applies: on-device OCR, text only, screenshots deleted after analysis, block-list respected, and nothing is sent to the model when the screen hasn't changed. It can be paused instantly from the menu bar, and it silences itself after three dismissals in a row.
+
 ## 3. Notifications — optional
 
 Proactive messages announce themselves through `osascript`. If nothing shows up, allow notifications for your terminal/launcher app in **System Settings → Notifications**, or just rely on the unread dot in the menu bar.

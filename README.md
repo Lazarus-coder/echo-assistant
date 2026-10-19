@@ -15,6 +15,7 @@
   <a href="#byok">BYOK</a> ·
   <a href="#proactive-agency">Proactive agency</a> ·
   <a href="#the-chat-window">Chat window</a> ·
+  <a href="#companion-mode-opt-in">Companion</a> ·
   <a href="#memory--forgetting">Memory</a> ·
   <a href="#quick-start">Install</a> ·
   <a href="#permissions">Permissions</a> ·
@@ -123,6 +124,28 @@ Proactive messaging is the visible half. The same decision-making runs in the ba
 - **Dream** (sleep-time consolidation): rewrites core memory, reconciles facts, and *decides what to forget* — each fade with a written reason and the numbers behind it.
 - **Follow-up ledger**: maintains what you said you'd do, what's due, what it already raised, what you quietly dropped.
 - **Ledger → conversation**: overdue items surface as concrete messages ("you said this was due tomorrow — day-based or topic-based wrap-up?") instead of generic reminders.
+
+## Companion mode (opt-in)
+
+Proactive agency is about *timing*; companion mode is about *presence*. Turn it on and Echo watches along with you — capture frequency jumps from minutes to seconds — and occasionally floats a **bubble** in the corner of your screen. Not a notification, not a window that steals focus: a small card that fades away on its own unless you hover. Click it and a **small chat window** opens, focused on that exact topic, with a dedicated conversation you can keep chatting in.
+
+Scenarios it is built for (each with its own voice):
+
+| You are… | It does |
+|---|---|
+| **chatting with someone** (WeChat, Slack, mail) | reads the thread, judges the relationship and tone, offers a line you can copy |
+| **watching something** (a film, a video) | watches along as a friend — one feeling, one piece of trivia, one quip; never a lecture, never a question |
+| **working** (docs, spreadsheets) | one concrete suggestion: the next step, the easy-to-miss detail, the number to double-check |
+| **writing code** | speaks only when it can actually help: an API detail, an edge case, a shorter way |
+
+The discipline that keeps it from becoming a nag:
+
+- **Change detection first.** If the screen looks the same as the last frame, nothing is sent to the model at all — that is what makes watching every 20 seconds affordable, and what stops it repeating itself.
+- **Budget, gap, back-off.** Bubbles per hour, a minimum gap between them, and if you dismiss three in a row it silences itself for a while (and says so in the log).
+- **Never steals focus, never blocks.** Bubbles expire on their own; hover pauses the timer; the menu bar has an instant *pause 30 minutes*.
+- **Same privacy defaults as screen awareness**: on-device OCR, text only, screenshots deleted after analysis, block-list respected, and it is **off by default**.
+
+Bubbles carry their own reasoning: the card says one line, and the conversation it opens starts with *why* it thought that was worth saying. Opened and dismissed bubbles both feed the self-report (`./bin/echo diag`), so you can see whether the companionship is actually welcome.
 
 <a id="memory--forgetting"></a>
 ## Memory & forgetting

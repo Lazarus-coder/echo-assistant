@@ -23,8 +23,9 @@ rm -rf "$STAGE" && mkdir -p "$STAGE" "$OUT"
 
 # 1) 编译状态栏 App（通用二进制：Apple Silicon + Intel）+ 图标
 info "编译状态栏 App（arm64 + x86_64）…"
-swiftc -O -target arm64-apple-macos13.0 -o "$ROOT/build/EchoBar.arm64" menubar/EchoBar.swift
-if swiftc -O -target x86_64-apple-macos13.0 -o "$ROOT/build/EchoBar.x86" menubar/EchoBar.swift 2>/dev/null; then
+SWIFT_SRC="menubar/main.swift menubar/EchoBar.swift menubar/CompanionOverlay.swift"
+swiftc -O -target arm64-apple-macos13.0 -o "$ROOT/build/EchoBar.arm64" $SWIFT_SRC
+if swiftc -O -target x86_64-apple-macos13.0 -o "$ROOT/build/EchoBar.x86" $SWIFT_SRC 2>/dev/null; then
   lipo -create "$ROOT/build/EchoBar.arm64" "$ROOT/build/EchoBar.x86" -output "$ROOT/build/EchoBar"
   ok "通用二进制：$(lipo -archs "$ROOT/build/EchoBar")"
 else

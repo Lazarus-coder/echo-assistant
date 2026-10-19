@@ -1310,7 +1310,8 @@ async function renderProactivePanel() {
 async function renderSettingsPanel() {
   const el = $('#panelSettings')
   const c = S.boot.config
-  const [mcp, screen, providers, perms] = await Promise.all([api('mcp'), api('screen'), api('providers'), api('permissions').catch(() => null)])
+  const [mcp, screen, providers, perms, companion] = await Promise.all([api('mcp'), api('screen'), api('providers'), api('permissions').catch(() => null), api('companion').catch(() => null)])
+  S.companion = companion
   S.screen = screen
   W.catalog = providers
   el.innerHTML = `
@@ -1404,6 +1405,27 @@ async function renderSettingsPanel() {
       <div class="field"><label>屏蔽关键词正则（命中跳过，逗号分隔；默认空）</label>
         <input type="text" id="setExcludes" placeholder="例如：password、身份证" value="${esc((c.screen?.excludeTitlePatterns ?? []).join(','))}" /></div>
       <p class="muted small">锁屏、键鼠空闲不会被采集。默认只把本地 OCR 出的文字发给模型；原始截图分析完即删，绝不进归档。模型若识别出敏感内容，只记"在处理敏感信息"，不写任何事实进记忆。</p>
+    </div>
+    <div class="sect">
+      <h4>伴随模式 <span class="muted small">· 跟着你一起看，用气泡偶尔说一句</span></h4>
+      <div class="switch"><span>开启伴随模式（会大幅提高看屏幕的频率）</span><input type="checkbox" id="setCompOn" ${c.companion?.enabled ? 'checked' : ''} /></div>
+      <p class="muted small">开启后状态栏会每 ${c.companion?.intervalSeconds ?? 20} 秒看一眼（本地 OCR，截图即删），在右上角用气泡冒出来：
+        聊天时帮你判断语气、给可复制的回复；看片时当个一起看的同伴；办公/写代码时给一条具体建议。点气泡进入小对话窗细聊。
+        屏幕没变化时它不会调模型，气泡有预算与间隔，连续被你忽略会自动安静一会儿。</p>
+      <div class="field"><label>看屏幕间隔 <b>${c.companion?.intervalSeconds ?? 20}</b> 秒</label>
+        <input type="range" id="setCompInterval" min="5" max="120" step="5" value="${c.companion?.intervalSeconds ?? 20}" /></div>
+      <div class="field"><label>每小时气泡上限 <b>${c.companion?.hourlyBudget ?? 15}</b></label>
+        <input type="range" id="setCompBudget" min="1" max="40" step="1" value="${c.companion?.hourlyBudget ?? 15}" /></div>
+      <div class="field"><label>气泡最小间隔 <b>${c.companion?.minGapSeconds ?? 75}</b> 秒</label>
+        <input type="range" id="setCompGap" min="20" max="600" step="5" value="${c.companion?.minGapSeconds ?? 75}" /></div>
+      <div class="field"><label>只在哪些场景开口（不勾就完全不冒泡）</label>
+        <div class="row">${(S.companion?.scenarios ? Object.entries(S.companion.scenarios) : []).map(([id, label]) =>
+          `<label class="pill" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-cscenario="${id}" ${(S.companion?.enabledScenarios ?? []).includes(id) ? 'checked' : ''} />${esc(label)}</label>`).join('') || '<span class="muted small">（读取中…）</span>'}</div></div>
+      <div class="row"><button class="btn small" data-action="comp-pause">${S.companion?.paused ? '恢复伴随' : '暂停 30 分钟'}</button>
+        <span class="muted small">今日看过 ${S.companion?.framesToday ?? 0} 帧 · 本小时气泡 ${S.companion?.hourCount ?? 0}/${c.companion?.hourlyBudget ?? 15} · 连续被忽略 ${S.companion?.dismissStreak ?? 0} 次</span></div>
+      <div class="list" style="margin-top:8px">${(S.companion?.recent ?? []).slice(0, 5).map((b) =>
+        `<div class="mem-item"><div class="txt">${esc(b.bubble)}
+          <div class="muted small">${esc(b.scenario)} · ${esc(b.topic)} · ${String(b.ts).slice(11, 16)} · ${esc(b.status)}${b.why ? ` · ${esc(b.why.slice(0, 60))}` : ''}</div></div></div>`).join('')}</div>
     </div>
     <div class="sect">
       <h4>磁盘预算</h4>
@@ -1501,6 +1523,13 @@ async function saveSettings() {
         excludeTitlePatterns: $('#setExcludes').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
       },
       storage: { screenImageBudgetMB: Number($('#setShotBudget').value), uploadsBudgetMB: Number($('#setUploadBudget').value) },
+      companion: {
+        enabled: $('#setCompOn')?.checked ?? false,
+        intervalSeconds: Number($('#setCompInterval')?.value ?? 20),
+        hourlyBudget: Number($('#setCompBudget')?.value ?? 15),
+        minGapSeconds: Number($('#setCompGap')?.value ?? 75),
+        scenarios: $$('#panelSettings [data-cscenario]').filter((cb) => cb.checked).map((cb) => cb.dataset.cscenario),
+      },
       dream: { enabled: $('#setDreamOn').checked, intervalHours: Number($('#setDreamGap').value) },
       proactive: {
         dailyBudget: Number($('#setBudget').value),
@@ -1779,6 +1808,12 @@ document.addEventListener('click', async (e) => {
     const r = await api('screen/digest', { method: 'POST', body: {} })
     toast(r.session ? `已沉淀：${r.session.summary}` : `样本不足（${r.count ?? 0} 条）`, !r.session)
     return renderMemoryPanel()
+  }
+  if (act === 'comp-pause') {
+    const r = await api('companion/pause', { method: 'POST', body: { minutes: S.companion?.paused ? 0 : 30 } })
+    toast(r.paused ? '已暂停伴随模式 30 分钟' : '已恢复伴随模式')
+    await boot({ keep: true })
+    return renderSettingsPanel()
   }
   if (act === 'storage-prune') {
     const r = await api('storage/prune', { method: 'POST', body: {} })

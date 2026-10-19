@@ -11,7 +11,7 @@
     "start": "node server.mjs",
     "selftest": "node tests/selftest.mjs",
     "selftest:live": "node tests/selftest.mjs --live",
-    "menubar:build": "swiftc -O -o build/EchoBar menubar/EchoBar.swift",
+    "menubar:build": "swiftc -O -o build/EchoBar menubar/main.swift menubar/EchoBar.swift menubar/CompanionOverlay.swift",
     "install:daemon": "./install.sh",
     "package": "bash scripts/package.sh"
   },

@@ -718,7 +718,7 @@ async function simulatePolicy({ rounds = 2000 } = {}) {
 /** 本地桩端点：让"需要模型"的功能也能在离线跑，并且能断言"它到底发来了什么"。 */
 async function startMockUpstream() {
   const http = await import('node:http')
-  const mockRef = { forceLeak: null }
+  const mockRef = { forceLeak: null, speak: true, scenario: 'work' }
   const seen = []
   const server = http.createServer((req, res) => {
     let raw = ''
@@ -734,6 +734,12 @@ async function startMockUpstream() {
       } catch {}
       seen.push({ url: req.url, body })
       const wantTight = JSON.stringify(body?.messages ?? []).includes('精简')
+      const sys = JSON.stringify(body?.messages?.find?.((m) => m.role === 'system')?.content ?? '')
+      if (sys.includes('伴随模式')) {
+        seen.push({ url: 'companion', body })
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ speak: mockRef.speak ?? true, scenario: mockRef.scenario ?? 'work', topic: '桩话题', bubble: '桩气泡：这件事值得说一句', why: '桩理由' }) }, finish_reason: 'stop' }], usage: { total_tokens: 12 } }))
+      }
       const leak = mockRef.forceLeak
       const content = JSON.stringify({
         intent: '桩：把请求补成可执行的一条',
@@ -748,7 +754,7 @@ async function startMockUpstream() {
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = server.address().port
-  return { baseUrl: `http://127.0.0.1:${port}/v1`, seen, get forceLeak() { return mockRef.forceLeak }, set forceLeak(v) { mockRef.forceLeak = v }, close: () => new Promise((r) => server.close(r)) }
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, seen, get forceLeak() { return mockRef.forceLeak }, set forceLeak(v) { mockRef.forceLeak = v }, get speak() { return mockRef.speak }, set speak(v) { mockRef.speak = v }, get scenario() { return mockRef.scenario }, set scenario(v) { mockRef.scenario = v }, close: () => new Promise((r) => server.close(r)) }
 }
 
 async function trackPolish() {
@@ -844,6 +850,86 @@ function realEnvOf(raw) {
   return out
 }
 
+async function trackCompanion() {
+  section('J 伴随模式')
+  const mock = await startMockUpstream()
+  await req('/api/settings', {
+    method: 'PATCH',
+    body: {
+      config: { upstream: { baseUrl: mock.baseUrl, models: [{ id: 'mock-model-1', label: 'mock', group: '桩' }], defaultModel: 'mock-model-1', utilityModel: 'mock-model-1' } },
+      env: { OPENAI_BASE_URL: mock.baseUrl, OPENAI_API_KEY: 'sk-mock-selftest' },
+    },
+  })
+  const { DEFAULTS } = await import(path.join(ROOT, 'lib/config.mjs'))
+  check('J', '伴随模式默认关闭（高频采集必须显式开启）', DEFAULTS.companion.enabled === false && DEFAULTS.companion.intervalSeconds <= 30, `enabled=${DEFAULTS.companion.enabled} 间隔=${DEFAULTS.companion.intervalSeconds}s`)
+
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { enabled: false } } } })
+  const off = await req('/api/companion/frame', { method: 'POST', body: { text: '这段文字足够长，用来验证未开启时不会走任何判断逻辑。'.repeat(3), app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  check('J', '未开启时不处理任何帧', off.json?.skipped === 'disabled', off.json?.skipped)
+
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { enabled: true, minGapSeconds: 20, hourlyBudget: 50, dismissStreakLimit: 3, backoffMinutes: 10 } } } })
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
+
+  const calls = () => mock.seen.filter((x) => x.url === 'companion').length
+  const before = calls()
+  const f1 = await req('/api/companion/frame', { method: 'POST', body: { text: 'Excel 里是 Q3 预算表：市场费用 120 万，人力 340 万，剩余 60 万；备注写着差旅要砍 30%，但具体条目还没列出来。', app: 'Excel', title: 'Q3.xlsx', hidIdleSeconds: 1 } })
+  check('J', '内容变化时产生气泡（带场景与话题）', Boolean(f1.json?.bubble?.bubble) && f1.json?.bubble?.scenario === 'work', `${f1.json?.bubble?.scenario} · ${f1.json?.bubble?.topic}`)
+
+  const f2 = await req('/api/companion/frame', { method: 'POST', body: { text: 'Excel 里是 Q3 预算表：市场费用 120 万，人力 340 万，剩余 60 万；备注写着差旅要砍 30%，但具体条目还没列出来。', app: 'Excel', title: 'Q3.xlsx', hidIdleSeconds: 1 } })
+  check('J', '同一屏内容不再调模型（变化检测省钱）', f2.json?.skipped === 'unchanged' && calls() === before + 1, `skipped=${f2.json?.skipped} 调用=${calls() - before}`)
+
+  // 回归：被节流挡下的帧不能污染比较基线，否则间隔结束后同一屏永远不再被判断
+  const changedText = '微信窗口：张总问这个季度的复盘什么时候给他，他下周要跟老板汇报；我回了「这两天整理一下」，输入框里已经打了「好的张总」。'
+  const gapped = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'WeChat', title: '张总', hidIdleSeconds: 1 } })
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
+  const retry = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'WeChat', title: '张总', hidIdleSeconds: 1 } })
+  check('J', '被节流跳过的帧不会污染基线（同屏可再次被判断）', gapped.json?.skipped === 'min_gap' && retry.json?.bubble, `gap=${gapped.json?.skipped} retry=${retry.json?.bubble ? '出泡' : retry.json?.skipped}`)
+
+  // 场景开关
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { scenarios: ['work'] } } } })
+  mock.scenario = 'video'
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
+  const offScene = await req('/api/companion/frame', { method: 'POST', body: { text: '正在播放电影 Interstellar 的结尾段落，字幕显示：不要温和地走进那个良夜。播放器暂停在第 2 小时 14 分，片尾音乐还在继续。', app: 'IINA', title: 'film.mkv', hidIdleSeconds: 1 } })
+  check('J', '未启用的场景不会冒泡', offScene.json?.skipped === 'scenario_off', `skipped=${offScene.json?.skipped} scenario=${offScene.json?.scenario}`)
+  mock.scenario = 'work'
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { scenarios: ['chat', 'video', 'work', 'code', 'browse', 'other'] } } } })
+
+  // 每小时预算
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { hourlyBudget: 1, minGapSeconds: 20 } } } })
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0, hourly: { key: new Date().toISOString().slice(0, 13), count: 1 } } }, null, 2))
+  const overBudget = await req('/api/companion/frame', { method: 'POST', body: { text: '这是完全不同的新内容：统计局刚发布 11 月 CPI 同比上涨 0.4%，环比下降 0.1%，猪肉价格连续三周回落。', app: 'Safari', title: 'news', hidIdleSeconds: 1 } })
+  check('J', '小时预算用尽后不再冒泡', overBudget.json?.skipped === 'hourly_budget', overBudget.json?.skipped)
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { hourlyBudget: 50 } } } })
+
+  // 生命周期：点开 → 会话；忽略 → 连续退避
+  const pending = await req('/api/companion/pending')
+  const bubbleId = pending.json?.bubbles?.[0]?.id
+  const opened = await req(`/api/companion/${bubbleId}/open`, { method: 'POST', body: {} })
+  const conv = opened.json?.conversationId ? await req(`/api/conversations/${opened.json.conversationId}`) : null
+  check('J', '点开气泡会建一个聚焦该话题的小会话', Boolean(opened.json?.conversationId) && /伴随/.test(conv?.json?.title ?? '') && (conv?.json?.messages?.[0]?.content ?? '').includes('桩气泡'), `标题=${conv?.json?.title}`)
+
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
+  const b2 = await req('/api/companion/frame', { method: 'POST', body: { text: '另一个场景的内容：VS Code 里 deploy.sh 的 timeout 30 太短，日志显示 step 3 直接 exit 124，需要改成 60。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  for (let i = 0; i < 3; i++) await req(`/api/companion/${b2.json?.bubble?.id}/dismiss`, { method: 'POST', body: { reason: 'selftest' } })
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 3 } }, null, 2))
+  const backedOff = await req('/api/companion/frame', { method: 'POST', body: { text: '他连续忽略了三次气泡，这时候应该安静下来而不是继续冒泡，哪怕屏幕内容又变了也不该开口。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  const st = await req('/api/companion')
+  check('J', '连续被忽略后自动进入冷却（不再冒泡）', backedOff.json?.skipped === 'dismiss_backoff' && Boolean(st.json?.pausedUntil), `skipped=${backedOff.json?.skipped}`)
+
+  const paused = await req('/api/companion/pause', { method: 'POST', body: { minutes: 15 } })
+  const pausedFrame = await req('/api/companion/frame', { method: 'POST', body: { text: '暂停期间不应该有任何动作：这段文字足够长，确保不是被长度门槛挡下的，而是真的因为暂停。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  check('J', '可手动暂停（暂停期间静默）', paused.json?.paused === true && pausedFrame.json?.skipped === 'paused', `paused=${paused.json?.paused}`)
+  await req('/api/companion/pause', { method: 'POST', body: { minutes: 0 } })
+
+  await new Promise((r) => setTimeout(r, 2200))
+  const diag = await req('/api/diagnostics')
+  check('J', '伴随指标进自报告（帧数/开口率/场景分布/点开与忽略数）', (diag.json?.metrics?.companion?.frames ?? 0) >= 3 && diag.json?.metrics?.companion?.dismissed >= 1, JSON.stringify(diag.json?.metrics?.companion))
+
+  // 还原上游
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { enabled: false }, upstream: JSON.parse(baselineConfigRaw).upstream ?? {} }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
+  await mock.close()
+}
+
 async function trackLive() {
   section('F 实时链路（会调用模型）')
   const hasKey = Boolean((await req('/api/bootstrap')).json?.upstream?.hasKey)
@@ -917,6 +1003,7 @@ async function main() {
     ['E', trackRuntime],
     ['H', trackModularity],
     ['I', trackPolish],
+    ['J', trackCompanion],
     ['G', trackAgency],
     ['F', trackLive],
   ]

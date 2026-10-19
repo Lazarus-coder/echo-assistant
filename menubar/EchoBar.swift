@@ -38,6 +38,10 @@ struct Summary {
     var screenActivity: String?
     var screenApp: String?
     var fading = 0
+    var companionOn = false
+    var companionPaused = false
+    var companionInterval = 20
+    var companionPending = 0
 
     init(_ j: [String: Any]?) {
         guard let j, j["ok"] as? Bool == true else { return }
@@ -63,6 +67,12 @@ struct Summary {
         if let e = j["enabled"] as? [String: Any] {
             proactiveOn = e["proactive"] as? Bool ?? true
             searchOn = e["search"] as? Bool ?? true
+        }
+        if let c = j["companion"] as? [String: Any] {
+            companionOn = c["enabled"] as? Bool ?? false
+            companionPaused = c["paused"] as? Bool ?? false
+            companionInterval = c["intervalSeconds"] as? Int ?? 20
+            companionPending = c["pending"] as? Int ?? 0
         }
     }
 }
@@ -247,13 +257,18 @@ final class Controller: NSObject, NSApplicationDelegate {
     var lastCaptureAt = Date.distantPast
 
     /** 定期（或被要求时）看一眼屏幕：本地 OCR，图片不落盘，删掉临时文件。 */
-    func maybeCapture(force: Bool, reason: String) {
-        guard summary.ok, summary.screenOn, !capturing else { return }
+    func maybeCapture(force: Bool, reason: String, companion: Bool = false) {
+        let intervalSeconds = companion ? summary.companionInterval : summary.screenInterval * 60
+        if companion {
+            guard summary.ok, summary.companionOn, !summary.companionPaused, !capturing else { return }
+        } else {
+            guard summary.ok, summary.screenOn, !capturing else { return }
+        }
         guard screenPermission() else { return }
         if sessionLocked() { return }
         let idle = hidIdleSeconds()
         if idle > summary.screenIdleSkip { return }
-        if !force, Date().timeIntervalSince(lastCaptureAt) < Double(summary.screenInterval) * 60 { return }
+        if !force, Date().timeIntervalSince(lastCaptureAt) < Double(intervalSeconds) { return }
         capturing = true
         lastCaptureAt = Date()
         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
@@ -268,13 +283,15 @@ final class Controller: NSObject, NSApplicationDelegate {
                 body["text"] = String(ocr(downscale(img, maxEdge: 2200)).prefix(8000))
                 if mode == "image", let b64 = jpegBase64(img) { body["image"] = "data:image/jpeg;base64," + b64 }
             }
-            request("screen", method: "POST", body: body, timeout: 240) { json in
+            let endpoint = companion ? "companion/frame" : "screen"
+            request(endpoint, method: "POST", body: body, timeout: 240) { json in
                 DispatchQueue.main.async {
                     self?.capturing = false
                     let activity = ((json?["event"] as? [String: Any])?["activity"] as? String) ?? ""
                     let skipped = json?["skipped"] as? String
-                    print("[screen] \(reason) ok=\(ok) activity=\(activity) skipped=\(skipped ?? "-")")
-                    if force { self?.refresh() }
+                    let bubble = (json?["bubble"] as? [String: Any])?["bubble"] as? String
+                    print("[capture:\(endpoint)] \(reason) ok=\(ok) activity=\(activity) skipped=\(skipped ?? "-") bubble=\(bubble ?? "-")")
+                    if force || bubble != nil { self?.refresh() }
                 }
             }
         }
@@ -303,10 +320,14 @@ final class Controller: NSObject, NSApplicationDelegate {
                 print("[menubar] 新主动消息：\(self.summary.lastPreview)")
             }
             self.rebuildMenu()
+            if self.summary.companionOn { self.pollBubbles() }
             if self.summary.captureRequested {
                 self.maybeCapture(force: true, reason: self.summary.captureReason ?? "requested")
             } else {
                 self.maybeCapture(force: false, reason: "interval")
+            }
+            if self.summary.companionOn, !self.summary.companionPaused {
+                self.maybeCapture(force: false, reason: "companion", companion: true)
             }
         }
     }
@@ -315,6 +336,36 @@ final class Controller: NSObject, NSApplicationDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         return item
+    }
+
+    // 伴随：轮询待冒泡的气泡 → 悬浮窗呈现；点开进小对话窗
+    let overlay = OverlayController()
+    func pollBubbles() {
+        request("companion/pending") { [weak self] json in
+            guard let self else { return }
+            let list = (json?["bubbles"] as? [[String: Any]]) ?? []
+            guard !list.isEmpty else { return }
+            let bubbles = list.map { item in
+                Bubble(
+                    id: item["id"] as? String ?? "",
+                    scenario: item["scenario"] as? String ?? "other",
+                    topic: item["topic"] as? String ?? "伴随",
+                    text: item["bubble"] as? String ?? "",
+                    why: item["why"] as? String ?? ""
+                )
+            }.filter { !$0.id.isEmpty }
+            print("[companion] presenting \(bubbles.count) bubble(s): \(bubbles.map { $0.text }.joined(separator: " | "))")
+            self.overlay.present(
+                bubbles,
+                onOpen: { b in
+                    self.overlay.openMini(for: b, port: port, token: localToken())
+                    request("companion/\(b.id)/open", method: "POST", body: [:]) { _ in self.refresh() }
+                },
+                onDismiss: { b in
+                    request("companion/\(b.id)/dismiss", method: "POST", body: ["reason": "menu_bubble"]) { _ in self.refresh() }
+                }
+            )
+        }
     }
 
     func rebuildMenu() {
@@ -355,6 +406,16 @@ final class Controller: NSObject, NSApplicationDelegate {
             menu.addItem(line)
         }
         menu.addItem(mk("现在看一眼（立即感知一次）", #selector(lookNow)))
+        menu.addItem(.separator())
+        menu.addItem(mk(summary.companionOn ? "伴随模式：开（每 \(summary.companionInterval) 秒看一眼）" : "伴随模式：关", #selector(toggleCompanion)))
+        if summary.companionOn {
+            menu.addItem(mk(summary.companionPaused ? "恢复伴随（结束暂停）" : "暂停伴随 30 分钟", #selector(pauseCompanion)))
+            if summary.companionPending > 0 {
+                let p = NSMenuItem(title: "有 \(summary.companionPending) 个气泡在等你", action: nil, keyEquivalent: "")
+                p.isEnabled = false
+                menu.addItem(p)
+            }
+        }
         if summary.fading > 0 {
             let f = NSMenuItem(title: "记忆：\(summary.fading) 条接近淡出阈值", action: nil, keyEquivalent: "")
             f.isEnabled = false
@@ -398,6 +459,21 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     @objc func lookNow() { maybeCapture(force: true, reason: "manual") }
+
+    @objc func toggleCompanion() {
+        let want = !summary.companionOn
+        request("companion", method: "PATCH", body: ["companion": ["enabled": want]]) { [weak self] _ in
+            self?.notify(title: "Echo 伴随模式", body: want ? "已开启：会提高看屏幕的频率，用气泡偶尔说一句（可随时暂停）" : "已关闭")
+            self?.refresh()
+        }
+    }
+
+    @objc func pauseCompanion() {
+        request("companion/pause", method: "POST", body: ["minutes": summary.companionPaused ? 0 : 30]) { [weak self] _ in
+            self?.notify(title: "Echo 伴随模式", body: self?.summary.companionPaused == true ? "已恢复" : "暂停 30 分钟")
+            self?.refresh()
+        }
+    }
 
     @objc func sayNow() {
         guard !working else { return }
@@ -460,9 +536,3 @@ final class Controller: NSObject, NSApplicationDelegate {
         try? p.run()
     }
 }
-
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-let controller = Controller()
-app.delegate = controller
-app.run()
