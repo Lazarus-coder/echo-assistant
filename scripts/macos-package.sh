@@ -16,6 +16,15 @@ ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 info() { printf '\033[36m·\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
+ALLOW_DIRTY=0
+for arg in "$@"; do [ "$arg" = "--allow-dirty" ] && ALLOW_DIRTY=1; done
+if [ -n "$(git status --porcelain)" ] && [ "$ALLOW_DIRTY" = "0" ]; then
+  printf '\033[31m✗ 工作区有未提交改动，拒绝打包（DMG 装的是工作区内容，会带上未提交的改动）\033[0m\n'
+  git status --short | head -12 | sed 's/^/    /'
+  printf '  先提交，或显式用 --allow-dirty 打包\n'
+  exit 1
+fi
+
 command -v swiftc >/dev/null || die "需要 swiftc（xcode-select --install）"
 command -v hdiutil >/dev/null || die "需要 hdiutil（macOS 自带）"
 

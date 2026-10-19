@@ -12,8 +12,16 @@ OUT="$DIST/$NAME.tar.gz"
 VERIFY=1
 [ "${1:-}" = "--no-verify" ] && VERIFY=0
 
-if [ -n "$(git status --porcelain)" ]; then
-  printf '\033[33m! 工作区有未提交改动，发布件来自 git 跟踪内容（HEAD），请确认已提交\033[0m\n'
+ALLOW_DIRTY=0
+for arg in "$@"; do [ "$arg" = "--allow-dirty" ] && ALLOW_DIRTY=1; done
+
+# 工作区不干净就拒绝打包：git archive 打的是 HEAD，未提交的改动不会进去，
+# 结果就是"发布件与当前代码不一致"（这个错真的犯过，而且是从发布页下载验证时发现的）
+if [ -n "$(git status --porcelain)" ] && [ "$ALLOW_DIRTY" = "0" ]; then
+  printf '\033[31m✗ 工作区有未提交改动，拒绝打包（发布件来自 HEAD，会与当前代码不一致）\033[0m\n'
+  git status --short | head -12 | sed 's/^/    /'
+  printf '  先提交，或显式用 --allow-dirty 打包\n'
+  exit 1
 fi
 
 mkdir -p "$DIST"
@@ -24,6 +32,13 @@ git archive --format=tar.gz --prefix="$NAME/" -o "$OUT" HEAD
 rm -f "$DIST/SHA256SUMS"
 ( cd "$DIST" && shasum -a 256 "$NAME.tar.gz" | awk '{print $1"  "$2}' > SHA256SUMS )
 
+# 断言发布件里的版本号与当前工作区一致（防止"发了旧树"这类时序错误）
+ARCHIVED_VER="$(tar -xzOf "$OUT" "$NAME/package.json" 2>/dev/null | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version' 2>/dev/null || echo '?')"
+if [ "$ARCHIVED_VER" != "$VER" ]; then
+  printf '\033[31m✗ 发布件版本不一致：包内 %s ≠ 工作区 %s\033[0m\n' "$ARCHIVED_VER" "$VER"
+  exit 1
+fi
+printf '· 版本一致：%s\n' "$ARCHIVED_VER"
 SIZE="$(du -h "$OUT" | awk '{print $1}')"
 FILES="$(tar -tzf "$OUT" | grep -vc '/$' || true)"
 printf '\033[32m✓\033[0m %s  (%s, %s 个文件)\n' "$OUT" "$SIZE" "$FILES"
