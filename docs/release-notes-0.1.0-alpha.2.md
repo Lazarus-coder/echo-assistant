@@ -1,3 +1,18 @@
+## Download
+
+| File | What it is |
+|---|---|
+| **Echo-0.1.0-alpha.2-macos.dmg** | **macOS installer** — `Echo.app` (menu-bar icon, own icon and bundle id) + double-click installer + uninstaller + README (中文/EN) |
+| Echo-0.1.0-alpha.2-macos.zip | same payload as a zip, if you prefer |
+| echo-assistant-0.1.0-alpha.2.tar.gz | source tarball (any platform, needs Node ≥ 20) |
+| SHA256SUMS / SHA256SUMS-macos | checksums — `shasum -a 256 -c SHA256SUMS-macos` |
+
+The macOS installer puts everything in `~/Library/Application Support/Echo` (app + data + logs, all plain files), registers two launchd agents (service + menu-bar icon), asks for your endpoint/key (skippable — there is a browser wizard), and only removes its quarantine flag after asking you. Uninstall = double-click `Uninstall Echo.command` (it asks before deleting data).
+
+The app is unsigned, so macOS asks once before it can run — right-click → Open, or remove the quarantine flag yourself. For scripted installs: `--target DIR --no-launchd --no-open --yes`, plus `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `ECHO_PASSWORD` env vars.
+
+---
+
 ## What's new in alpha.2 — modular, BYOK-first
 
 Alpha.1 worked, but it showed its author's fingerprints: a vendor gateway baked in as the default, a hard-coded search stack, and no guided setup. Alpha.2 moves all of that into configuration and a first-run wizard, so the same code runs on anyone's endpoint and anyone's search service.

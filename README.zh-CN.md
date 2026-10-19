@@ -48,6 +48,10 @@
 <a id="快速开始"></a>
 ## 快速开始
 
+**macOS 安装包（推荐）**：到 [Releases](https://github.com/Lazarus-coder/echo-assistant/releases) 下载 `Echo-0.1.0-alpha.2-macos.dmg`，打开后双击 **Install Echo.command**。它会把 `Echo.app` 与服务装到 `~/Library/Application Support/Echo`、注册 launchd 常驻、并询问模型端点与 Key（可跳过，网页里有向导）。卸载双击同一目录里的 `Uninstall Echo.command`。
+
+**从源码装：**
+
 ```bash
 git clone https://github.com/Lazarus-coder/echo-assistant.git && cd echo-assistant
 ./install.sh          # 凭据 → launchd 常驻 → 编译状态栏图标
