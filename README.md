@@ -17,6 +17,7 @@
   <a href="#search-providers">Search</a> ·
   <a href="#first-run-byok-onboarding">Onboarding</a> ·
   <a href="#permissions">Permissions</a> ·
+  <a href="#roadmap">Roadmap</a> ·
   <a href="docs/landscape.md">Landscape</a> ·
   <a href="docs/rsi-log.md">Self-improvement log</a> ·
   <a href="README.zh-CN.md">中文</a>
@@ -176,6 +177,34 @@ tests/selftest.mjs  frozen evaluator (isolated sandbox)
 bin/echo            CLI        install.sh    launcher + launchd registration
 docs/               landscape · rsi-log · permissions · release notes
 ```
+
+<a id="roadmap"></a>
+## Roadmap
+
+Echo is alpha. The direction is a **personal agent that actually runs your machine, with the same discipline it applies to memory: budgeted, explainable, and reversible.**
+
+### Computer use (planned)
+
+Most of the scaffolding is already here: the menu-bar app captures the screen and OCRs it on-device, the chat loop calls tools, and every action already lands in an audit trail. Computer use extends that from *understanding* to *acting* — a `computer_use` tool that can click, type, scroll, and switch apps.
+
+Design constraints it will ship under (draft; opt-in, never on by default):
+
+- **The model proposes, the app performs.** Execution lives in the menu-bar app (Accessibility API + `CGEvent`), behind its own permission grant — the model never gets a direct handle to your input devices.
+- **Per-action confirmation** for anything destructive or irreversible; allow-lists for apps and action types; a "ask every time / ask once per app / auto" ladder.
+- **Audit for every action** — what, where, which app, and a before/after snapshot hash — in the same readable, deletable file style as `forgetting.md`.
+- **Kill switch + hard budgets**: one click in the menu bar stops execution; actions-per-minute and actions-per-day caps, with the same circuit-breaker thinking as search.
+- **Dry-run mode** that narrates what it *would* do, so you can watch the plan before granting write access.
+- **Or plug a computer-use MCP server**: MCP support already exists, and the same confirmation, audit, and budget rules would apply to any tool it exposes.
+
+### Also planned / under consideration
+
+- Optional **embeddings-backed retrieval** (today: lexical BM25 + entity graph, zero dependencies). It would be an index you can turn on, not a new requirement.
+- **Bi-temporal validity** for entity-graph edges, so "this used to be true" facts can expire instead of only decaying.
+- **Voice in / voice out** when your endpoint exposes OpenAI-compatible `/audio` (ASR + TTS), gated the same way the screen is.
+
+### Explicitly not planned
+
+Multi-user hosting, cloud sync of memory, telemetry, anything that requires an account. Echo is one person, one machine, plain files you can delete.
 
 ## License
 

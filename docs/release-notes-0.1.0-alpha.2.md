@@ -13,6 +13,10 @@ The app is unsigned, so macOS asks once before it can run — right-click → Op
 
 ---
 
+**Roadmap** (including planned **computer use**): see the repo front page → *Roadmap*.
+
+---
+
 ## What's new in alpha.2 — modular, BYOK-first
 
 Alpha.1 worked, but it showed its author's fingerprints: a vendor gateway baked in as the default, a hard-coded search stack, and no guided setup. Alpha.2 moves all of that into configuration and a first-run wizard, so the same code runs on anyone's endpoint and anyone's search service.
