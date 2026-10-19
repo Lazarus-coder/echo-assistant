@@ -32,6 +32,8 @@ let sandbox
 let child
 let cookie = ''
 let localToken = ''
+let baselineConfigRaw = null
+let baselineEnvRaw = ''
 
 function check(track, name, ok, evidence = '') {
   results.push({ track, name, ok: Boolean(ok), evidence: String(evidence).slice(0, 300) })
@@ -85,11 +87,17 @@ async function bootSandbox() {
   // 关键：单元检查也必须在沙箱里跑，否则会污染真实数据目录
   process.env.ECHO_DATA_DIR = sandbox
   process.env.ECHO_CONFIG = path.join(sandbox, 'config.json')
-  // 沙箱配置起始值（各检查项会按需覆盖它，走的都是真实的 loadConfig 路径）
-  await fs.writeFile(
-    process.env.ECHO_CONFIG,
-    JSON.stringify({ memory: { maxActiveObservations: 1200, fadeThreshold: 0.35, fadeMinAgeDays: 21 } }, null, 2),
-  )
+  // 沙箱配置：以真实 config.json 为基线（若有），再叠加测试覆盖值
+  // —— 这样沙箱就像"用户真实安装的一份隔离副本"，实时轨才有意义
+  let baselineRaw = null
+  try {
+    baselineRaw = await fs.readFile(path.join(ROOT, 'config.json'), 'utf8')
+    await fs.writeFile(process.env.ECHO_CONFIG, baselineRaw)
+  } catch {
+    await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify({ memory: { maxActiveObservations: 1200, fadeThreshold: 0.35, fadeMinAgeDays: 21 } }, null, 2))
+  }
+  await setSandboxConfig({ memory: { maxActiveObservations: 1200, fadeThreshold: 0.35, fadeMinAgeDays: 21 } })
+  baselineConfigRaw = await fs.readFile(process.env.ECHO_CONFIG, 'utf8')
   await fs.mkdir(path.join(sandbox, 'logs'), { recursive: true })
   let env = {}
   try {
@@ -98,7 +106,10 @@ async function bootSandbox() {
       const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
       if (m) env[m[1]] = m[2]
     }
+    // 文件也复制进沙箱：这样"清空密钥/还原密钥"这类检查才是在真实结构上跑的
+    await fs.writeFile(path.join(sandbox, 'echo.env'), raw, { mode: 0o600 })
   } catch {}
+  baselineEnvRaw = await fs.readFile(path.join(sandbox, 'echo.env'), 'utf8').catch(() => '')
   child = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], {
     cwd: ROOT,
     env: {
@@ -564,36 +575,35 @@ async function trackAgency() {
   }
 }
 
-/** 离线回放：模拟用户对不同类型的接住概率，比较 bandit 与固定轮换的累计收益。 */
-async function simulatePolicy() {
+/** 离线回放：模拟用户对不同类型的接住概率，比较 bandit 与固定轮换的累计收益。
+ *  用真实的 sampleBeta（不重写算法），轮次开到 2000 —— 效果 ~+30%，噪声 ~±1.5%，
+ *  这样"赢"是统计性的结论，而不是随机运气。 */
+async function simulatePolicy({ rounds = 2000 } = {}) {
   const agency = await import(path.join(ROOT, 'lib/agency.mjs'))
   const truth = { follow_up: 0.5, suggest: 0.25, guide: 0.2, ask: 0.4, brief: 0.15 }
   const kinds = Object.keys(truth)
-  const rounds = 400
   let banditHits = 0
   let fixedHits = 0
   const posteriors = {}
   for (const k of kinds) posteriors[k] = { a: 1.6, b: 1.6 }
   let fixedIdx = 0
   for (let i = 0; i < rounds; i++) {
-    // bandit：Thompson 采样
     let pick = kinds[0]
     let best = -1
     for (const k of kinds) {
-      const s = agency.sampleBeta(posteriors[k])
-      if (s > best) {
-        best = s
+      const sample = agency.sampleBeta(posteriors[k])
+      if (sample > best) {
+        best = sample
         pick = k
       }
     }
-    const bHit = Math.random() < truth[pick] ? 1 : 0
-    banditHits += bHit
-    posteriors[pick] = { a: posteriors[pick].a + bHit, b: posteriors[pick].b + (1 - bHit) }
-    // 固定轮换
+    const hit = Math.random() < truth[pick] ? 1 : 0
+    banditHits += hit
+    posteriors[pick] = { a: posteriors[pick].a + hit, b: posteriors[pick].b + (1 - hit) }
     const fixedKind = kinds[fixedIdx++ % kinds.length]
     if (Math.random() < truth[fixedKind]) fixedHits++
   }
-  return { bandit: banditHits / rounds, fixed: fixedHits / rounds }
+  return { bandit: banditHits / rounds, fixed: fixedHits / rounds, rounds }
 }
   async function trackModularity() {
   section('H 解耦与引导（BYOK / 搜索提供方 / 记忆档位）')
@@ -614,9 +624,18 @@ async function simulatePolicy() {
   check('H', '提供方都声明了是否需 key 与就绪原因', search.every((p) => typeof p.needsKey === 'boolean' && typeof p.ready === 'boolean'), search.find((p) => !p.ready)?.reason ?? '')
   check('H', '记忆档位四档齐全', ['off', 'light', 'standard', 'deep'].every((k) => cat.json.profiles?.[k]), Object.keys(cat.json.profiles ?? {}).join(','))
 
-  // 2. 引导：沙箱里没有 echo.env → 应该要求引导；走完一遍后应该"能用"
+  // 2. 引导：先把沙箱的端点与密钥清空，验证"需要引导"的判定与完整流程
+  const cleared = await req('/api/settings', {
+    method: 'PATCH',
+    body: { env: { OPENAI_API_KEY: '', OPENAI_BASE_URL: '' }, config: { upstream: { baseUrl: '' } } },
+  })
   const before = (await req('/api/providers')).json.onboarding
-  check('H', '没配置端点/密钥时会要求引导', before.needed === true, JSON.stringify({ needed: before.needed, hasKey: before.hasKey, hasBaseUrl: before.hasBaseUrl }))
+  check(
+    'H',
+    '清空端点/密钥后会要求引导',
+    cleared.status === 200 && before.needed === true,
+    JSON.stringify({ needed: before.needed, hasKey: before.hasKey, hasBaseUrl: before.hasBaseUrl }),
+  )
   const done = await req('/api/onboarding/complete', {
     method: 'POST',
     body: {
@@ -672,8 +691,16 @@ async function simulatePolicy() {
   check('H', '默认配置不预设任何厂商端点（BYOK）', /baseUrl:\s*''/.test(cfgSrc) && !/upstream:[\s\S]{0,400}aliyuncs\.com/.test(cfgSrc), 'config.mjs upstream.baseUrl 为空')
   check('H', '安装脚本不再把某家网关当默认', !/BASEURL:-https?:\/\//.test(installSrc))
 
-  // 收尾：恢复沙箱默认，避免影响后续实时轨
-  await req('/api/settings', { method: 'PATCH', body: { config: { memory: { profile: 'standard' } } } })
+  // 收尾：把沙箱恢复到进入 H 轨前的状态，否则引导写下的假 key/假模型会毒到实时轨
+  if (baselineConfigRaw) await fs.writeFile(process.env.ECHO_CONFIG, baselineConfigRaw)
+  const realEnv = {}
+  for (const line of baselineEnvRaw.split('\n')) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
+    if (m) realEnv[m[1]] = m[2]
+  }
+  await req('/api/settings', { method: 'PATCH', body: { env: Object.keys(realEnv).length ? realEnv : { OPENAI_API_KEY: '', TAVILY_API_KEY: '' } } })
+  const restored = (await req('/api/providers')).json.onboarding
+  check('H', '沙箱可还原到基线（引导不会污染既有配置）', restored.usable === true && restored.modelCount > 0, `hasKey=${restored.hasKey} models=${restored.modelCount}`)
   void providers
 }
 
