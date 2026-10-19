@@ -505,6 +505,288 @@ async function addFiles(files) {
   autogrow()
 }
 
+/* --------------------------- 首次引导（BYOK 向导） -------------------------- */
+
+const W = {
+  open: false,
+  step: 0,
+  catalog: null,
+  baseUrl: '',
+  apiKey: '',
+  models: [],
+  defaultModel: '',
+  utilityModel: '',
+  imageModel: '',
+  profile: 'standard',
+  order: ['scrape', 'gateway'],
+  providerCfg: {},
+  keys: {},
+  test: null,
+  perms: null,
+  password: '',
+}
+
+const STEPS = ['端点', '模型', '记忆', '搜索', '权限', '完成']
+
+async function openWizard({ restart = false } = {}) {
+  const [cat, cfgRes] = await Promise.all([api('providers'), api('settings').catch(() => null)])
+  W.catalog = cat
+  W.open = true
+  if (!restart) {
+    // 从现状预填，避免让人重填一遍
+    W.baseUrl = cat.onboarding.baseUrl || ''
+    W.models = S.boot?.config?.models?.map((m) => m.id) ?? []
+    W.defaultModel = S.boot?.config?.defaultModel ?? ''
+    W.utilityModel = S.boot?.config?.utilityModel ?? ''
+    W.imageModel = S.boot?.config?.defaultImageModel ?? ''
+    W.profile = cat.onboarding.profile || 'standard'
+    W.order = [...(cat.onboarding.searchOrder ?? ['scrape', 'gateway'])]
+  }
+  W.step = restart ? 0 : cat.onboarding.completed ? 0 : 0
+  $('#wizard').hidden = false
+  renderWizard()
+  void cfgRes
+}
+
+function closeWizard() {
+  W.open = false
+  $('#wizard').hidden = true
+}
+
+function renderWizard() {
+  const el = $('#wizard')
+  const step = W.step
+  const card = document.createElement('div')
+  card.className = 'wizard-card'
+  card.innerHTML = `
+    <div class="wizard-steps">${STEPS.map((_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>
+    <h2>${esc(STEPS[step])}</h2>
+    <p class="sub">${['第 1 步 · 你要用自己的模型 API（BYOK），密钥只存在本机 data/echo.env',
+      '第 2 步 · 从端点拉到的模型里挑默认用哪个',
+      '第 3 步 · 决定它记住你多少，以及要不要主动开口',
+      '第 4 步 · 联网搜索可以完全不要，也可以接你自己的搜索服务',
+      '第 5 步 · 权限与常驻状态检查',
+      '就绪'][step]}</p>
+    <div id="wBody"></div>
+    <div class="wizard-foot">
+      <span class="muted small">第 ${step + 1} / ${STEPS.length} 步</span>
+      <div class="right">
+        ${step > 0 ? '<button class="btn" data-w="back">上一步</button>' : ''}
+        <button class="btn ghost" data-w="skip">${step === 0 ? '以后再配' : '先不配'}</button>
+        <button class="btn primary" data-w="next">${step === STEPS.length - 1 ? '完成' : '继续'}</button>
+      </div>
+    </div>`
+  el.innerHTML = ''
+  el.append(card)
+  const body = $('#wBody')
+  if (step === 0) body.innerHTML = stepEndpoint()
+  if (step === 1) body.innerHTML = stepModels()
+  if (step === 2) body.innerHTML = stepProfile()
+  if (step === 3) body.innerHTML = stepSearch()
+  if (step === 4) body.innerHTML = stepPermissions()
+  if (step === 5) body.innerHTML = stepDone()
+  bindWizard()
+}
+
+function stepEndpoint() {
+  const presets = W.catalog.upstream.map((p) => `<option value="${esc(p.baseUrl)}" ${p.baseUrl === W.baseUrl ? 'selected' : ''}>${esc(p.label)}${p.baseUrl ? '' : '（手动填）'}</option>`).join('')
+  return `
+    <div class="field"><label>服务商预设</label><select id="wPreset">${presets}</select></div>
+    <div class="field"><label>端点 Base URL（OpenAI 兼容，通常以 /v1 结尾）</label>
+      <input type="text" id="wBase" placeholder="https://your-endpoint/v1" value="${esc(W.baseUrl)}" /></div>
+    <div class="field"><label>API Key（只写入本机 data/echo.env，600 权限，不进仓库）</label>
+      <input type="password" id="wKey" placeholder="sk-…" value="${esc(W.apiKey)}" /></div>
+    <div class="row">
+      <button class="btn small" data-w="test">测试连接并拉取模型</button>
+      <span class="muted small" id="wTestOut">${W.test ? (W.test.ok ? `✓ 连通，发现 ${W.test.count} 个模型` : `✗ ${esc(W.test.error ?? '')}`) : ''}</span>
+    </div>`
+}
+
+function stepModels() {
+  const opts = W.models.length
+    ? W.models.map((m) => `<option value="${esc(m)}" ${m === W.defaultModel ? 'selected' : ''}>${esc(m)}</option>`).join('')
+    : ''
+  return `
+    <div class="field"><label>默认模型${W.models.length ? `（已发现 ${W.models.length} 个）` : '（没拉到列表就手填）'}</label>
+      ${opts ? `<select id="wModel">${opts}</select>` : `<input type="text" id="wModel" placeholder="例如 gpt-4o-mini / qwen-plus" value="${esc(W.defaultModel)}" />`}</div>
+    <div class="field"><label>后台杂活模型（标题、记忆抽取、Dream；默认同默认模型）</label>
+      <input type="text" id="wUtility" placeholder="留空 = 用默认模型" value="${esc(W.utilityModel)}" /></div>
+    <div class="field"><label>出图模型（可选；留空就关掉 image_gen 工具）</label>
+      <input type="text" id="wImage" placeholder="例如 wan2.7-image / gpt-image-1" value="${esc(W.imageModel)}" /></div>
+    <p class="muted small">这些都是普通配置项，之后在「设置」里随时能改；模型清单也可以用「重新拉取」更新。</p>`
+}
+
+function stepProfile() {
+  return Object.entries(W.catalog.profiles)
+    .map(([id, p]) => {
+      const values = { off: '不抽取 / 不注入 / 不主动 / 不采集屏幕', light: '抽取并注入事实；不 Dream、不主动、不采集屏幕', standard: '抽取 + 注入 + 定期 Dream 与遗忘；主动服务开启', deep: '在标准之上打开屏幕感知（本地 OCR，需要屏幕录制授权）' }[id]
+      return `<label class="opt-card ${W.profile === id ? 'sel' : ''}">
+        <input type="radio" name="wProfile" value="${id}" ${W.profile === id ? 'checked' : ''} />
+        <span><b>${esc(p.label)}</b><span>${esc(values ?? p.note)}</span></span></label>`
+    })
+    .join('')
+}
+
+function providerRows(order, providerCfg, keys) {
+  const cat = (W.catalog?.search ?? []).filter((p) => p.id !== 'none')
+  return cat
+    .map((p) => {
+      const idx = (order ?? []).indexOf(p.id)
+      const conf = providerCfg?.[p.id] ?? {}
+      let extra = ''
+      if (p.id === 'searxng') extra = `<input type="text" data-pcfg="searxng" placeholder="https://your-searxng/（实例根地址）" value="${esc(conf.endpoint ?? '')}" style="margin-top:6px" />`
+      if (p.id === 'custom') extra = `<input type="text" data-pcfg="custom" placeholder="https://your-search-api/endpoint" value="${esc(conf.endpoint ?? '')}" style="margin-top:6px" />`
+      if (p.needsKey) extra = `<input type="password" data-pkey="${p.envVar}" placeholder="${esc(p.envVar)}（写入本机 echo.env）" value="${esc(keys?.[p.envVar] ?? '')}" style="margin-top:6px" />`
+      return `<div class="chain-row">
+        <input type="checkbox" data-order="${p.id}" ${idx >= 0 ? 'checked' : ''} />
+        <span class="idx">${idx >= 0 ? idx + 1 : '·'}</span>
+        <span style="flex:1">
+          <b>${esc(p.label)}</b>
+          <div class="why">${esc(p.note)}${p.ready ? '' : ` · 未就绪：${esc(p.reason)}`}</div>
+          ${extra}
+        </span>
+      </div>`
+    })
+    .join('')
+}
+
+function wizardChainRows() {
+  const c = S.boot?.config
+  return providerRows(c?.search?.order ?? ['scrape', 'gateway'], c?.search?.providers ?? {}, {})
+}
+
+function stepSearch() {
+  return `
+    <p class="muted small" style="margin-top:0">勾选的按顺序依次尝试，前面的失败（如被限流）自动交给下一个。全部不勾即"不联网"。</p>
+    <div class="chain">${providerRows(W.order, W.providerCfg, W.keys)}</div>`
+}
+
+function stepPermissions() {
+  const p = W.perms
+  if (!p) return '<p class="muted small">正在检查…</p>'
+  const row = (ok, text) => `<div class="chain-row"><span class="idx">${ok ? '✓' : '!'}</span><span style="flex:1">${text}</span></div>`
+  return `
+    ${row(p.configured, p.configured ? '模型端点已配置' : '模型端点未配置（第 1 步可以回头补）')}
+    ${row(p.runningUnderLaunchd, p.runningUnderLaunchd ? '已由 launchd 常驻（登录自启、崩溃自动拉起）' : '当前是手动启动的；要常驻请跑 ./install.sh')}
+    ${row(p.tools.swiftc, p.tools.swiftc ? 'swiftc 可用（能编译状态栏图标）' : '缺少 swiftc：xcode-select --install')}
+    ${row(true, `服务地址：${esc(p.bind)} :${p.port}${p.lanAddresses?.length ? ` · 局域网 ${esc(p.lanAddresses[0].split(' ')[0])}` : ''}`)}
+    ${row(!p.authRequired, p.authRequired ? '已开启口令验证' : '未要求口令（本机自用；公共网络下建议开）')}
+    <div class="field" style="margin-top:12px"><label>屏幕录制权限（只有开启屏幕感知才需要）</label>
+      <div class="row"><button class="btn small" data-w="perm-test">测试一次</button>
+      <span class="muted small" id="wPermOut">${W.permTest ? (W.permTest.granted ? '✓ 已授权，能抓到画面' : `✗ ${esc(W.permTest.hint)}`) : '未测试'}</span></div>
+    </div>
+    <div class="field"><label>设个访问口令（可选，<span class="muted">留空则免登录</span>）</label>
+      <input type="password" id="wPass" placeholder="≥6 位；开启后手机访问需要输入" value="${esc(W.password)}" /></div>
+    <p class="muted small">权限说明与命令见仓库 docs/permissions.md。</p>`
+}
+
+function stepDone() {
+  const searchText = W.order.length ? W.order.map((id) => W.catalog.search.find((p) => p.id === id)?.label ?? id).join(' → ') : '不联网'
+  return `
+    <div class="chain">
+      <div class="chain-row"><span class="idx">1</span><span style="flex:1">端点：<b>${esc(W.baseUrl || '（沿用环境变量）')}</b></span></div>
+      <div class="chain-row"><span class="idx">2</span><span style="flex:1">默认模型：<b>${esc(W.defaultModel || '（未选）')}</b>${W.utilityModel ? ` · 杂活：${esc(W.utilityModel)}` : ''}${W.imageModel ? ` · 出图：${esc(W.imageModel)}` : ''}</span></div>
+      <div class="chain-row"><span class="idx">3</span><span style="flex:1">记忆档位：<b>${esc(W.catalog.profiles[W.profile]?.label ?? W.profile)}</b></span></div>
+      <div class="chain-row"><span class="idx">4</span><span style="flex:1">搜索链：<b>${esc(searchText)}</b></span></div>
+    </div>
+    <p class="muted small" style="margin-top:12px">点「完成」会：把密钥写进 data/echo.env、把以上选择写进 config.json，然后你就可以直接开始对话。</p>`
+}
+
+function bindWizard() {
+  const el = $('#wizard')
+  el.querySelectorAll('[data-w]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const act = btn.dataset.w
+      if (act === 'back') { W.step = Math.max(0, W.step - 1); return renderWizard() }
+      if (act === 'skip') { localStorage.setItem('echo.onboardSkipped', '1'); closeWizard(); return toast('随时可以在「设置 → 引导与权限」里重新配置') }
+      if (act === 'test') {
+        W.baseUrl = $('#wBase').value.trim()
+        W.apiKey = $('#wKey').value.trim()
+        $('#wTestOut').textContent = '测试中…'
+        const r = await api('onboarding/test', { method: 'POST', body: { baseUrl: W.baseUrl, apiKey: W.apiKey } })
+        W.test = r
+        if (r.ok) {
+          W.models = r.models
+          W.defaultModel = W.defaultModel || r.models[0] || ''
+        }
+        return renderWizard()
+      }
+      if (act === 'perm-test') {
+        $('#wPermOut').textContent = '测试中（系统可能弹授权窗）…'
+        W.permTest = await api('permissions/screen-test', { method: 'POST', body: {} })
+        return renderWizard()
+      }
+      if (act === 'next') {
+        // 收集当前步骤的输入
+        if (W.step === 0) {
+          W.baseUrl = ($('#wBase')?.value ?? W.baseUrl).trim()
+          W.apiKey = ($('#wKey')?.value ?? W.apiKey).trim()
+        } else if (W.step === 1) {
+          W.defaultModel = ($('#wModel')?.value ?? '').trim()
+          W.utilityModel = ($('#wUtility')?.value ?? '').trim()
+          W.imageModel = ($('#wImage')?.value ?? '').trim()
+        } else if (W.step === 4) {
+          W.password = ($('#wPass')?.value ?? '').trim()
+        }
+        if (W.step === 3) {
+          W.providerCfg = {}
+          el.querySelectorAll('[data-pcfg]').forEach((i) => (W.providerCfg[i.dataset.pcfg] = { endpoint: i.value.trim() }))
+          el.querySelectorAll('[data-pkey]').forEach((i) => (W.keys[i.dataset.pkey] = i.value.trim()))
+        }
+        if (W.step < STEPS.length - 1) {
+          W.step++
+          if (W.step === 4 && !W.perms) W.perms = await api('permissions').catch(() => null)
+          return renderWizard()
+        }
+        // 完成
+        btn.disabled = true
+        const body = {
+          baseUrl: W.baseUrl,
+          apiKey: W.apiKey,
+          models: W.models,
+          defaultModel: W.defaultModel,
+          utilityModel: W.utilityModel || W.defaultModel,
+          imageModels: W.imageModel ? [{ id: W.imageModel, label: W.imageModel, group: '出图' }] : [],
+          defaultImageModel: W.imageModel,
+          profile: W.profile,
+          search: { order: W.order, providers: W.providerCfg },
+          keys: W.keys,
+          password: W.password,
+        }
+        const r = await api('onboarding/complete', { method: 'POST', body })
+        if (r.ok) {
+          toast('配置已保存，开始对话吧')
+          closeWizard()
+          await boot({ keep: true })
+        } else {
+          btn.disabled = false
+          toast('保存失败：' + (r.error ?? ''), true)
+        }
+      }
+    }),
+  )
+  el.querySelector('#wPreset')?.addEventListener('change', (e) => {
+    if (e.target.value) $('#wBase').value = e.target.value
+  })
+  el.querySelectorAll('input[name="wProfile"]').forEach((r) =>
+    r.addEventListener('change', () => {
+      W.profile = r.value
+      renderWizard()
+    }),
+  )
+  el.querySelectorAll('[data-order]').forEach((cb) =>
+    cb.addEventListener('change', () => {
+      const id = cb.dataset.order
+      const set = new Set(W.order)
+      if (cb.checked) set.add(id)
+      else set.delete(id)
+      // 保持目录顺序，避免顺序跳来跳去
+      W.order = W.catalog.search.map((p) => p.id).filter((x) => set.has(x))
+      renderWizard()
+    }),
+  )
+}
+
 /* -------------------------------- streaming -------------------------------- */
 
 async function startStream({ userText, regenerate = false, editId }) {
@@ -928,8 +1210,9 @@ async function renderProactivePanel() {
 async function renderSettingsPanel() {
   const el = $('#panelSettings')
   const c = S.boot.config
-  const [mcp, screen] = await Promise.all([api('mcp'), api('screen')])
+  const [mcp, screen, providers, perms] = await Promise.all([api('mcp'), api('screen'), api('providers'), api('permissions').catch(() => null)])
   S.screen = screen
+  W.catalog = providers
   el.innerHTML = `
     <div class="sect">
       <h4>对话</h4>
@@ -940,19 +1223,36 @@ async function renderSettingsPanel() {
       <div class="field"><label>系统提示词</label><textarea id="setSystem">${esc(c.systemPrompt)}</textarea></div>
     </div>
     <div class="sect">
-      <h4>联网</h4>
+      <h4>联网搜索</h4>
       <div class="switch"><span>允许联网搜索</span><input type="checkbox" id="setSearchOn" ${c.search.enabled ? 'checked' : ''} /></div>
-      <div class="field"><label>搜索引擎</label>
-        <select id="setProvider">
-          <option value="auto" ${c.search.provider === 'auto' ? 'selected' : ''}>自动（360/Bing 抓取，失败回退阿里云托管）</option>
-          <option value="fast" ${c.search.provider === 'fast' ? 'selected' : ''}>只用本地抓取（最快）</option>
-          <option value="native" ${c.search.provider === 'native' ? 'selected' : ''}>只用阿里云托管 web_search（慢，约 30s）</option>
-        </select></div>
-      <div class="field"><label>搜索结果条数 <b>${c.search.maxResults}</b></label>
+      <p class="muted small" style="margin:6px 0">勾选要用的提供方，按顺序依次尝试（前面的失败自动交给下一个，保存后生效）。密钥写进本机 echo.env，不进仓库。</p>
+      ${wizardChainRows()}
+      <div class="field" style="margin-top:10px"><label>搜索结果条数 <b>${c.search.maxResults}</b></label>
         <input type="range" id="setCount" min="3" max="10" step="1" value="${c.search.maxResults}" /></div>
       <div class="switch"><span>自动读取首条结果正文</span><input type="checkbox" id="setReadPages" ${c.search.readPages ? 'checked' : ''} /></div>
       <div class="field"><label>一轮回答最多调用工具次数 <b>${c.search.maxToolRounds}</b></label>
         <input type="range" id="setRounds" min="1" max="12" step="1" value="${c.search.maxToolRounds}" /></div>
+      <div class="row"><button class="btn small" data-action="search-test">测试搜索链路</button></div>
+    </div>
+    <div class="sect">
+      <h4>引导与权限</h4>
+      <div class="row">
+        <button class="btn small" data-action="rerun-wizard">重新运行引导</button>
+        <span class="muted small">端点 ${c.upstreamConfigured ? '已配置' : '未配置'} · 记忆档 ${esc(c.memory.profile ?? 'standard')} · 搜索链 ${esc((c.search.order ?? []).join(' → ') || '不联网')}</span>
+      </div>
+      ${
+        perms
+          ? `<div class="chain" style="margin-top:8px">
+              <div class="chain-row"><span class="idx">${perms.configured ? '✓' : '!'}</span><span style="flex:1">模型端点${perms.configured ? '已配置' : '未配置'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.runningUnderLaunchd ? '✓' : '!'}</span><span style="flex:1">${perms.runningUnderLaunchd ? 'launchd 常驻中（登录自启）' : '手动启动：跑 ./install.sh 让它常驻'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.tools.swiftc ? '✓' : '!'}</span><span style="flex:1">swiftc ${perms.tools.swiftc ? '可用' : '缺失（xcode-select --install）'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.authRequired ? '✓' : '·'}</span><span style="flex:1">${perms.authRequired ? '已开启口令验证' : '免登录（本机自用）'} · ${esc(perms.bind)} :${perms.port}</span></div>
+              <div class="chain-row"><span class="idx">·</span><span style="flex:1">数据目录：${esc(perms.dataDir)}</span></div>
+            </div>
+            <div class="row" style="margin-top:8px"><button class="btn small" data-action="perm-test">测试屏幕录制权限</button>
+            <span class="muted small" id="permOut">${esc(perms.notes.screen)}</span></div>`
+          : '<div class="muted small">权限信息读取失败</div>'
+      }
     </div>
     <div class="sect">
       <h4>自我报告 <span class="muted small">· 来自本机 metrics.jsonl</span></h4>
@@ -1017,6 +1317,10 @@ async function renderSettingsPanel() {
     </div>
     <div class="sect">
       <h4>记忆</h4>
+      <div class="field"><label>记忆档位（选档会一次性写实下面的具体旋钮）</label>
+        <select id="setProfile">${Object.entries(providers.profiles)
+          .map(([id, p]) => `<option value="${id}" ${(c.memory.profile ?? 'standard') === id ? 'selected' : ''}>${esc(p.label)}</option>`)
+          .join('')}</select></div>
       <div class="switch"><span>启用长期记忆</span><input type="checkbox" id="setMemOn" ${c.memory.enabled ? 'checked' : ''} /></div>
       <div class="switch"><span>对话后自动抽取事实</span><input type="checkbox" id="setExtract" ${c.memory.extract ? 'checked' : ''} /></div>
       <div class="switch"><span>把记忆注入提示词</span><input type="checkbox" id="setInject" ${c.memory.inject ? 'checked' : ''} /></div>
@@ -1074,12 +1378,19 @@ async function saveSettings() {
       systemPrompt: $('#setSystem').value,
       search: {
         enabled: $('#setSearchOn').checked,
-        provider: $('#setProvider').value,
+        order: $$('#panelSettings [data-order]').filter((cb) => cb.checked).map((cb) => cb.dataset.order),
+        providers: (() => {
+          const out = {}
+          $$('#panelSettings [data-pcfg]').forEach((i) => {
+            if (i.value.trim()) out[i.dataset.pcfg] = { endpoint: i.value.trim() }
+          })
+          return out
+        })(),
         maxResults: Number($('#setCount').value),
         readPages: $('#setReadPages').checked,
         maxToolRounds: Number($('#setRounds').value),
       },
-      memory: { enabled: $('#setMemOn').checked, extract: $('#setExtract').checked, inject: $('#setInject').checked },
+      memory: { enabled: $('#setMemOn').checked, extract: $('#setExtract').checked, inject: $('#setInject').checked, profile: $('#setProfile')?.value ?? undefined },
       screen: {
         enabled: $('#setScreenOn').checked,
         intervalMinutes: Number($('#setScreenGap').value),
@@ -1100,7 +1411,11 @@ async function saveSettings() {
       },
     },
   }
-  await api('settings', { method: 'PATCH', body })
+  const env = {}
+  $$('#panelSettings [data-pkey]').forEach((i) => {
+    if (i.value.trim()) env[i.dataset.pkey] = i.value.trim()
+  })
+  await api('settings', { method: 'PATCH', body: { config, env } })
   $('#setSaved').textContent = '已保存，立即生效'
   toast('设置已保存')
   await boot({ keep: true })
@@ -1151,6 +1466,10 @@ async function boot({ keep = false } = {}) {
   const target = keep && S.current ? S.current : b.main?.id ?? S.convs[0]?.id
   if (target) await selectConv(target)
   startPolling()
+  // 没配置端点/密钥时，直接把引导推上来（可随时"以后再配"）
+  if (b.config.onboarding?.needed && !localStorage.getItem('echo.onboardSkipped')) {
+    openWizard().catch(() => {})
+  }
 }
 
 function startPolling() {
@@ -1406,6 +1725,18 @@ document.addEventListener('click', async (e) => {
     toast(`已清空：${r.before.observations} 条事实${scope === 'all' ? `、${r.wiped.conversations} 个会话` : ''}`)
     await boot({ keep: true })
     return renderSettingsPanel()
+  }
+  if (act === 'rerun-wizard') {
+    closeDrawer()
+    return openWizard({ restart: true })
+  }
+  if (act === 'perm-test') {
+    const out = $('#permOut')
+    if (out) out.textContent = '测试中（系统可能弹授权窗）…'
+    const r = await api('permissions/screen-test', { method: 'POST', body: {} })
+    toast(r.granted ? '屏幕录制权限已就绪' : r.hint, !r.granted)
+    if (out) out.textContent = r.granted ? '✓ 已授权，能抓到画面' : `✗ ${r.hint}`
+    return
   }
   if (act === 'save-settings') return saveSettings()
   if (act === 'mcp-reload') {

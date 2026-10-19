@@ -595,7 +595,89 @@ async function simulatePolicy() {
   }
   return { bandit: banditHits / rounds, fixed: fixedHits / rounds }
 }
-  async function trackLive() {
+  async function trackModularity() {
+  section('H 解耦与引导（BYOK / 搜索提供方 / 记忆档位）')
+  const providers = await import(path.join(ROOT, 'lib/providers.mjs'))
+
+  // 1. 目录完整性：这是社区用户改配置时唯一的"说明书"
+  const cat = await req('/api/providers')
+  const up = cat.json?.upstream ?? []
+  const search = cat.json?.search ?? []
+  check(
+    'H',
+    '上游预设齐全且没有把某家当默认',
+    up.length >= 5 && up.filter((p) => /^https?:\/\//.test(p.baseUrl)).length >= 4 && up.some((p) => p.id === 'custom'),
+    up.map((p) => p.id).join(','),
+  )
+  const ids = ['none', 'scrape', 'gateway', 'tavily', 'brave', 'bocha', 'searxng', 'custom']
+  check('H', '搜索提供方目录齐全（含自带 key 与自建实例）', ids.every((id) => search.some((p) => p.id === id)), search.map((p) => `${p.id}${p.ready ? '' : '✗'}`).join(' '))
+  check('H', '提供方都声明了是否需 key 与就绪原因', search.every((p) => typeof p.needsKey === 'boolean' && typeof p.ready === 'boolean'), search.find((p) => !p.ready)?.reason ?? '')
+  check('H', '记忆档位四档齐全', ['off', 'light', 'standard', 'deep'].every((k) => cat.json.profiles?.[k]), Object.keys(cat.json.profiles ?? {}).join(','))
+
+  // 2. 引导：沙箱里没有 echo.env → 应该要求引导；走完一遍后应该"能用"
+  const before = (await req('/api/providers')).json.onboarding
+  check('H', '没配置端点/密钥时会要求引导', before.needed === true, JSON.stringify({ needed: before.needed, hasKey: before.hasKey, hasBaseUrl: before.hasBaseUrl }))
+  const done = await req('/api/onboarding/complete', {
+    method: 'POST',
+    body: {
+      baseUrl: 'https://example.invalid/v1',
+      apiKey: 'sk-selftest-not-a-real-key',
+      models: ['model-a', 'model-b'],
+      defaultModel: 'model-a',
+      utilityModel: 'model-b',
+      profile: 'light',
+      search: { order: ['gateway'], providers: {} },
+      keys: { TAVILY_API_KEY: 'tvly-selftest' },
+    },
+  })
+  check('H', '引导能一次性写完整套配置', done.status === 200 && done.json?.ok === true, `envKeys=${(done.json?.envKeys ?? []).join(',')}`)
+  const after = (await req('/api/providers')).json.onboarding
+  check('H', '引导完成后不再打扰（usable）', after.usable === true && after.needed === false, JSON.stringify({ usable: after.usable, modelCount: after.modelCount }))
+  const envRaw = await fs.readFile(path.join(sandbox, 'echo.env'), 'utf8')
+  const envMode = (await fs.stat(path.join(sandbox, 'echo.env'))).mode & 0o777
+  check('H', '密钥写进 echo.env 且权限 600（不进 config.json）', envRaw.includes('OPENAI_API_KEY=sk-selftest') && envRaw.includes('TAVILY_API_KEY=tvly-selftest') && envMode === 0o600, `mode=${envMode.toString(8)}`)
+  const cfgRaw = await fs.readFile(process.env.ECHO_CONFIG, 'utf8')
+  check('H', 'config.json 里不出现任何密钥值', !cfgRaw.includes('sk-selftest') && !cfgRaw.includes('tvly-selftest'))
+  const bootCfg = (await req('/api/bootstrap')).json.config
+  check('H', '记忆档位 light 已展开为具体旋钮', bootCfg.memory.profile === 'light' && bootCfg.dream.enabled === false && bootCfg.proactive.enabled === false, `dream=${bootCfg.dream.enabled} proactive=${bootCfg.proactive.enabled}`)
+
+  // 3. 搜索链：顺序被尊重、none 表示明确不联网、缺 key 的提供方会给出原因
+  await req('/api/settings', { method: 'PATCH', body: { config: { search: { order: ['tavily'] } }, env: { TAVILY_API_KEY: '' } } })
+  const tavilyOnly = await req('/api/search/test', { method: 'POST', body: { query: 'x' } })
+  check('H', '缺密钥的提供方给出可读原因（而不是静默失败）', (tavilyOnly.json?.attempts ?? [])[0]?.error?.includes('TAVILY_API_KEY'), JSON.stringify(tavilyOnly.json?.attempts))
+  await req('/api/settings', { method: 'PATCH', body: { config: { search: { order: ['scrape', 'gateway'] } } } })
+  const toolsMod = await import(path.join(ROOT, 'lib/tools.mjs'))
+  const { loadConfig } = await import(path.join(ROOT, 'lib/config.mjs'))
+  await req('/api/settings', { method: 'PATCH', body: { config: { search: { order: ['none'] } } } })
+  const cfgNone = await loadConfig()
+  const offRegistry = toolsMod.buildToolRegistry({ cfg: cfgNone, mcp: null, conversationId: 'main', searchMode: 'auto' })
+  check('H', '搜索链设为 none 时不再下发联网工具', !offRegistry.defs.some((d) => d.function.name === 'web_search'), offRegistry.defs.map((d) => d.function.name).join(','))
+  await req('/api/settings', { method: 'PATCH', body: { config: { search: { order: ['scrape', 'gateway'] } } } })
+  const cfgOn = await loadConfig()
+  const onRegistry = toolsMod.buildToolRegistry({ cfg: cfgOn, mcp: null, conversationId: 'main', searchMode: 'auto' })
+  check('H', '恢复默认链后联网工具回来', onRegistry.defs.some((d) => d.function.name === 'web_search'))
+
+  // 4. 出图工具只在配了出图模型时出现
+  await req('/api/settings', { method: 'PATCH', body: { config: { upstream: { imageModels: [] } } } })
+  const noImg = toolsMod.buildToolRegistry({ cfg: await loadConfig(), mcp: null, conversationId: 'main', searchMode: 'auto' })
+  check('H', '没配出图模型时不提供 image_gen', !noImg.defs.some((d) => d.function.name === 'image_gen'))
+
+  // 5. 权限与常驻状态可查
+  const perms = await req('/api/permissions')
+  check('H', '权限/常驻状态可查（含 bind、数据目录、工具探测）', typeof perms.json?.tools?.swiftc === 'boolean' && perms.json?.bind && perms.json?.dataDir === sandbox, JSON.stringify({ swiftc: perms.json?.tools?.swiftc, bind: perms.json?.bind }))
+
+  // 6. 去自用痕迹：默认值里不能替用户选好某家厂商
+  const cfgSrc = await fs.readFile(path.join(ROOT, 'lib', 'config.mjs'), 'utf8')
+  const installSrc = await fs.readFile(path.join(ROOT, 'install.sh'), 'utf8')
+  check('H', '默认配置不预设任何厂商端点（BYOK）', /baseUrl:\s*''/.test(cfgSrc) && !/upstream:[\s\S]{0,400}aliyuncs\.com/.test(cfgSrc), 'config.mjs upstream.baseUrl 为空')
+  check('H', '安装脚本不再把某家网关当默认', !/BASEURL:-https?:\/\//.test(installSrc))
+
+  // 收尾：恢复沙箱默认，避免影响后续实时轨
+  await req('/api/settings', { method: 'PATCH', body: { config: { memory: { profile: 'standard' } } } })
+  void providers
+}
+
+async function trackLive() {
   section('F 实时链路（会调用模型）')
   const hasKey = Boolean((await req('/api/bootstrap')).json?.upstream?.hasKey)
   if (!LIVE || !hasKey) {
@@ -666,6 +748,7 @@ async function main() {
     ['C', trackMemory],
     ['D', trackContext],
     ['E', trackRuntime],
+    ['H', trackModularity],
     ['G', trackAgency],
     ['F', trackLive],
   ]

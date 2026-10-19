@@ -1,6 +1,6 @@
 {
   "name": "echo-assistant",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "description": "跑在自己 Mac 上的私人对话窗口：零第三方依赖、分层记忆、可解释遗忘、主动服务、屏幕感知",
   "type": "module",

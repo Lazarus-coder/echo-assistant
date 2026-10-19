@@ -31,7 +31,17 @@ else
   info "从你的登录 shell 读取 OPENAI_API_KEY / OPENAI_BASE_URL（不会回显）…"
   KEY="$(zsh -ic 'printf "%s" "${OPENAI_API_KEY:-}"' 2>/dev/null || true)"
   BASEURL="$(zsh -ic 'printf "%s" "${OPENAI_BASE_URL:-}"' 2>/dev/null || true)"
-  BASEURL="${BASEURL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
+  if [ -z "$BASEURL" ]; then
+    echo "常用端点："
+    echo "  1) OpenAI                https://api.openai.com/v1"
+    echo "  2) 阿里云百炼(兼容模式)  https://dashscope.aliyuncs.com/compatible-mode/v1"
+    echo "  3) DeepSeek              https://api.deepseek.com/v1"
+    echo "  4) Moonshot(Kimi)        https://api.moonshot.cn/v1"
+    echo "  5) OpenRouter            https://openrouter.ai/api/v1"
+    echo "  6) Ollama(本机)          http://127.0.0.1:11434/v1"
+    printf '模型端点 Base URL（或直接回车，稍后在网页引导里填）: '
+    read -r BASEURL
+  fi
   if [ -z "$KEY" ]; then
     printf 'shell 里没有 OPENAI_API_KEY，直接贴一个（输入不回显）: '
     read -rs KEY; echo

@@ -1,9 +1,10 @@
+import { spawn } from 'node:child_process'
 import http from 'node:http'
 import crypto from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
-import { loadConfig, saveConfig, upstreamCreds, P, DATA, ROOT } from './lib/config.mjs'
+import { loadConfig, saveConfig, upstreamCreds, deepMerge, P, DATA, ROOT } from './lib/config.mjs'
 import { loadEnvFile } from './lib/env.mjs'
 import { log } from './lib/log.mjs'
 import { readJSON, writeJSON, nowIso, clip, assertId, newId } from './lib/util.mjs'
@@ -60,6 +61,13 @@ import {
 } from './lib/screen.mjs'
 import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
+import {
+  UPSTREAM_PRESETS,
+  MEMORY_PROFILES,
+  DEFAULT_SEARCH_ORDER,
+  searchProviderCatalog,
+  memoryProfileValues,
+} from './lib/providers.mjs'
 
 // 版本号只有一个来源：package.json（自测里有一条断言禁止两边漂移）
 const VERSION = await (async () => {
@@ -308,6 +316,145 @@ async function maybeExtractMemory(conv, assistant) {
   }
 }
 
+/* ------------------------------ 引导与提供方 ------------------------------ */
+
+function onboardingState() {
+  const creds = upstreamCreds()
+  const hasModels = (cfg.upstream?.models ?? []).length > 0
+  // 已经能用（有端点+密钥+模型清单）就不打扰；否则把引导推上来
+  const usable = creds.configured && hasModels
+  return {
+    needed: !usable && cfg.onboarding?.completed !== true,
+    completed: cfg.onboarding?.completed === true,
+    usable,
+    hasKey: Boolean(creds.apiKey),
+    hasBaseUrl: Boolean(creds.baseUrl),
+    apiKeyEnv: creds.apiKeyEnv,
+    baseUrlEnv: creds.baseUrlEnv,
+    baseUrl: creds.baseUrl,
+    modelCount: (cfg.upstream.models ?? []).length,
+    searchOrder: cfg.search?.order ?? DEFAULT_SEARCH_ORDER,
+    profile: cfg.memory?.profile ?? 'standard',
+  }
+}
+
+/** 合并写入 data/echo.env（只动指定键，其它行原样保留），并立即生效。 */
+/** 档位 → 具体配置：memoryProfileValues 给的是跨段补丁，必须在顶层合并。 */
+function applyProfilePatch(patch, profileId) {
+  const values = profileId ? memoryProfileValues(profileId) : null
+  if (!values) return patch
+  const { profile, ...rest } = values
+  return deepMerge(deepMerge(patch, { memory: { profile } }), rest)
+}
+
+async function writeEnvValues(values) {
+  const file = P.env
+  let lines = []
+  try {
+    lines = (await fs.readFile(file, 'utf8')).split('\n').filter((l) => l.trim() && !l.trim().startsWith('#'))
+  } catch {}
+  const keep = new Map()
+  for (const line of lines) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
+    if (m) keep.set(m[1], m[2])
+  }
+  let removed = 0
+  for (const [k, v] of Object.entries(values ?? {})) {
+    if (v === undefined || v === null) continue
+    if (String(v) === '') {
+      // 显式清空 = 删除该密钥（界面不会发空值，只有明确的"清除"才会走到这）
+      if (keep.delete(k)) removed++
+      delete process.env[k]
+      continue
+    }
+    keep.set(k, v)
+    process.env[k] = v
+  }
+  if (removed) log.warn(`已从 echo.env 移除 ${removed} 个密钥`)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  await fs.writeFile(file, `${[...keep.entries()].map(([k, v]) => `${k}=${v}`).join('\n')}${keep.size ? '\n' : ''}`, { mode: 0o600 })
+  await fs.chmod(file, 0o600).catch(() => {})
+  return [...keep.keys()]
+}
+
+/** BYOK 引导页第二步用：拿 key 去问端点有哪些模型。 */
+async function discoverModels({ baseUrl, apiKey }) {
+  const base = String(baseUrl ?? '').replace(/\/+$/, '')
+  if (!/^https?:\/\//.test(base)) throw new Error('端点地址要写成 https://… 的完整 URL')
+  if (!apiKey) throw new Error('缺少 API Key')
+  const res = await fetch(`${base}/models`, {
+    headers: { authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(20000),
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`端点返回 HTTP ${res.status}：${text.slice(0, 160)}`)
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error('端点没有返回 JSON，请确认是 OpenAI 兼容的 /v1 地址')
+  }
+  const models = (data.data ?? data.models ?? []).map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+  return { baseUrl: base, count: models.length, models: models.slice(0, 400) }
+}
+
+async function permissionsReport() {
+  const { apiKey, baseUrl } = upstreamCreds()
+  const has = (cmd, args = ['--version']) =>
+    new Promise((resolve) => {
+      const p = spawn(cmd, args, { stdio: 'ignore' })
+      p.on('error', () => resolve(false))
+      p.on('exit', (code) => resolve(code === 0))
+    })
+  const [swiftc, screencapture] = await Promise.all([
+    has('/usr/bin/xcrun', ['--find', 'swiftc']),
+    fs
+      .access('/usr/sbin/screencapture')
+      .then(() => true)
+      .catch(() => false),
+  ])
+  return {
+    node: process.version,
+    platform: process.platform,
+    port: Number(process.env.ECHO_PORT ?? cfg.port),
+    bind: (process.env.ECHO_BIND ?? cfg.bind) === 'all' ? '0.0.0.0（局域网可访问）' : '127.0.0.1（仅本机）',
+    lanAddresses: lanAddresses(),
+    authRequired: cfg.requirePassword === true,
+    configured: Boolean(apiKey && baseUrl),
+    runningUnderLaunchd: process.ppid === 1 || Boolean(process.env.XPC_SERVICE_NAME),
+    dataDir: DATA,
+    tools: { swiftc, screencapture },
+    notes: {
+      screen: '屏幕感知需要「屏幕录制」权限：点状态栏图标里的授权项，或在 系统设置 → 隐私与安全性 → 屏幕录制 里勾选 EchoBar。授权后重启状态栏图标。',
+      swifts: swiftc ? '可以编译状态栏 App（./bin/echo up 用的是已编译好的 build/EchoBar）' : '没找到 swiftc：先装 Xcode Command Line Tools（xcode-select --install）再跑 ./install.sh',
+      notifications: '主动消息用 osascript 发通知；首次可能需要在 系统设置 → 通知 里允许',
+      persist: '常驻与开机自启用 ./install.sh 注册 launchd：com.echo.chat（服务）+ com.echo.menubar（图标）',
+      store: '所有数据都在本机 data/ 目录：明文可读、可备份、可删除',
+    },
+  }
+}
+
+/** 屏幕录制权限探测：真抓一张（会触发系统弹窗），据此判断是否授权。 */
+async function screenPermissionProbe() {
+  const file = path.join(DATA, 'spool', `.perm-probe-${Date.now()}.jpg`)
+  await fs.mkdir(path.dirname(file), { recursive: true })
+  try {
+    const ok = await new Promise((resolve) => {
+      const p = spawn('/usr/sbin/screencapture', ['-x', '-t', 'jpg', file], { stdio: 'ignore' })
+      p.on('error', () => resolve(false))
+      p.on('exit', (code) => resolve(code === 0))
+    })
+    const size = await fs.stat(file).then((s) => s.size).catch(() => 0)
+    return {
+      granted: ok && size > 2000,
+      bytes: size,
+      hint: ok && size > 2000 ? '已授权' : '未授权或抓不到画面：到 系统设置 → 隐私与安全性 → 屏幕录制 勾选 EchoBar（或你启动它的终端），然后重启状态栏图标',
+    }
+  } finally {
+    await fs.rm(file, { force: true }).catch(() => {})
+  }
+}
+
 /* ---------------------------------- routes --------------------------------- */
 
 async function api(req, res, url) {
@@ -414,9 +561,14 @@ async function api(req, res, url) {
 
   if (method === 'PATCH' && p === 'settings') {
     const body = await readBody(req)
-    const patch = body.config ?? {}
-    delete patch.upstream?.modelsRaw
+    let patch = body.config ?? {}
+    // 记忆档位是预设：选档就把具体旋钮一次性写实，避免"档位与数值打架"
+    if (patch.memory?.profile) patch = applyProfilePatch(patch, patch.memory.profile)
     cfg = await saveConfig(patch)
+    if (body.env && typeof body.env === 'object') {
+      const written = await writeEnvValues(body.env)
+      if (written.length) log.info(`设置页写入密钥：${written.join(',')}`)
+    }
     if (body.restartMcp) await connectMcp()
     return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
   }
@@ -585,6 +737,59 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true, scope, before, wiped, stats: await memoryStats() })
   }
 
+  /* --------------------------- 引导 / 提供方 / 权限 --------------------------- */
+  if (method === 'GET' && p === 'providers') {
+    return send(res, 200, {
+      upstream: UPSTREAM_PRESETS,
+      search: searchProviderCatalog(cfg),
+      profiles: Object.fromEntries(Object.entries(MEMORY_PROFILES).map(([id, v]) => [id, { label: v.label, note: v.note }])),
+      onboarding: onboardingState(),
+    })
+  }
+
+  if (method === 'POST' && p === 'onboarding/test') {
+    const body = await readBody(req)
+    try {
+      const r = await discoverModels({ baseUrl: body.baseUrl ?? cfg.upstream.baseUrl, apiKey: String(body.apiKey ?? '').trim() || upstreamCreds().apiKey })
+      return send(res, 200, { ok: true, ...r })
+    } catch (err) {
+      return send(res, 200, { ok: false, error: err.message })
+    }
+  }
+
+  if (method === 'POST' && p === 'onboarding/complete') {
+    const body = await readBody(req)
+    const envValues = {}
+    const keyName = String(body.apiKeyEnv || cfg.upstream.apiKeyEnv || 'OPENAI_API_KEY')
+    if (body.apiKey) envValues[keyName] = String(body.apiKey).trim()
+    for (const [k, v] of Object.entries(body.keys ?? {})) if (/^[A-Z0-9_]+$/.test(k) && v) envValues[k] = String(v).trim()
+    const written = await writeEnvValues(envValues)
+
+    const upstream = {}
+    if (body.baseUrl) upstream.baseUrl = String(body.baseUrl).replace(/\/+$/, '')
+    if (Array.isArray(body.models) && body.models.length) {
+      upstream.models = body.models.map((m) => (typeof m === 'string' ? { id: m, label: m, group: '已发现' } : m))
+    }
+    if (body.defaultModel) upstream.defaultModel = body.defaultModel
+    if (body.utilityModel) upstream.utilityModel = body.utilityModel
+    if (Array.isArray(body.imageModels) && body.imageModels.length) {
+      upstream.imageModels = body.imageModels
+      upstream.defaultImageModel = body.defaultImageModel ?? body.imageModels[0]?.id ?? ''
+    }
+    const patch = applyProfilePatch({ onboarding: { completed: true, at: nowIso() }, upstream }, body.profile)
+    if (body.search?.order) patch.search = { order: body.search.order.filter((x) => typeof x === 'string') }
+    if (body.search?.providers) patch.search = { ...(patch.search ?? {}), providers: body.search.providers }
+    if (body.password && String(body.password).length >= 6) await setPassword(String(body.password))
+
+    cfg = await saveConfig(patch)
+    if (body.restartMcp) await connectMcp()
+    log.info(`引导完成：端点 ${cfg.upstream.baseUrl || '(来自环境变量)'} · 模型 ${cfg.upstream.models.length} 个 · 记忆档 ${cfg.memory.profile} · 搜索链 ${(cfg.search.order ?? []).join('→')}${written.length ? ` · 写入密钥 ${written.join(',')}` : ''}`)
+    return send(res, 200, { ok: true, envKeys: written, onboarding: onboardingState(), config: publicConfig(cfg) })
+  }
+
+  if (method === 'GET' && p === 'permissions') return send(res, 200, await permissionsReport())
+  if (method === 'POST' && p === 'permissions/screen-test') return send(res, 200, await screenPermissionProbe())
+
   /* -------------------------------- 图谱 ------------------------------- */
   if (method === 'GET' && p === 'graph') {
     const [stats, entities] = await Promise.all([graphStats(), entitySummary()])
@@ -739,8 +944,8 @@ async function api(req, res, url) {
 }
 
 function upstreamReady() {
-  const { apiKey, baseUrl } = upstreamCreds()
-  return { hasKey: Boolean(apiKey), baseUrl, models: cfg.upstream.models.map((m) => m.id) }
+  const { apiKey, baseUrl, apiKeyEnv, baseUrlEnv, configured } = upstreamCreds()
+  return { hasKey: Boolean(apiKey), baseUrl, apiKeyEnv, baseUrlEnv, configured, models: (cfg.upstream.models ?? []).map((m) => m.id) }
 }
 
 /** 隐私兜底：把记忆（可选连同会话）清空，但在遗忘日志里留一条可解释的记录。 */
@@ -826,6 +1031,9 @@ function publicConfig(c) {
     bind: c.bind,
     port: c.port,
     auth: { required: c.requirePassword === true, passwordSet: authState.passwordSet },
+    onboarding: onboardingState(),
+    providers: { search: searchProviderCatalog(c), upstream: UPSTREAM_PRESETS, profiles: Object.keys(MEMORY_PROFILES) },
+    upstreamConfigured: Boolean(upstreamCreds(c).configured),
     models: c.upstream.models,
     imageModels: c.upstream.imageModels ?? [],
     defaultImageModel: c.upstream.defaultImageModel,

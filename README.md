@@ -1,179 +1,178 @@
-# Echo · 本地私人对话窗口
+<div align="center">
 
-跑在你自己 Mac 上的对话窗口：调用你的 token plan API，长期常驻，带**分层记忆**、**可解释的遗忘**、**主动服务**、**屏幕感知**，状态栏有图标，手机在同一 WiFi 下也能用。
+# Echo
 
-设计原则：**轻、可控、可解释**。零第三方依赖（只用 Node 内置模块 + 一个本地编译的 Swift 状态栏 App），所有数据都在 `data/` 里，明文可读、可备份、可删除。
+> We are not what we remember, but what we forget.
 
-> English: [README.en.md](README.en.md) · 同类项目调研与设计取舍：[docs/landscape.md](docs/landscape.md) · 自我改进日志：[docs/rsi-log.md](docs/rsi-log.md)
+![Local-first](https://img.shields.io/badge/local--first-yes-2f6f57?style=flat-square)
+![Zero dependencies](https://img.shields.io/badge/npm%20dependencies-0-2f6f57?style=flat-square)
+![BYOK](https://img.shields.io/badge/BYOK-own%20API%20key-2f6f57?style=flat-square)
+![macOS](https://img.shields.io/badge/macOS-Homebrew%20Node%20%E2%89%A520-2f6f57?style=flat-square)
+![Status](https://img.shields.io/badge/status-alpha-orange?style=flat-square)
 
-## 它特别在哪（与同类项目对照）
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#why-echo">Why Echo</a> ·
+  <a href="#memory--forgetting">Memory</a> ·
+  <a href="#search-providers">Search</a> ·
+  <a href="#first-run-byok-onboarding">Onboarding</a> ·
+  <a href="#permissions">Permissions</a> ·
+  <a href="docs/landscape.md">Landscape</a> ·
+  <a href="docs/rsi-log.md">Self-improvement log</a> ·
+  <a href="README.zh-CN.md">中文</a>
+</p>
 
-借鉴了 MemGPT/Letta 的"记忆块 + 上下文编译 + 睡时改写"、Mem0 的"抽取→调和式写入"、Zep 的"实体入图检索"，以及 screenpipe 的"本地优先上下文"。在这些之上，Echo 把力气花在几件少见的事上：
+<p align="center"><em>A private chat window that lives on your Mac.<br />
+Your own model endpoint (BYOK), layered memory that <b>forgets on purpose</b>,
+an assistant that speaks up only when it matters, and screen awareness that never leaves the machine.</em></p>
 
-1. **把遗忘做成一等公民，并且可解释**——强度 = 重要度 × 使用增益 × 时间衰减；命中强化、久不用淡出、超容量按强度淘汰；每次遗忘都写进 `memory/forgetting.md`，说清忘了什么、为什么、依据哪个数字。可保护、可复活、可手动忘掉。同类项目普遍只做"记住 + 检索"。
-2. **主动性是可测量的闭环**——Thompson 采样 bandit 选开口类型（奖励=你是否接住，6 小时未回应按 0 结算）+ 门槛自适应 + 台账 EV 排序 + 静默/预算/降速门禁；被接住率在自报告里可见。离线回放比固定策略高 31–51%。
-3. **屏幕感知的"瞬时理解"形态**——本地 OCR 只发文字、截图分析完即删、工作记忆有 TTL 只用于当下判断；对照"持续录制 + 可搜索历史"的另一条路：不做第二记忆库。
-4. **零依赖 + 全明文可审计**——0 个 npm 包、无向量库、无数据库；打开文件就能看懂它记住了什么、忘了什么。
-5. **工程化预算与韧性**——磁盘预算（超 80% 从最旧删、被引用图片永不删）、搜索熔断器、模型降级链、上下文预算 + 滚动摘要、`metrics.jsonl` 自报告。
-6. **内建 RSI 纪律**——60 项冻结判据、隔离沙箱自测、迭代日志，只增严不放松。
-
-诚实的短板也写在 [docs/landscape.md](docs/landscape.md) 里（无向量检索、图谱无双时态、bandit 无上下文特征、屏幕是快照非事件流）。
+</div>
 
 ---
 
-## 快速开始
+Echo is a local-first personal assistant. It talks to any OpenAI-compatible endpoint you point it at, stays resident via `launchd`, keeps its menu-bar icon in your status bar, and stores everything it knows as plain files under `data/` that you can read, back up, or delete.
+
+Built with **zero npm dependencies**: Node built-ins on the server, one page of vanilla JS in the browser, and a small Swift menu-bar app compiled locally.
+
+> 中文版：[README.zh-CN.md](README.zh-CN.md) · Design trade-offs vs. existing work (with sources): [docs/landscape.md](docs/landscape.md) · Permissions & residency: [docs/permissions.md](docs/permissions.md)
+
+<a id="why-echo"></a>
+## Why Echo
+
+Echo borrows the good parts of existing work — Letta/MemGPT's memory blocks and sleep-time rewriting, Mem0's extract-then-reconcile writes, Zep's entity graphs, screenpipe's local-first context — and spends its effort on a few things that are rare in the field.
+
+**1. Forgetting is a first-class, explainable feature.**
+Strength = importance × usage gain × exponential decay. Being retrieved strengthens a fact (spaced repetition); unused facts *fade* — not deleted, revivable; over capacity the weakest are evicted first. Every fade and deletion is written to `memory/forgetting.md` with the reason and the numbers behind it. You can protect, revive, or explicitly forget anything, and the assistant can explain what it dropped and why.
+
+**2. Proactivity is a measurable closed loop.**
+Thompson-sampling bandit picks *which kind* of nudge to send (reward = you engaged; a six-hour silence settles as 0), thresholds adapt per kind, a deterministic EV ranking picks *which follow-up* to raise, and gates (quiet hours, daily budget, minimum gap, back-off after being ignored) decide *whether* to speak at all. Engagement rate is visible in the self-report; offline replay beats a fixed rotation by 31–51%.
+
+**3. Screen awareness means "understand now", not "record everything".**
+The menu-bar app captures on an interval and runs **on-device OCR** (Apple Vision). By default only the extracted *text* is sent to your model — the image never leaves the machine, the temporary file is deleted right after analysis, and the working set expires. Locked screen, idle keyboard, and anything on your block-list are skipped entirely.
+
+**4. Zero dependencies, fully auditable state.**
+No vector database, no orchestration framework, no Docker. Memory is `MEMORY.md` plus `observations.jsonl`; forgetting is a markdown log. Open any file and see exactly what it knows and why.
+
+**5. Budgeting and resilience are engineering, not afterthoughts.**
+Disk budgets for screenshots and images (prune oldest past 80% of budget; never delete images still referenced by recent chats), a **circuit breaker** for search engines (cool down instead of hammering), a **model fallback chain**, context budgeting with rolling digests, and a `metrics.jsonl` self-report (P50/P95 latency, tool success rates, engagement rate).
+
+**6. A frozen evaluator.**
+60+ assertions in `tests/selftest.mjs` run in an isolated sandbox (its own data dir and config), covering security invariants (SSRF/CSRF/XSS), memory & forgetting math, storage budgets, decision algorithms, BYOK/onboarding, and live end-to-end paths. The score sheet is only ever tightened — iterations are logged in [docs/rsi-log.md](docs/rsi-log.md).
+
+<a id="quick-start"></a>
+## Quick start
 
 ```bash
-./install.sh            # 一次性：写凭据 → 设口令 → 装 launchd 常驻 → 编译状态栏图标
-./bin/echo status       # 看状态（进程 / 健康 / 局域网地址 / 记忆与主动服务概览）
-./bin/echo open         # 打开对话窗口
-./bin/echo selftest     # 跑自测（隔离沙箱，不碰真实数据）
+git clone https://github.com/Lazarus-coder/echo-assistant.git && cd echo-assistant
+./install.sh          # credentials + launchd services + menu-bar build
+./bin/echo status     # process / health / LAN URL / memory & proactivity
+./bin/echo open       # open the chat window
 ```
 
-安装后会自动：登录即启动、崩溃自动拉起、状态栏出现 Echo 图标。
+On first launch the app walks you through **BYOK setup** (endpoint → key → models → memory profile → search chain → permissions). You can also skip it and configure `data/echo.env` yourself.
 
-| 命令 | 作用 |
+Requirements: macOS and Node ≥ 20. `swiftc` (Xcode Command Line Tools) is only needed for the menu-bar icon.
+
+| Command | What it does |
 |---|---|
-| `./bin/echo up / down / restart` | 启动 / 停止 / 重启服务 |
-| `./bin/echo logs` | 跟踪日志 |
-| `./bin/echo dream` | 立刻做一次记忆巩固 + 遗忘 |
-| `./bin/echo say` | 立刻判断一次"要不要主动说句话" |
-| `./bin/echo search <词>` | 测试搜索链路 |
-| `./bin/echo mcp` | 重新加载 MCP 服务 |
-| `./bin/echo passwd` | 改访问口令 |
-| `./bin/echo selftest --live` | 自测（含真实的对话/搜索/视觉/出图） |
+| `./bin/echo up / down / restart` | start / stop / restart the service |
+| `./bin/echo logs` | tail logs |
+| `./bin/echo dream` | run memory consolidation + forgetting now |
+| `./bin/echo say` | ask it once whether to proactively speak |
+| `./bin/echo diag` | self-report: latency, failures, tool success, storage, memory, graph |
+| `./bin/echo forget` | show what has faded or been forgotten, and why |
+| `./bin/echo remember <text>` | write a fact into memory |
+| `./bin/echo auth on\|off` | require a password or not (off by default) |
+| `./bin/echo search <query>` | test the search chain and engine health |
+| `./bin/echo selftest [--live]` | run the frozen evaluator (sandboxed; `--live` calls the model) |
 
-手机访问：同一 WiFi 下打开 `http://<Mac 的局域网 IP>:8787`，直接就能用（默认免登录）；Safari 里"添加到主屏幕"即可像 App 一样用（状态栏图标菜单里有一键复制地址）。公共网络下建议用 `./bin/echo auth on` 开启口令。
+Phone access: open `http://<mac-lan-ip>:8787` on the same Wi-Fi (no login by default) → “Add to Home Screen”. Turn on `./bin/echo auth on` on untrusted networks.
 
----
+<a id="memory--forgetting"></a>
+## Memory & forgetting
 
-## 它和普通套壳聊天窗口的区别
-
-### 1. 分层记忆（L0 → L3）
-
-| 层 | 存什么 | 生命周期 | 用途 |
+| Layer | Holds | Lifecycle | Used for |
 |---|---|---|---|
-| **L0 工作记忆** | 最近 90 分钟的屏幕活动摘要 | 自动过期、容量 400 条 | 让对话和主动服务知道"你此刻在做什么" |
-| **L1 即时事实** | 从对话与屏幕里抽取的稳定事实 | 强度衰减，久不用会淡出 | 检索召回、作为长期记忆的原料 |
-| **L2 核心记忆** | `data/memory/MEMORY.md` | 每次 Dream 重写 | 每轮对话注入，人也可以直接改 |
-| **L3 归档与图谱** | Dream 快照、遗忘日志、实体图 | 保留可回溯 | 审计、实体召回 |
+| **L0 working set** | screen-activity digests from the last ~90 min | auto-expiring, capped | knowing what you are doing *right now* |
+| **L1 facts** | stable facts extracted from chat and screen | strength decay, fades when unused | retrieval, raw material for long-term memory |
+| **L2 core** | `data/memory/MEMORY.md` | rewritten by Dream | injected into every turn; hand-editable |
+| **L3 archive & graph** | Dream snapshots, forgetting log, entity graph | retained for audit | auditability, entity recall |
 
-### 2. 会遗忘才叫记忆
+**Dream** runs while you are idle (or on demand): rewrites core memory, reconciles facts (ADD/UPDATE/DELETE), explicitly forgets stale items with reasons, revives wrongly-faded ones, produces a follow-up ledger and nudge topics, refreshes the entity graph, and writes an audit snapshot.
 
-> 我们不是我们记住的东西，而是我们忘记的东西。
+Memory profiles (chosen in onboarding, changeable later): `off` (no memory at all), `light` (facts only, no Dream / no proactivity / no screen), `standard` (facts + Dream + proactivity), `deep` (standard + screen awareness).
 
-强度模型：`强度 = 重要度 × (1 + 使用增益·log₂(命中次数)) × exp(-天数 / 半衰期)`
+<a id="search-providers"></a>
+## Search providers (pluggable)
 
-- 半衰期随重要度变长（重要的事更难忘）；
-- 每次被检索命中都会强化（间隔重复的测试效应）；
-- 低于阈值的旧事实**淡出**，不是删除：不再参与检索，但保留在档案里；
-- 超过容量上限时，按强度从最弱淘汰；
-- 每一次淡出/遗忘都写进 `data/memory/forgetting.md`：忘了什么、为什么、依据哪个数字；
-- 你可以在界面里"保护"（永不淡出）、"复活"或直接"忘掉并写明理由"。
+Search is a chain you configure, not a hard-coded engine. Selected providers are tried in order; a failure (rate limit, missing key) hands off to the next one. Providers that need a key read it from an environment variable in `data/echo.env` — keys never enter `config.json` or git.
 
-Dream（定时 + 手动）是巩固与遗忘的执行者：重写核心记忆、合并重复、明确忘掉过期项、复活被误淡的重要项、并整理出"跟进事项"与"主动话题"。
-
-### 3. 主动服务（不是刷存在感）
-
-- 固定在**主对话**里长期连续，换模型不影响它的连续性；
-- 一段时间没有交互后，后台会判断"现在值不值得开口"，判断依据包括：你在忙什么（屏幕感知）、有哪些跟进事项与截止日期、最近主动消息有没有被你接住；
-- 有预算与节流：静默时段、每日上限、最小间隔、连续未回应自动降频；
-- 内容分四类：`跟进 / 建议 / 指导 / 询问`，并尽量带上依据（"你周一说这周要交 X"）。
-
-### 4. 屏幕感知（默认关，隐私优先）
-
-- 由状态栏 App 采集，**本地 OCR**（Apple Vision）：默认只把文字发给模型，**原始截图不出机器**；
-- 首次使用需要在系统设置里授权一次：状态栏图标菜单 → 若有「⚠️ 屏幕感知需要「屏幕录制」权限」这一项，点它 → 在「系统设置 → 隐私与安全性 → 屏幕录制」里勾选 EchoBar；
-- 屏蔽名单**默认是空的**（自己的机器自己定），在界面「设置 → 屏幕感知」或 `config.json` 里随时加应用名或关键词正则；
-- 锁屏、键鼠空闲时完全不采集；原始截图分析完立刻删除，即使开启保留也受磁盘预算约束（超了从最旧删）；
-- 模型若判断内容敏感（密码/验证码/证件/私聊等），只记"在处理敏感信息"，不写任何事实进记忆。
-
-### 5. 上下文预算与滚动摘要
-
-对齐 MemGPT 的思路：把上下文当预算分配，而不是把历史一路塞进去。超出预算的旧消息会被压成摘要（`conv.digest`）继续携带结论与未完成事项，因此长对话不会突然"断片"，也不会把 token 烧在寒暄上。
-
-### 6. 实体图（轻量）
-
-Dream 会从记忆里抽出实体（项目/工具/人/话题）与关系，存成 `data/memory/graph.json`（无向量库、无外部依赖）。检索时命中实体就加权召回——问"Echo 这个项目"能把散落各处的事实一起捞出来；对话里也可用 `entity_lookup` 工具。
-
-### 7. 联网与多模态（按你在网关上的实际可用性适配）
-
-| 能力 | 实现 | 实测 |
+| Provider | Needs | Notes |
 |---|---|---|
-| 抓取搜索 | 360/Bing 并行抓取（完整浏览器头） + 熔断冷却 | 正常时 **0.5–2.5s**；被第三方限流时自动熔断 10 分钟并转托管 |
-| 阿里云托管搜索 | Responses `web_search`，强制工具调用 + 关思考 | **3–8s**，带 sources（关思考不强制工具时会"假搜索"，已用 `tool_choice:"required"` 规避） |
-| MCP | 自研 stdio/HTTP 客户端（JSON-RPC），可插任意搜索 MCP；阿里云托管 MCP 走 Responses `tools:[{type:'mcp'}]` | 待你配置 |
-| 视觉理解 | 图片输入（粘贴/拖拽/上传，客户端自动压缩） | 可用（实测识别颜色正确） |
-| 出图 | `image_gen` 工具 + 界面"画图"按钮，出图后**落盘到本地**（OSS 链接会过期） | 可用（qwen-image-3.0-pro / wan2.7-image） |
-| 视频 / 语音 ASR / TTS | 网关未开放（实测 `url error` / 空响应 / InternalError），配置里预留 | 不可用 |
+| `none` | — | explicitly offline |
+| `scrape` | — | zero-config scraping of CN engines; fastest, can be rate-limited (circuit breaker cools it down) |
+| `gateway` | — | reuses your model endpoint's hosted search (Responses API `web_search`, 3–8 s, returns sources) |
+| `tavily` | `TAVILY_API_KEY` | LLM-oriented search API with answer synthesis |
+| `brave` | `BRAVE_API_KEY` | independent index, privacy-friendly |
+| `bocha` | `BOCHA_API_KEY` | strong Chinese results |
+| `searxng` | `SEARXNG_URL` | your own instance (recommended if you self-host) |
+| `custom` | — | any HTTP endpoint returning `{results:[{title,url,snippet}]}`; method/headers/body template configurable |
 
-搜索引擎的健康状态（是否熔断、冷却剩余秒数、最近错误）在 `GET /api/search/engines`、自报告面板和 `./bin/echo diag` 里都能看到。
+The default chain is `scrape → gateway` (both keyless). The first-run wizard and *Settings → 联网搜索* edit the same chain.
 
-模型下拉按系列分组（千问 / DeepSeek / 智谱），带"视觉"标记，共 13 个；`auto` 由网关自行路由。
+<a id="first-run-byok-onboarding"></a>
+## First-run BYOK onboarding
 
----
+Six steps, each one decision:
 
-## 数据与磁盘
+1. **Endpoint** — pick a preset (OpenAI, Aliyun Bailian, DeepSeek, Moonshot, OpenRouter, Ollama, custom) or paste a base URL, then *Test & fetch models*.
+2. **Models** — default model, background/utility model, optional image model (leave empty to disable the image tool).
+3. **Memory profile** — off / light / standard / deep, with a one-line explanation of each.
+4. **Search chain** — tick providers, add instance URLs or keys where required.
+5. **Permissions** — residency check, `swiftc`, bind address, optional password, screen-recording test.
+6. **Done** — writes keys to `data/echo.env` (mode 600) and choices to `config.json`, then you can chat.
+
+Re-runnable any time from *Settings → 引导与权限*.
+
+<a id="permissions"></a>
+## Permissions & residency
+
+Full guide (screen recording, notifications, launchd, network exposure, files on disk): [docs/permissions.md](docs/permissions.md).
+
+Short version: **off by default** — no password, no screen capture, no notifications. `./install.sh` registers two launchd agents (`com.echo.chat`, `com.echo.menubar`) so it starts at login and survives crashes. Screen awareness needs macOS Screen Recording consent, granted from the menu-bar icon.
+
+## Data & disk
 
 ```
 data/
-  echo.env              凭据（0600，绝不进日志/对话）
-  auth.json             口令的 scrypt 加盐哈希 + 会话
-  local.token           本机身份令牌（状态栏/CLI 用，仅回环地址有效）
-  conversations/*.json  会话（含消息、工具轨迹、用量、摘要）
-  memory/
-    MEMORY.md           核心记忆（可直接编辑）
-    observations.jsonl  事实清单（强度/命中/来源）
-    working.jsonl       屏幕工作记忆（L0）
-    graph.json          实体图
-    forgetting.md       遗忘日志
-    dreams/             每次 Dream 的审计快照
-  uploads/              发来的图与生成的图
-  metrics.jsonl         自我测量数据（延迟/失败/工具成功率）
-  logs/                 服务与状态栏日志
+  echo.env              keys (0600, never in git, never sent to the model)
+  conversations/*.json  messages, tool traces, usage, rolling digest
+  memory/               MEMORY.md · observations.jsonl · working.jsonl · graph.json
+                        forgetting.md · engines.json · dreams/ (audit)
+  uploads/              images you send and images generated
+  metrics.jsonl         self-report data
 ```
 
-**大小由预算管死**（`config.json → storage`，界面也可调）：
+Budgets are enforced (`config.json → storage`, editable in the UI): screenshots 200 MB / 3 days, generated images 300 MB / 60 days, pruning oldest-first past 80% of budget, never deleting images referenced by recent conversations. Maintenance runs every six hours and at boot. *Settings → 隐私兜底* has a one-click “forget everything”.
 
-- 截图目录默认 **200MB** 上限 + 3 天保留；生成图片默认 **300MB** + 60 天；
-- 超过 80% 预算就从最旧的删；**被最近 45 天对话引用到的图片永不删除**；
-- 每 6 小时自动维护一次，开机也清理一次；`POST /api/storage/prune` 可手动触发。
+## Self-improvement
 
-## 安全
+Echo does not rewrite its own code. It ships the conservative half of that idea: a **frozen evaluator** (`tests/selftest.mjs`, sandboxed, assertions against design invariants rather than implementation details), a public iteration log with hypotheses, scores, verdicts, and lessons ([docs/rsi-log.md](docs/rsi-log.md)), and a rule that the score sheet is only ever tightened.
 
-- **默认免登录**（本机自用）：打开就是对话窗口，不弹登录。写操作仍要求自定义请求头，恶意网页无法通过 localhost 打你的额度；
-- 想恢复口令验证：`./bin/echo auth on`（再 `./bin/echo passwd` 设口令），界面「设置 → 访问控制」里也能一键开关；开启后会话 Cookie 为 `HttpOnly + SameSite=Strict`，首次设置口令只允许在本机浏览器完成；
-- 公共 WiFi 下建议打开——关闭时同网段设备可直接使用你的 API 额度；
-- `web_fetch` 有 SSRF 防护：拒绝回环/内网/链路本地/云 metadata/ULA，允许代理常用的 fake-IP 段；
-- 页面渲染对模型输出做白名单转义，`<script>`、事件属性、`javascript:` 链接都不会存活；
-- 服务与状态栏只监听本机回环做管理操作（`x-echo-local` 令牌）。
-
-## 模型与配置
-
-编辑器友好：一切都在 `config.json`（改完重启或用界面保存）：
-
-- `upstream`：模型清单、默认模型、上下文预算；
-- `generation`：温度、是否默认开思考；
-- `search`：开关、引擎（auto/fast/native）、结果条数、工具轮数上限；
-- `memory` / `dream` / `proactive`：记忆与主动服务的全部参数（半衰期、阈值、预算、静默时段、置信度门槛…）；
-- `screen`：开关、间隔、模式（OCR/图像）、黑名单、保留策略；
-- `storage`：磁盘预算；
-- `mcpServers`：任意 MCP 服务（stdio 或 http），支持 `enabled` 开关。
-
-## 自我测量
-
-`GET /api/diagnostics` 会给出：每轮生成的成功率/P50/P95 延迟、token 用量、每个工具与搜索引用的成功率与延迟、主动服务的开口数与"被接住"比例、存储占用、记忆强度分布、实体图规模。这些数据来自 `data/metrics.jsonl`，是这套系统自我改进的依据（也是它能被质疑的地方）。
-
-## 目录结构
+## Repo layout
 
 ```
-server.mjs          HTTP 服务：认证、SSE、路由、调度
-lib/                chat(循环) context(预算/摘要) memory(分层/遗忘) graph(实体图)
-                    screen(屏幕感知) dream(巩固) proactive(主动) search media mcp
-                    storage(预算) metrics(自测量) upstream native tools
-public/             单页前端（零构建、零依赖）
-menubar/            Swift 状态栏 App 源码
-tests/selftest.mjs  冻结评估器（隔离沙箱，4 轨 + 实时轨）
-bin/echo            CLI
-install.sh          安装与 launchd 注册
+server.mjs          HTTP server: routing, SSE, schedulers, auth, onboarding
+lib/                chat · context (budget/digest) · memory (layers/forgetting) · graph
+                    screen · dream · proactive · agency (bandit/ledger) · providers
+                    search · media · mcp · storage · metrics · tools
+public/             single-page front end (no build step, no deps)
+menubar/            Swift menu-bar app source
+tests/selftest.mjs  frozen evaluator (isolated sandbox)
+bin/echo            CLI        install.sh    launcher + launchd registration
+docs/               landscape · rsi-log · permissions · release notes
 ```
+
+## License
+
+No license file yet — all rights reserved by default. Open an issue if you want to reuse it and we will pick one (MIT/Apache-2.0 are the usual candidates).
