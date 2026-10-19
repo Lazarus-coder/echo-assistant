@@ -175,31 +175,8 @@
     "digestMinutes": 45,
     "idleSkipSeconds": 180,
     "visionModel": "qwen3.6-flash",
-    "blocklist": [
-      "1Password",
-      "Keychain",
-      "钥匙串",
-      "系统设置",
-      "System Settings",
-      "支付宝",
-      "网银",
-      "银行",
-      "Wallet",
-      "FaceTime",
-      "Messages",
-      "信息"
-    ],
-    "excludeTitlePatterns": [
-      "password",
-      "密码",
-      "验证码",
-      "otp",
-      "2fa",
-      "银行卡",
-      "身份证",
-      "转账",
-      "聊天记录"
-    ]
+    "blocklist": [],
+    "excludeTitlePatterns": []
   },
   "storage": {
     "screenImageBudgetMB": 200,

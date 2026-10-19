@@ -999,11 +999,11 @@ async function renderSettingsPanel() {
         </select></div>
       <div class="field"><label>截图保留天数 <b>${c.screen?.retentionDays ?? 3}</b></label>
         <input type="range" id="setScreenDays" min="0" max="14" step="1" value="${c.screen?.retentionDays ?? 3}" /></div>
-      <div class="field"><label>黑名单应用（命中完全不采集，逗号分隔）</label>
-        <input type="text" id="setBlocklist" value="${esc((c.screen?.blocklist ?? []).join('、'))}" /></div>
-      <div class="field"><label>敏感关键词正则（命中跳过，逗号分隔）</label>
-        <input type="text" id="setExcludes" value="${esc((c.screen?.excludeTitlePatterns ?? []).join(','))}" /></div>
-      <p class="muted small">锁屏、键鼠空闲、黑名单应用都不会被采集。默认只把本地 OCR 出的文字发给模型；原始截图分析完即删，绝不进归档。</p>
+      <div class="field"><label>屏蔽应用（命中完全不采集，逗号分隔；默认空）</label>
+        <input type="text" id="setBlocklist" placeholder="例如：1Password、Alipay、Terminal" value="${esc((c.screen?.blocklist ?? []).join('、'))}" /></div>
+      <div class="field"><label>屏蔽关键词正则（命中跳过，逗号分隔；默认空）</label>
+        <input type="text" id="setExcludes" placeholder="例如：password、身份证" value="${esc((c.screen?.excludeTitlePatterns ?? []).join(','))}" /></div>
+      <p class="muted small">锁屏、键鼠空闲不会被采集。默认只把本地 OCR 出的文字发给模型；原始截图分析完即删，绝不进归档。模型若识别出敏感内容，只记"在处理敏感信息"，不写任何事实进记忆。</p>
     </div>
     <div class="sect">
       <h4>磁盘预算</h4>

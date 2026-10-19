@@ -423,8 +423,12 @@ async function trackRuntime() {
   })
   check('E', '屏幕文字能进入工作记忆（L0）', Boolean(ingest.json?.event?.id), `activity=${ingest.json?.event?.activity ?? '-'}`)
 
-  const blockedIngest = await req('/api/screen', { method: 'POST', body: { text: '转账 验证码 8823', app: '支付宝', title: '转账' } })
-  check('E', '黑名单应用被完全跳过（不送模型）', blockedIngest.json?.skipped?.includes('blocklist'), blockedIngest.json?.skipped)
+  // 屏蔽名单默认是空的（自己的机器自己定），这里临时加一条来验证机制
+  await req('/api/settings', { method: 'PATCH', body: { config: { screen: { blocklist: ['SelftestBlockedApp'] } } } })
+  const blockedIngest = await req('/api/screen', { method: 'POST', body: { text: '转账 验证码 8823', app: 'SelftestBlockedApp', title: '转账' } })
+  const stillStored = await req('/api/screen', { method: 'POST', body: { text: '普通内容：在看文档', app: 'SelftestEditor', title: 'doc.md' } })
+  await req('/api/settings', { method: 'PATCH', body: { config: { screen: { blocklist: [] } } } })
+  check('E', '屏蔽名单生效且不误伤其他应用', blockedIngest.json?.skipped?.includes('blocklist') && Boolean(stillStored.json?.event?.id), `blocked=${blockedIngest.json?.skipped} 正常应用=${Boolean(stillStored.json?.event?.id)}`)
 
   const storage2 = await req('/api/storage')
   check('E', '存储状态可查（截图/图片分别计量）', storage2.json?.screenshots && storage2.json?.uploads)

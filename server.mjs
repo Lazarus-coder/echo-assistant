@@ -216,6 +216,15 @@ async function serveStatic(req, res, urlPath) {
   const full = path.join(PUBLIC_DIR, file)
   try {
     const stat = await fs.stat(full)
+    // 资源带上 mtime 版本号，避免浏览器拿到旧 JS/CSS（升级后无需手动清缓存）
+    if (file === 'index.html') {
+      let html = await fs.readFile(full, 'utf8')
+      for (const asset of ['app.js', 'style.css', 'logo.svg']) {
+        const st = await fs.stat(path.join(PUBLIC_DIR, asset)).catch(() => null)
+        if (st) html = html.replaceAll(`"/${asset}"`, `"/${asset}?v=${Math.round(st.mtimeMs)}"`)
+      }
+      return send(res, 200, html, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+    }
     const etag = `W/"${stat.mtimeMs}-${stat.size}"`
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { etag })
