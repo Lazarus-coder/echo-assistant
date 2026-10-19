@@ -116,6 +116,23 @@ print('  （没有输出表示还没配置 MCP）')" 2>/dev/null
     printf '新口令（≥6 位）: '; read -rs NEW; echo
     api POST password "{\"next\":\"$NEW\"}" >/dev/null && c_ok "口令已更新"
     ;;
+  auth)
+    case "${2:-status}" in
+      on)
+        api PATCH auth '{"required":true}' >/dev/null && c_ok "已开启口令验证（用 ./bin/echo passwd 设口令）"
+        ;;
+      off)
+        api PATCH auth '{"required":false}' >/dev/null && c_ok "已关闭口令验证：本机自用模式"
+        ;;
+      *)
+        api GET bootstrap | python3 -c "
+import sys,json
+d=json.load(sys.stdin);a=d['config'].get('auth',{})
+print('  口令验证：', '开' if a.get('required') else '关（本机自用）', '｜ 是否已设口令：', '是' if a.get('passwordSet') else '否')
+print('  用法：./bin/echo auth on|off')" 2>/dev/null || c_err "读取失败"
+        ;;
+    esac
+    ;;
   init)
     "$ROOT/install.sh"
     ;;
@@ -160,6 +177,6 @@ print(f\"  决策最优类型：{d['agency']['best']} · 屏幕感知 {'开' if 
   *)
     sed -n '2,3p' "$0"
     echo
-    echo "用法: ./bin/echo {up|down|restart|status|logs|open|dream|say|search|mcp|passwd|init|env|selftest|diag|forget|remember}"
+    echo "用法: ./bin/echo {up|down|restart|status|logs|open|dream|say|search|mcp|auth|passwd|init|env|selftest|diag|forget|remember}"
     ;;
 esac

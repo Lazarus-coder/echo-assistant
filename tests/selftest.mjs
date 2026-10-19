@@ -131,6 +131,12 @@ async function bootSandbox() {
   const setCookie = r.headers.get('set-cookie') ?? ''
   cookie = setCookie.split(';')[0]
   localToken = (await fs.readFile(path.join(sandbox, 'local.token'), 'utf8')).trim()
+  // 沙箱默认保持"本机自用"形态；需要验证口令的检查会自己临时打开
+  const cfgFile = process.env.ECHO_CONFIG
+  const cfgNow = JSON.parse(await fs.readFile(cfgFile, 'utf8'))
+  cfgNow.requirePassword = false
+  await fs.writeFile(cfgFile, JSON.stringify(cfgNow, null, 2))
+  await fetch(`${BASE}/api/auth`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-echo-request': 'echo', 'x-echo-local': localToken }, body: JSON.stringify({ required: false }) })
 }
 
 async function stopSandbox() {
@@ -233,6 +239,9 @@ async function trackStatic() {
   const health = await fetch(`${BASE}/api/health`).then((r) => r.json())
   check('A', '服务启动且 /api/health 正常', health?.ok === true, `uptime=${health?.uptime}s`)
 
+  const pkg = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'))
+  check('A', '版本号只有一个来源（package.json 与服务一致）', health?.version === pkg.version, `health=${health?.version} package=${pkg.version}`)
+
   const assets = await Promise.all(['/', '/app.js', '/style.css', '/logo.svg'].map((u) => fetch(`${BASE}${u}`).then((r) => r.status)))
   check('A', '静态资源全部 200', assets.every((s) => s === 200), assets.join('/'))
 
@@ -242,14 +251,27 @@ async function trackStatic() {
 
 async function trackSecurity() {
   section('B 安全不变量')
-  const noAuth = await fetch(`${BASE}/api/bootstrap`)
-  check('B', '未登录访问受限（401）', noAuth.status === 401)
+  // 跨站防护：无论是否开启口令，写操作都要求自定义头（恶意网页伪造不了）
+  const noCsrf = await fetch(`${BASE}/api/conversations`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+  check('B', '缺少 x-echo-request 的跨站写入被拒（403）', noCsrf.status === 403)
 
-  const noCsrf = await fetch(`${BASE}/api/conversations`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: '{}' })
-  check('B', '缺少 x-echo-request 时拒绝写操作（403）', noCsrf.status === 403)
+  // 默认形态：本机自用，免登录
+  const anon = await fetch(`${BASE}/api/bootstrap`)
+  check('B', '关闭口令时本机可免登录使用（默认形态）', anon.status === 200, `HTTP ${anon.status}`)
 
+  // 打开口令后：门禁、错误口令、正确登录
+  await req('/api/auth', { method: 'PATCH', body: { required: true } })
+  const gated = await fetch(`${BASE}/api/bootstrap`)
+  check('B', '开启口令后未登录访问被拒（401）', gated.status === 401, `HTTP ${gated.status}`)
   const badLogin = await fetch(`${BASE}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: 'wrong-pass' }) })
   check('B', '错误口令被拒（401）', badLogin.status === 401)
+  const goodLogin = await fetch(`${BASE}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: PASSWORD }) })
+  const newCookie = (goodLogin.headers.get('set-cookie') ?? '').split(';')[0]
+  const gatedOk = await fetch(`${BASE}/api/bootstrap`, { headers: { cookie: newCookie } })
+  check('B', '正确口令可登录并继续使用', goodLogin.status === 200 && gatedOk.status === 200)
+  await req('/api/auth', { method: 'PATCH', body: { required: false } })
+  const restored = await fetch(`${BASE}/api/bootstrap`)
+  check('B', '口令可一键关回本机自用模式', restored.status === 200)
 
   const { isPrivateAddress, webFetch } = await import(path.join(ROOT, 'lib/search.mjs'))
   const cases = [
@@ -438,6 +460,27 @@ async function trackRuntime() {
 
   const mcp = await req('/api/mcp')
   check('E', 'MCP 状态可查（未配置时为空）', Array.isArray(mcp.json?.servers))
+
+  // 熔断机制（离线可验证）：把引擎写成冷却中，应该被跳过而不是继续撞墙
+  const search = await import(path.join(ROOT, 'lib/search.mjs'))
+  await fs.mkdir(path.join(sandbox, 'memory'), { recursive: true })
+  await fs.writeFile(
+    path.join(sandbox, 'memory', 'engines.json'),
+    JSON.stringify({ engines: { so360: { fails: 3, blockedUntil: Date.now() + 60000, lastError: 'captcha' }, bing: { fails: 3, blockedUntil: Date.now() + 60000, lastError: 'x' } } }),
+  )
+  const st = await search.engineStatus()
+  let coolingSkipped = false
+  try {
+    await search.searchWith('so360', 'x')
+  } catch (e) {
+    coolingSkipped = Boolean(e.coolingDown)
+  }
+  const allCooling = await search
+    .webSearch('x', {})
+    .then(() => false)
+    .catch((e) => /冷却/.test(e.message))
+  check('E', '熔断中的引擎被跳过（不继续白等）', st.so360?.coolingDown === true && coolingSkipped && allCooling, `so360 冷却 ${st.so360?.cooldownSeconds}s`)
+  await fs.rm(path.join(sandbox, 'memory', 'engines.json'), { force: true })
 }
 
 async function trackAgency() {
@@ -561,8 +604,20 @@ async function simulatePolicy() {
   }
   if (!hasKey) return
 
-  const search = await req('/api/search/test', { method: 'POST', body: { query: '美元兑人民币汇率 今日' } })
-  check('F', '抓取搜索可用且够快', (search.json?.results?.length ?? 0) > 0 && (search.json?.ms ?? 99999) < 20000, `${search.json?.engine} ${search.json?.ms}ms ${search.json?.results?.length} 条`)
+  // 搜索链路：抓取被第三方限流不是我们的 bug，要保证的是
+  // 「结果能从链路拿到」+「被限流的引擎会被熔断，而不是每次白等」
+  const tries = []
+  let searchOk = false
+  for (let i = 0; i < 2 && !searchOk; i++) {
+    const r = await req('/api/search/test', { method: 'POST', body: { query: i ? '北京今天天气' : '美元兑人民币汇率 今日' } })
+    tries.push({ engine: r.json?.provider ?? '失败', ms: r.json?.ms ?? null, n: r.json?.results?.length ?? 0, err: r.json?.error })
+    searchOk = (r.json?.results?.length ?? 0) > 0
+  }
+  check('F', '搜索能通过链路拿到结果（抓取或托管兜底）', searchOk, tries.map((t) => `${t.engine} ${t.ms}ms n=${t.n}`).join(' | '))
+
+  const engines = (await req('/api/search/engines')).json?.engines ?? {}
+  const shaped = Object.keys(engines).length > 0 && Object.values(engines).every((e) => typeof e.coolingDown === 'boolean' && typeof e.fails === 'number')
+  check('F', '引擎健康可查（熔断状态与冷却秒数）', shaped, JSON.stringify(engines).slice(0, 130))
 
   const conv = await req('/api/conversations', { method: 'POST', body: { title: 'live-probe' } })
   const basic = await streamTurn({ conversationId: conv.json.id, userText: '只回答两个字：收到', model: 'qwen3.6-flash', searchMode: 'off' })

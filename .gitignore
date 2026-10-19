@@ -1,7 +1,9 @@
 data/
 .snapshots/
 build/
+dist/
 node_modules/
 *.log
 .DS_Store
 tests/last-report.json
+config.json

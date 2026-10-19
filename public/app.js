@@ -1048,6 +1048,15 @@ async function renderSettingsPanel() {
       <button class="btn small" data-action="search-test">测试搜索链路</button></div>
     </div>
     <div class="sect">
+      <h4>访问控制</h4>
+      <div class="switch"><span>要求访问口令（关掉后同 WiFi 的设备都能直接用，不推荐在公共网络下关闭）</span>
+        <input type="checkbox" id="setAuthRequired" ${c.auth?.required ? 'checked' : ''} /></div>
+      <div class="row" style="margin-top:6px">
+        <button class="btn small" data-action="set-passwd">${c.auth?.passwordSet ? '修改口令' : '设置口令'}</button>
+        <span class="muted small">${c.auth?.required ? '当前：需要登录' : '当前：本机自用（免登录）'}</span>
+      </div>
+    </div>
+    <div class="sect">
       <h4>服务</h4>
       <div class="kv"><dt>监听</dt><dd>${c.bind === 'all' ? '局域网 0.0.0.0' : '仅本机'}:${c.port}</dd>
       <dt>数据目录</dt><dd style="text-align:left;font:11px var(--mono)">data/</dd></div>
@@ -1136,6 +1145,8 @@ async function boot({ keep = false } = {}) {
   sel.value = wantModel
   $('#searchSelect').value = prefs.searchMode
   $('#thinkingBtn').setAttribute('aria-pressed', String(prefs.thinking))
+  const logoutBtn = document.querySelector('[data-action="logout"]')
+  if (logoutBtn) logoutBtn.hidden = !b.config.auth?.required
   renderConvs()
   const target = keep && S.current ? S.current : b.main?.id ?? S.convs[0]?.id
   if (target) await selectConv(target)
@@ -1407,6 +1418,19 @@ document.addEventListener('click', async (e) => {
     const r = await api('search/test', { method: 'POST', body: { query: '今天 美元 人民币 汇率' } })
     toast(`${r.engine} · ${r.ms}ms · ${r.results.length} 条`)
     return
+  }
+  $('#setAuthRequired')?.addEventListener('change', async (e) => {
+    const r = await api('auth', { method: 'PATCH', body: { required: e.target.checked } })
+    toast(r.required ? '已开启口令验证（下次打开需要登录）' : '已关闭口令验证，本机自用')
+    await boot({ keep: true })
+    return renderSettingsPanel()
+  })
+  if (act === 'set-passwd') {
+    const next = prompt('设置访问口令（≥6 位）')
+    if (!next) return
+    await api('password', { method: 'POST', body: { next } })
+    toast('口令已保存（开启验证后才需要输入）')
+    return renderSettingsPanel()
   }
   if (act === 'change-passwd') {
     const next = prompt('新口令（≥6 位，只能在 Mac 本机浏览器改）')

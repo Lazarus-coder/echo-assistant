@@ -45,7 +45,7 @@ import {
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { proactiveTick, proactiveStatus, recordUserEngagement } from './lib/proactive.mjs'
 import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
-import { webSearch } from './lib/search.mjs'
+import { webSearch, searchWithFallback, engineStatus } from './lib/search.mjs'
 import { nativeSearch } from './lib/native.mjs'
 import { generateImage, saveImage, parseDataUrl } from './lib/media.mjs'
 import {
@@ -61,7 +61,15 @@ import {
 import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
 
-const VERSION = '1.0.0'
+// 版本号只有一个来源：package.json（自测里有一条断言禁止两边漂移）
+const VERSION = await (async () => {
+  try {
+    const raw = await fs.readFile(path.join(ROOT, 'package.json'), 'utf8')
+    return JSON.parse(raw).version || '0.0.0-dev'
+  } catch {
+    return '0.0.0-dev'
+  }
+})()
 const COOKIE = 'echo_s'
 const MAX_BODY = 1.5 * 1024 * 1024
 
@@ -86,6 +94,7 @@ async function setPassword(password) {
   auth.password = hashPassword(password)
   auth.setAt = nowIso()
   await writeJSON(P.auth, auth)
+  authState.passwordSet = true
   return auth
 }
 
@@ -245,6 +254,7 @@ const inflight = new Map()
 let mcp = new McpHub({})
 let cfg = await loadConfig()
 let bootedAt = Date.now()
+let authState = { passwordSet: false }
 
 async function refreshConfig() {
   cfg = await loadConfig()
@@ -303,7 +313,8 @@ async function maybeExtractMemory(conv, assistant) {
 async function api(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean) // ['api', ...]
   const method = req.method
-  const needsAuth = !(method === 'GET' && seg[1] === 'health')
+  const authRequired = cfg.requirePassword === true
+  const needsAuth = authRequired && !(method === 'GET' && seg[1] === 'health')
   let who = null
   if (needsAuth) {
     const auth = await readJSON(P.auth, {})
@@ -319,6 +330,9 @@ async function api(req, res, url) {
     if (method !== 'GET' && req.headers['x-echo-request'] !== 'echo') {
       return send(res, 403, { error: 'csrf', message: '缺少 x-echo-request 头' })
     }
+  } else if (method !== 'GET' && seg[1] !== 'login' && seg[1] !== 'password' && seg[1] !== 'logout' && req.headers['x-echo-request'] !== 'echo') {
+    // 免登录也保留这一层：跨站网页无法伪造自定义头，也就打不到你的额度
+    return send(res, 403, { error: 'csrf', message: '缺少 x-echo-request 头' })
   }
 
   const p = seg.slice(1).join('/')
@@ -341,6 +355,12 @@ async function api(req, res, url) {
     return send(res, 200, { ok: true })
   }
   if (method === 'POST' && p === 'password') return changePassword(req, res, who)
+  if (method === 'PATCH' && p === 'auth') {
+    const body = await readBody(req)
+    cfg = await saveConfig({ requirePassword: Boolean(body.required) })
+    log.warn(`访问控制：${cfg.requirePassword ? '已开启口令验证' : '已关闭口令验证（仅本机自用）'}`)
+    return send(res, 200, { required: cfg.requirePassword, passwordSet: authState.passwordSet })
+  }
 
   if (method === 'GET' && p === 'bootstrap') {
     const conversations = await listConversations()
@@ -699,15 +719,15 @@ async function api(req, res, url) {
   if (method === 'POST' && p === 'search/test') {
     const body = await readBody(req)
     const query = String(body.query ?? 'test')
-    if (body.provider === 'native') {
-      const started = Date.now()
-      const r = await nativeSearch(query, { model: cfg.upstream.utilityModel })
-      return send(res, 200, { query, engine: '阿里云托管搜索', ms: Date.now() - started, answer: r.answer, results: r.sources })
-    }
     const started = Date.now()
-    const r = await webSearch(query, { count: 5 })
-    return send(res, 200, { ...r, ms: Date.now() - started })
+    try {
+      const r = await searchWithFallback({ query, cfg, count: body.count ?? 5, nativeSearch })
+      return send(res, 200, { ...r, engines: await engineStatus(), ms: Date.now() - started })
+    } catch (err) {
+      return send(res, 200, { query, ok: false, ms: Date.now() - started, error: err.message, attempts: err.attempts ?? [], engines: await engineStatus(), results: [] })
+    }
   }
+  if (method === 'GET' && p === 'search/engines') return send(res, 200, { engines: await engineStatus() })
 
   if (method === 'GET' && p === 'mcp') return send(res, 200, { servers: mcp.status(), tools: mcp.tools() })
   if (method === 'POST' && p === 'mcp/reload') {
@@ -794,6 +814,7 @@ async function diagnostics() {
     memory: mem,
     graph,
     agency,
+    search: { provider: cfg.search.provider, engines: await engineStatus() },
     screen: { enabled: screen.enabled, lastAt: screen.lastAt, todayCount: screen.todayCount, working: screen.workingCount, sessions: screen.sessions.length },
     mcp: mcp.status(),
     inflight: inflight.size,
@@ -804,6 +825,7 @@ function publicConfig(c) {
   return {
     bind: c.bind,
     port: c.port,
+    auth: { required: c.requirePassword === true, passwordSet: authState.passwordSet },
     models: c.upstream.models,
     imageModels: c.upstream.imageModels ?? [],
     defaultImageModel: c.upstream.defaultImageModel,
@@ -858,8 +880,10 @@ async function changePassword(req, res, who) {
   if (who?.via !== 'local' && !isLoopback(req)) return send(res, 403, { error: 'loopback_only' })
   const body = await readBody(req)
   const auth = await readJSON(P.auth, {})
-  if (auth.password && !verifyPassword(String(body.current ?? ''), auth.password)) return send(res, 401, { error: 'bad_current' })
-  const next = String(body.next ?? '')
+  // 关掉验证的本机自用模式：改口令不必再报旧口令
+  const needCurrent = cfg.requirePassword === true && auth.password
+  if (needCurrent && !verifyPassword(String(body.current ?? ''), auth.password)) return send(res, 401, { error: 'bad_current' })
+  const next = String(body.next ?? body.password ?? '')
   if (next.length < 6) return send(res, 400, { error: 'weak' })
   await setPassword(next)
   return send(res, 200, { ok: true })
@@ -1077,8 +1101,10 @@ async function boot() {
   const port = Number(process.env.ECHO_PORT ?? cfg.port)
   const wantLan = (process.env.ECHO_BIND ?? cfg.bind) === 'all'
   const auth = await readJSON(P.auth, {})
-  const bind = wantLan && auth.password ? '0.0.0.0' : '127.0.0.1'
-  if (wantLan && !auth.password) log.warn('尚未设置访问口令，已退化为仅本机监听')
+  authState.passwordSet = Boolean(auth.password)
+  const authRequired = cfg.requirePassword === true
+  const bind = wantLan && (auth.password || !authRequired) ? '0.0.0.0' : '127.0.0.1'
+  if (authRequired && !auth.password) log.warn('要求口令但还没设置，已退化为仅本机监听')
 
   await new Promise((resolve, reject) => {
     server.once('error', reject)
