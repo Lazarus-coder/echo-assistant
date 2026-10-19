@@ -47,3 +47,6 @@ shasum -a 256 -c SHA256SUMS
 ### Known limitations (unchanged)
 
 Screen Recording must be granted once from the menu-bar icon; `scrape` search can be rate-limited by its engines (it cools down and hands off); video / ASR / TTS depend on your endpoint exposing them; retrieval is lexical plus an entity graph (no embeddings); interfaces and data formats may still change during alpha — back up `data/` before upgrading.
+---
+
+*Rebuilt the same day (same version): fixed a self-test assertion that assumed an existing local config — a fresh clone now runs `node tests/selftest.mjs` to 69/69 — and removed an internal product name from a code comment. No functional change.*
