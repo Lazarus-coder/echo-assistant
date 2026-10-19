@@ -700,7 +700,10 @@ async function simulatePolicy({ rounds = 2000 } = {}) {
   }
   await req('/api/settings', { method: 'PATCH', body: { env: Object.keys(realEnv).length ? realEnv : { OPENAI_API_KEY: '', TAVILY_API_KEY: '' } } })
   const restored = (await req('/api/providers')).json.onboarding
-  check('H', '沙箱可还原到基线（引导不会污染既有配置）', restored.usable === true && restored.modelCount > 0, `hasKey=${restored.hasKey} models=${restored.modelCount}`)
+  // 与'进入 H 轨之前'的状态比较：有基线凭据的沙箱应恢复成 usable，
+  // 全新克隆（无 echo.env / config.json）则不该残留引导写下的假 key
+  const backToBaseline = Object.keys(realEnv).length ? restored.usable === true : restored.usable === false && restored.hasKey === false
+  check('H', '沙箱可还原到基线（引导不污染既有配置）', backToBaseline, `hasKey=${restored.hasKey} usable=${restored.usable} models=${restored.modelCount}`)
   void providers
 }
 
