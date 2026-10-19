@@ -2,7 +2,7 @@
 
 | File | What it is |
 |---|---|
-| **Echo-0.1.0-alpha.2-macos.dmg** | **macOS installer** — `Echo.app` (menu-bar icon, own icon and bundle id) + double-click installer + uninstaller + README (中文/EN) |
+| **Echo-0.1.0-alpha.2-macos.dmg** | **macOS installer** — universal binary (Apple Silicon + Intel), macOS 13+; `Echo.app` (menu-bar icon, own icon and bundle id) + double-click installer + uninstaller + README (中文/EN) |
 | Echo-0.1.0-alpha.2-macos.zip | same payload as a zip, if you prefer |
 | echo-assistant-0.1.0-alpha.2.tar.gz | source tarball (any platform, needs Node ≥ 20) |
 | SHA256SUMS / SHA256SUMS-macos | checksums — `shasum -a 256 -c SHA256SUMS-macos` |

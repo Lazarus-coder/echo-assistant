@@ -21,9 +21,16 @@ command -v hdiutil >/dev/null || die "需要 hdiutil（macOS 自带）"
 
 rm -rf "$STAGE" && mkdir -p "$STAGE" "$OUT"
 
-# 1) 编译状态栏 App + 图标
-info "编译状态栏 App…"
-swiftc -O -o "$ROOT/build/EchoBar" menubar/EchoBar.swift
+# 1) 编译状态栏 App（通用二进制：Apple Silicon + Intel）+ 图标
+info "编译状态栏 App（arm64 + x86_64）…"
+swiftc -O -target arm64-apple-macos13.0 -o "$ROOT/build/EchoBar.arm64" menubar/EchoBar.swift
+if swiftc -O -target x86_64-apple-macos13.0 -o "$ROOT/build/EchoBar.x86" menubar/EchoBar.swift 2>/dev/null; then
+  lipo -create "$ROOT/build/EchoBar.arm64" "$ROOT/build/EchoBar.x86" -output "$ROOT/build/EchoBar"
+  ok "通用二进制：$(lipo -archs "$ROOT/build/EchoBar")"
+else
+  cp "$ROOT/build/EchoBar.arm64" "$ROOT/build/EchoBar"
+  info "（x86_64 编译不可用，仅 Apple Silicon：$(lipo -archs "$ROOT/build/EchoBar")）"
+fi
 mkdir -p "$ROOT/build/icons"
 swiftc -O -o "$ROOT/build/makeicon" menubar/make-icon.swift
 "$ROOT/build/makeicon" "$ROOT/build/icons" >/dev/null

@@ -62,7 +62,7 @@ Disk budgets for screenshots and images (prune oldest past 80% of budget; never 
 <a id="quick-start"></a>
 ## Quick start
 
-**macOS installer (recommended):** download `Echo-0.1.0-alpha.2-macos.dmg` from [Releases](https://github.com/Lazarus-coder/echo-assistant/releases), open it, and double-click **Install Echo.command**. It installs `Echo.app` + the service into `~/Library/Application Support/Echo`, registers launchd, and asks for your endpoint/key (skippable — the wizard covers it). Uninstall with the bundled `Uninstall Echo.command`.
+**macOS installer (recommended, universal binary — Apple Silicon + Intel):** download `Echo-0.1.0-alpha.2-macos.dmg` from [Releases](https://github.com/Lazarus-coder/echo-assistant/releases), open it, and double-click **Install Echo.command**. It installs `Echo.app` + the service into `~/Library/Application Support/Echo`, registers launchd, and asks for your endpoint/key (skippable — the wizard covers it). Uninstall with the bundled `Uninstall Echo.command`.
 
 **From source:**
 
