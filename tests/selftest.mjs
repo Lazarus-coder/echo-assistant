@@ -444,8 +444,16 @@ async function trackRuntime() {
   const stats = await storage.storageStats()
   check('E', '可查询磁盘占用（含预算口径）', stats.screenshots.budgetMB > 0 && stats.uploads.budgetMB > 0)
 
+  // 断言的是"默认值"（DEFAULTS），而不是当前配置——沙箱复制的是真实配置，当前值可能被用户改过
+  const { DEFAULTS } = await import(path.join(ROOT, 'lib/config.mjs'))
+  check(
+    'E',
+    '隐私默认值安全（屏幕关 / 免登录 / 记忆档保守）',
+    DEFAULTS.screen.enabled === false && DEFAULTS.requirePassword === false && DEFAULTS.memory.profile === 'standard',
+    `screen=${DEFAULTS.screen.enabled} auth=${DEFAULTS.requirePassword} profile=${DEFAULTS.memory.profile}`,
+  )
   const screen = await req('/api/screen')
-  check('E', '屏幕感知默认关闭（隐私默认安全）', screen.json?.screen?.enabled === false, `enabled=${screen.json?.screen?.enabled}`)
+  check('E', '屏幕感知状态可查（关或开都能读到）', typeof screen.json?.screen?.enabled === 'boolean', `enabled=${screen.json?.screen?.enabled}`)
 
   const on = await req('/api/screen', { method: 'PATCH', body: { screen: { enabled: true } } })
   check('E', '屏幕感知可开启', on.json?.screen?.enabled === true)
@@ -707,6 +715,135 @@ async function simulatePolicy({ rounds = 2000 } = {}) {
   void providers
 }
 
+/** 本地桩端点：让"需要模型"的功能也能在离线跑，并且能断言"它到底发来了什么"。 */
+async function startMockUpstream() {
+  const http = await import('node:http')
+  const mockRef = { forceLeak: null }
+  const seen = []
+  const server = http.createServer((req, res) => {
+    let raw = ''
+    req.on('data', (c) => (raw += c))
+    req.on('end', () => {
+      if (req.url.startsWith('/v1/models')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        return res.end(JSON.stringify({ data: [{ id: 'mock-model-1' }, { id: 'mock-model-2' }] }))
+      }
+      let body = null
+      try {
+        body = JSON.parse(raw || '{}')
+      } catch {}
+      seen.push({ url: req.url, body })
+      const wantTight = JSON.stringify(body?.messages ?? []).includes('精简')
+      const leak = mockRef.forceLeak
+      const content = JSON.stringify({
+        intent: '桩：把请求补成可执行的一条',
+        gaps: ['未说明输出格式'],
+        assumptions: ['假设需要中文输出'],
+        polished: leak ? `桩-细化结果（顺带提到 ${leak}）` : wantTight ? '桩-精简结果' : '桩-细化结果',
+        notes: '桩说明',
+      })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ id: 'mock', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }], usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 } }))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, seen, get forceLeak() { return mockRef.forceLeak }, set forceLeak(v) { mockRef.forceLeak = v }, close: () => new Promise((r) => server.close(r)) }
+}
+
+async function trackPolish() {
+  section('I 润色（CoT）')
+  const mock = await startMockUpstream()
+
+  // 让沙箱指向桩端点（离线也能验证"读了上下文吗"）
+  await req('/api/settings', {
+    method: 'PATCH',
+    body: {
+      config: { upstream: { baseUrl: mock.baseUrl, models: [{ id: 'mock-model-1', label: 'mock', group: '桩' }], defaultModel: 'mock-model-1', utilityModel: 'mock-model-1' } },
+      env: { OPENAI_BASE_URL: mock.baseUrl, OPENAI_API_KEY: 'sk-mock-selftest' },
+    },
+  })
+
+  // 播种一段对话（直接写沙箱文件：这是测试前置数据，不是被测行为）
+  const convId = 'c_polish_test'
+  await fs.writeFile(
+    path.join(sandbox, 'conversations', `${convId}.json`),
+    JSON.stringify({
+      id: convId,
+      title: '部署脚本排查',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [
+        { id: 'm1', role: 'user', content: '我们那个部署脚本老是超时', createdAt: new Date().toISOString() },
+        { id: 'm2', role: 'assistant', content: '先看下是不是 API 网关的 30s 限制', createdAt: new Date().toISOString() },
+      ],
+    }),
+  )
+
+  const modes = await req('/api/polish/modes')
+  check('I', '润色有三种模式（细化/保守/精简）', Object.keys(modes.json?.modes ?? {}).join(',') === 'expand,polish,tighten', Object.keys(modes.json?.modes ?? {}).join(','))
+
+  const r = await req('/api/polish', { method: 'POST', body: { text: '那个脚本再跑一次', mode: 'expand', conversationId: convId } })
+  check('I', '润色返回结构化结果（意图/缺口/假设/润色文本）', r.status === 200 && r.json?.polished && r.json?.intent && Array.isArray(r.json?.gaps), `polished=${String(r.json?.polished).slice(0, 20)}`)
+  const sent = mock.seen.at(-1)?.body
+  const flat = JSON.stringify(sent ?? {})
+  check('I', '确实读了对话上下文（请求里带上了刚才那几句）', flat.includes('部署脚本老是超时') && flat.includes('30s 限制'), `contextSent=${flat.length}B`)
+  check('I', '把用户原话单独标记后送进去（不与上下文混淆）', flat.includes('那个脚本再跑一次'), '')
+
+  // 护栏：与草稿无词面重叠的记忆不得进入上下文（防止"帮我看看"被编出具体对象）
+  await req('/api/memory/observation', { method: 'POST', body: { text: 'rsi-loop 的跨日日期回退 bug 需要和 lunar-javascript 晚子时口径对齐', kind: 'project', importance: 5 } })
+  await req('/api/polish', { method: 'POST', body: { text: '帮我看看 ', mode: 'expand', conversationId: convId } })
+  const vagueSent = JSON.stringify(mock.seen.at(-1)?.body ?? {})
+  check('I', '空泛草稿不会把无关记忆塞进上下文（防编造具体对象）', !vagueSent.includes('晚子时'), `contextBytes=${vagueSent.length}`)
+  await req('/api/polish', { method: 'POST', body: { text: '那个 rsi-loop 的脚本再跑一次', mode: 'expand', conversationId: convId } })
+  const matchedSent = JSON.stringify(mock.seen.at(-1)?.body ?? {})
+  check('I', '草稿提到专有名词时，记忆正常参与推断', matchedSent.includes('晚子时'), '')
+  await req('/api/polish', { method: 'POST', body: { text: '那个项目的脚本再跑一次', mode: 'expand', conversationId: convId } })
+  const genericSent = JSON.stringify(mock.seen.at(-1)?.body ?? {})
+  check('I', '只有泛化名词（项目/脚本）时不引入记忆', !genericSent.includes('晚子时'), '')
+
+  // 确定性护栏：桩故意把记忆里的专有名词写进正文 → 应触发"去记忆重写"，且第二次请求里没有那条记忆
+  const callsBefore = mock.seen.length
+  mock.forceLeak = '晚子时'
+  const guarded = await req('/api/polish', { method: 'POST', body: { text: '那个 rsi-loop 的脚本再跑一次', mode: 'expand', conversationId: convId } })
+  mock.forceLeak = null
+  const calls = mock.seen.slice(callsBefore)
+  const lastCall = JSON.stringify(calls.at(-1)?.body ?? {})
+  check(
+    'I',
+    '正文泄漏记忆名词时自动去记忆重写（护栏生效）',
+    calls.length === 2 && guarded.json?.guard?.reason === 'memory-nouns-stripped' && !lastCall.includes('晚子时'),
+    `调用${calls.length}次 guard=${guarded.json?.guard?.reason} 末次含记忆=${lastCall.includes('晚子时')}`,
+  )
+
+  const tight = await req('/api/polish', { method: 'POST', body: { text: '帮我看看那个脚本怎么回事', mode: 'tighten', conversationId: convId } })
+  check('I', '模式会改变指令（精简走的是不同提示词）', tight.json?.modeLabel === '精简' && tight.json?.polished === '桩-精简结果', `modeLabel=${tight.json?.modeLabel}`)
+
+  const empty = await req('/api/polish', { method: 'POST', body: { text: '   ', mode: 'expand' } })
+  check('I', '空输入被拒（400）且不影响其它功能', empty.status === 400, `HTTP ${empty.status}`)
+  const long = await req('/api/polish', { method: 'POST', body: { text: 'x'.repeat(4200) } })
+  check('I', '超长输入被拒（>4000 字）', long.status === 400, `HTTP ${long.status}`)
+
+  await new Promise((r) => setTimeout(r, 2200)) // metrics 有 1.5s 落盘节流
+  const diag = await req('/api/diagnostics')
+  check('I', '润色进入了自报告（次数/耗时/改动率/模式分布）', (diag.json?.metrics?.polish?.count ?? 0) >= 2, JSON.stringify(diag.json?.metrics?.polish))
+
+  // 还原：上游回到真实端点
+  await req('/api/settings', { method: 'PATCH', body: { config: { upstream: JSON.parse(baselineConfigRaw).upstream ?? {} }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
+  const back = await req('/api/providers')
+  check('I', '测试结束后上游还原（不残留桩端点）', back.json?.onboarding?.baseUrl !== mock.baseUrl, `baseUrl=${back.json?.onboarding?.baseUrl}`)
+  await mock.close()
+}
+
+function realEnvOf(raw) {
+  const out = {}
+  for (const line of String(raw ?? '').split('\n')) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
+    if (m) out[m[1]] = m[2]
+  }
+  return out
+}
+
 async function trackLive() {
   section('F 实时链路（会调用模型）')
   const hasKey = Boolean((await req('/api/bootstrap')).json?.upstream?.hasKey)
@@ -779,6 +916,7 @@ async function main() {
     ['D', trackContext],
     ['E', trackRuntime],
     ['H', trackModularity],
+    ['I', trackPolish],
     ['G', trackAgency],
     ['F', trackLive],
   ]

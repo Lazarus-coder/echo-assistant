@@ -787,6 +787,106 @@ function bindWizard() {
   )
 }
 
+/* ------------------------------- 润色（CoT） ------------------------------- */
+
+const POLISH = { mode: localStorage.getItem('echo.polishMode') ?? 'expand', modes: null, running: false, last: null }
+
+async function runPolish({ mode } = {}) {
+  const input = $('#input')
+  const text = input.value.trim()
+  if (!text) return toast('输入框是空的', true)
+  if (POLISH.running) return
+  if (mode) {
+    POLISH.mode = mode
+    localStorage.setItem('echo.polishMode', mode)
+  }
+  POLISH.running = true
+  const btn = $('#polishBtn')
+  const original = btn.textContent
+  btn.textContent = '润色中…'
+  btn.disabled = true
+  try {
+    const r = await api('polish', { method: 'POST', body: { text, mode: POLISH.mode, conversationId: S.current } })
+    POLISH.last = r
+    if (!r.ok && r.error) toast(r.error, true)
+    renderPolishBox()
+  } catch (err) {
+    toast(`润色失败：${err.message}`, true)
+  } finally {
+    POLISH.running = false
+    btn.textContent = original
+    btn.disabled = false
+  }
+}
+
+function renderPolishBox() {
+  const box = $('#polishBox')
+  const r = POLISH.last
+  if (!r) {
+    box.hidden = true
+    return
+  }
+  const modes = POLISH.modes ?? {}
+  const chips = Object.entries(modes)
+    .map(([id, m]) => `<button data-pmode="${id}" aria-pressed="${id === POLISH.mode}" title="${esc(m.note ?? '')}">${esc(m.label ?? id)}</button>`)
+    .join('')
+  const list = (arr, label) => (arr?.length ? `<div><b>${label}</b><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : '')
+  box.hidden = false
+  box.innerHTML = `
+    <div class="head">
+      <span>润色${r.changed ? '' : '（原话已经够清楚，基本没改）'}${r.ms ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''}</span>
+      <div class="pill-group">${chips}</div>
+    </div>
+    <textarea id="polishText">${esc(r.polished ?? '')}</textarea>
+    <div class="why">
+      ${r.intent ? `<div><b>它理解的意图：</b>${esc(r.intent)}</div>` : ''}
+      ${list(r.gaps, '缺口：')}
+      ${list(r.assumptions, '它替你假设的（可以不同意）：')}
+      ${r.notes ? `<div><b>说明：</b>${esc(r.notes)}</div>` : ''}
+    </div>
+    <div class="acts">
+      <span class="muted small">${esc((r.usage?.total_tokens ? `${r.usage.total_tokens} tokens · ` : '') + '这段不会自动替换你的输入')}</span>
+      <div class="right">
+        <button class="btn small" data-pact="cancel">取消</button>
+        <button class="btn small" data-pact="retry">换个说法</button>
+        <button class="btn small" data-pact="use">替换输入框</button>
+        <button class="btn small primary" data-pact="send">直接发送</button>
+      </div>
+    </div>`
+  box.querySelectorAll('[data-pmode]').forEach((b) =>
+    b.addEventListener('click', () => runPolish({ mode: b.dataset.pmode })),
+  )
+  box.querySelectorAll('[data-pact]').forEach((b) =>
+    b.addEventListener('click', async () => {
+      const act = b.dataset.pact
+      if (act === 'cancel') {
+        POLISH.last = null
+        return renderPolishBox()
+      }
+      if (act === 'retry') return runPolish()
+      const text = $('#polishText').value.trim()
+      if (!text) return toast('润色后的内容是空的', true)
+      if (act === 'use') {
+        $('#input').value = text
+        autogrow()
+        localStorage.setItem(`echo.draft.${S.current}`, text)
+        POLISH.last = null
+        renderPolishBox()
+        return toast('已替换输入框内容')
+      }
+      if (act === 'send') {
+        POLISH.last = null
+        renderPolishBox()
+        $('#input').value = text
+        autogrow()
+        localStorage.removeItem(`echo.draft.${S.current}`)
+        return startStream({ userText: text })
+      }
+    }),
+  )
+  if (r.modes) POLISH.modes = r.modes
+}
+
 /* -------------------------------- streaming -------------------------------- */
 
 async function startStream({ userText, regenerate = false, editId }) {
@@ -1434,6 +1534,8 @@ async function selectConv(id) {
   renderConvs()
   renderThread()
   $('#input').value = localStorage.getItem(`echo.draft.${id}`) ?? ''
+  POLISH.last = null
+  renderPolishBox()
   autogrow()
 }
 
@@ -1554,6 +1656,10 @@ document.addEventListener('click', async (e) => {
     return
   }
   if (act === 'sug') { $('#input').value = btn.textContent; autogrow(); $('#composer').requestSubmit(); return }
+  if (act === 'polish') {
+    if (!POLISH.modes) POLISH.modes = (await api('polish/modes').catch(() => ({}))).modes ?? {}
+    return runPolish()
+  }
   if (act === 'attach') { $('#fileInput').click(); return }
   if (act === 'rm-att') { S.att.splice(Number(btn.dataset.i), 1); renderAttachments(); autogrow(); return }
   if (act === 'draw') {
@@ -1708,6 +1814,7 @@ document.addEventListener('click', async (e) => {
         <div class="stat"><b>${m.proactive?.replyRate != null ? `${(m.proactive.replyRate * 100).toFixed(0)}%` : '—'}</b><span>主动被接住</span></div>
       </div>
       <div class="muted small">用量：入 ${t.tokensIn ?? 0} / 出 ${t.tokensOut ?? 0} tokens · 平均 ${t.avgRounds ?? 0} 轮工具调用 · 模型 ${JSON.stringify(t.models ?? {})}</div>
+      ${m.polish?.count ? `<div class="muted small">润色：${m.polish.count} 次 · 平均 ${m.polish.avgMs}ms · 改动率 ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}% · 模式 ${JSON.stringify(m.polish.byMode ?? {})}</div>` : ''}
       ${toolRows}${searchRows}
       ${m.errors?.top?.length ? `<div class="muted small">错误 Top：${m.errors.top.map(([k, v]) => `${k}×${v}`).join('，')}</div>` : ''}
       <div class="muted small">存储：截图 ${d.storage?.screenshots?.mb}MB / 图片 ${d.storage?.uploads?.mb}MB · 记忆 ${d.memory?.observations} 条（淡出 ${d.memory?.forgetting?.faded}）· 图谱 ${d.graph?.nodes} 节点</div>`
@@ -1823,6 +1930,10 @@ composerEl.addEventListener('drop', async (e) => {
 $('#input').addEventListener('input', () => {
   autogrow()
   localStorage.setItem(`echo.draft.${S.current}`, $('#input').value)
+  if (POLISH.last && $('#input').value.trim() !== POLISH.last.original) {
+    POLISH.last = null
+    renderPolishBox()
+  }
 })
 $('#input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -1855,6 +1966,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { if (!$('#drawer').hidden) closeDrawer(); else if (S.stream) { api('chat/stop', { method: 'POST', body: { conversationId: S.current } }); S.stream.ctrl.abort() } }
   if (meta && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); document.querySelector('[data-action="dream-now"]')?.click() }
   if (meta && e.key.toLowerCase() === 'm') { e.preventDefault(); openPanel('memory') }
+  if (meta && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); document.querySelector('[data-action="polish"]')?.click() }
 })
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme)
 addEventListener('resize', () => { if (matchMedia('(min-width: 860px)').matches) $('#app').dataset.sidebar = 'open' })

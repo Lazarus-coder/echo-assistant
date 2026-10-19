@@ -14,6 +14,7 @@
   <a href="#positioning">Positioning</a> ·
   <a href="#byok">BYOK</a> ·
   <a href="#proactive-agency">Proactive agency</a> ·
+  <a href="#the-chat-window">Chat window</a> ·
   <a href="#memory--forgetting">Memory</a> ·
   <a href="#quick-start">Install</a> ·
   <a href="#permissions">Permissions</a> ·
@@ -75,6 +76,12 @@ Search is a **chain you configure**, tried in order; a failure (rate limit, miss
 | `tavily` · `brave` · `bocha` | API key | LLM-oriented / independent index / strong CN results |
 | `searxng` | instance URL | your own aggregator |
 | `custom` | — | any HTTP endpoint returning `{results:[{title,url,snippet}]}` |
+
+## The chat window
+
+Streaming answers with the thinking fold · visible tool steps and source chips · edit-and-resend · regenerate · per-conversation model choice · image paste/drag/upload · a draw button wired to your image model · conversation pin/export · token accounting · dark/light · phone-sized layout.
+
+**Prompt polish (⌘⇧P).** Type the half-sentence you actually have — “那个部署脚本老是超时，帮我看看” — and hit polish. It runs a small chain-of-thought pass that reads the conversation tail, the recalled facts that genuinely overlap your draft, and what you are doing right now, then: guesses your intent, lists the gaps, and rewrites the request at a usable granularity. You see the intent, the gaps and the assumptions it made (all editable), pick a mode — **expand / keep / tighten** — and either replace your draft or send it directly. Your input is never silently rewritten, and it will not invent objects: if the draft is too vague (“帮我看看 ”), it asks *you* what to look at instead of guessing from memory. A deterministic guard re-runs without memory if a memory-only name ever leaks into the text.
 
 <a id="proactive-agency"></a>
 ## Proactive agency

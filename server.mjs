@@ -61,6 +61,7 @@ import {
 } from './lib/screen.mjs'
 import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
+import { polishText, MODES } from './lib/polish.mjs'
 import {
   UPSTREAM_PRESETS,
   MEMORY_PROFILES,
@@ -849,6 +850,20 @@ async function api(req, res, url) {
     const body = await readBody(req)
     const result = await forgetScan({ trigger: 'manual', dryRun: Boolean(body.dryRun) })
     return send(res, 200, { result, stats: await memoryStats() })
+  }
+
+  if (method === 'POST' && p === 'polish') {
+    const body = await readBody(req)
+    const mode = MODES[body.mode] ? body.mode : 'expand'
+    try {
+      const result = await polishText({ text: body.text, mode, conversationId: body.conversationId, cfg })
+      return send(res, 200, result)
+    } catch (err) {
+      return send(res, err.status ?? 200, { ok: false, error: err.message, modes: Object.fromEntries(Object.entries(MODES).map(([id, m]) => [id, { label: m.label, note: m.note }])) })
+    }
+  }
+  if (method === 'GET' && p === 'polish/modes') {
+    return send(res, 200, { modes: Object.fromEntries(Object.entries(MODES).map(([id, m]) => [id, { label: m.label, note: m.note }])) })
   }
 
   if (method === 'POST' && p === 'chat') return streamChatHandler(req, res)

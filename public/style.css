@@ -294,6 +294,20 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .chain-row .why { color: var(--muted); font-size: 11.5px; }
 .chain-row input[type='checkbox'] { appearance: auto; width: 15px; height: 15px; }
 .pem { font: 12.5px var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: block; margin: 6px 0; white-space: pre-wrap; }
+
+/* 润色预览：意图/缺口/假设可见，正文可改，绝不静默替换 */
+.polish-box { border-top: 1px dashed var(--border-strong); margin: 0 -2px 8px; padding: 10px 2px 4px; }
+.polish-box .head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.polish-box .pill-group { display: flex; gap: 4px; margin-left: auto; }
+.polish-box .pill-group button { border: 1px solid var(--border); background: var(--panel); color: var(--text-2); font-size: 11.5px; padding: 2px 9px; border-radius: 20px; cursor: pointer; }
+.polish-box .pill-group button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.polish-box textarea { width: 100%; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel-2); padding: 9px 11px; font: inherit; line-height: 1.6; resize: vertical; min-height: 62px; }
+.polish-box textarea:focus { outline: none; border-color: var(--accent); }
+.polish-box .why { font-size: 12px; color: var(--text-2); margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.polish-box .why b { color: var(--muted); font-weight: 600; }
+.polish-box .why ul { margin: 0; padding-left: 16px; }
+.polish-box .acts { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.polish-box .acts .right { margin-left: auto; display: flex; gap: 6px; }
 .toasts { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(24px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; z-index: 80; pointer-events: none; }
 .toast { background: var(--text); color: var(--bg); border-radius: 20px; padding: 8px 16px; font-size: 13px; box-shadow: var(--shadow-lg); animation: rise 0.2s ease; max-width: 76vw; }
 .toast.bad { background: var(--danger); color: #fff; }

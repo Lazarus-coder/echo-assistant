@@ -97,12 +97,14 @@
           <div id="pending" class="pending" hidden></div>
           <form id="composer" class="composer">
             <div id="attachStrip" class="attach-strip" hidden></div>
+            <div id="polishBox" class="polish-box" hidden></div>
             <textarea id="input" rows="1" placeholder="随时问点什么…（Enter 发送，Shift+Enter 换行，可贴图）"></textarea>
             <div class="composer-bar">
               <div class="composer-meta">
                 <span id="ctxChip" class="muted"></span>
               </div>
               <div class="composer-actions">
+                <button type="button" class="btn ghost small" data-action="polish" id="polishBtn" title="读上下文把你这句话补成可执行的请求（⌘⇧P）">润色</button>
                 <button type="button" class="btn ghost small" data-action="attach" title="添加图片（也可直接粘贴或拖进来）">图片</button>
                 <button type="button" class="btn ghost small" data-action="draw" title="直接出图">画图</button>
                 <button type="button" class="btn ghost" data-action="stop" id="stopBtn" hidden>停止</button>
