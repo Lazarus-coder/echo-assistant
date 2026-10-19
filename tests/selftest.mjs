@@ -835,10 +835,16 @@ async function trackPolish() {
   check('I', '润色进入了自报告（次数/耗时/改动率/模式分布）', (diag.json?.metrics?.polish?.count ?? 0) >= 2, JSON.stringify(diag.json?.metrics?.polish))
 
   // 还原：上游回到真实端点
-  await req('/api/settings', { method: 'PATCH', body: { config: { upstream: JSON.parse(baselineConfigRaw).upstream ?? {} }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
+  await req('/api/settings', { method: 'PATCH', body: { config: { upstream: restoreUpstream() }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
   const back = await req('/api/providers')
   check('I', '测试结束后上游还原（不残留桩端点）', back.json?.onboarding?.baseUrl !== mock.baseUrl, `baseUrl=${back.json?.onboarding?.baseUrl}`)
   await mock.close()
+}
+
+function restoreUpstream() {
+  // 深合并不会删键：基线里没有 baseUrl 时必须显式置空，否则桩地址会残留（全新克隆下才会暴露）
+  const base = JSON.parse(baselineConfigRaw).upstream ?? {}
+  return { ...base, baseUrl: base.baseUrl ?? '' }
 }
 
 function realEnvOf(raw) {
@@ -926,7 +932,7 @@ async function trackCompanion() {
   check('J', '伴随指标进自报告（帧数/开口率/场景分布/点开与忽略数）', (diag.json?.metrics?.companion?.frames ?? 0) >= 3 && diag.json?.metrics?.companion?.dismissed >= 1, JSON.stringify(diag.json?.metrics?.companion))
 
   // 还原上游
-  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { enabled: false }, upstream: JSON.parse(baselineConfigRaw).upstream ?? {} }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
+  await req('/api/settings', { method: 'PATCH', body: { config: { companion: { enabled: false }, upstream: restoreUpstream() }, env: { OPENAI_BASE_URL: realEnvOf(baselineEnvRaw).OPENAI_BASE_URL ?? '', OPENAI_API_KEY: realEnvOf(baselineEnvRaw).OPENAI_API_KEY ?? '' } } })
   await mock.close()
 }
 
