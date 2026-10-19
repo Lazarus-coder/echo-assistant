@@ -73,6 +73,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null || die "Info.plist 不合法"
+# ad-hoc 签名：固定 bundle id + 固定路径，让"屏幕录制"授权尽量一次生效（未签名的裸二进制每次重编都会被当成新 App）
+codesign --force --deep --sign - --identifier com.echoassistant.menubar "$APP" >/dev/null 2>&1 || true
+codesign -dv "$APP" 2>&1 | grep -q 'adhoc' && ok "已 ad-hoc 签名（Identifier=com.echoassistant.menubar）" || info "未签名（macOS 会要求单独授权）"
 ok "Echo.app 组装完成（$(du -sh "$APP" | awk '{print $1}')）"
 
 # 3) 程序文件 + 安装器

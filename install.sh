@@ -24,6 +24,13 @@ info "项目目录: $ROOT"
 
 mkdir -p "$ROOT/data/logs" "$ROOT/data/conversations" "$ROOT/data/memory" "$ROOT/data/uploads" "$ROOT/build"
 
+# 若已经用 DMG 装过 App，就不再重编裸二进制（重建 = 新二进制 = macOS 会重新要授权）
+INSTALLED_APP="$HOME/Library/Application Support/Echo/Echo.app"
+if [ -x "$INSTALLED_APP/Contents/MacOS/EchoBar" ]; then
+  echo "检测到已安装的 App（$INSTALLED_APP），本次不再重编状态栏二进制，避免触发重新授权"
+  export ECHO_SKIP_MENUBAR_BUILD=1
+fi
+
 # ---------------------------------------------------------------- 1. 凭据文件
 if [ -f "$ROOT/data/echo.env" ]; then
   ok "data/echo.env 已存在，沿用（要换 key 就删掉它重跑）"
@@ -111,7 +118,7 @@ ok "已写 $PLIST"
 
 # ------------------------------------------------------------ 4. 状态栏图标
 MENUBAR_BIN=""
-if [ "$WITH_MENUBAR" = "1" ]; then
+if [ "$WITH_MENUBAR" = "1" ] && [ "${ECHO_SKIP_MENUBAR_BUILD:-0}" = "0" ]; then
   if command -v swiftc >/dev/null 2>&1; then
     info "编译状态栏 App（首次约 10–30 秒）…"
     if swiftc -O -o "$ROOT/build/EchoBar" "$ROOT/menubar/main.swift" "$ROOT/menubar/EchoBar.swift" "$ROOT/menubar/CompanionOverlay.swift" 2>"$ROOT/data/logs/swiftc.log"; then

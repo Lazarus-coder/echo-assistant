@@ -44,6 +44,19 @@ Without the grant, Echo degrades quietly: captures are skipped, the log says so,
 
 Companion mode (off by default, enabled from the menu bar or *Settings → 伴随模式*) reuses the same Screen Recording grant but captures far more often (default every 20 s instead of every 5 minutes). Everything above still applies: on-device OCR, text only, screenshots deleted after analysis, block-list respected, and nothing is sent to the model when the screen hasn't changed. It can be paused instantly from the menu bar, and it silences itself after three dismissals in a row.
 
+## 2c. Why macOS sometimes asks again (and how to stop it)
+
+Screen Recording is granted **per app identity**. Our menu-bar binary is not Developer-ID signed*, so whenever the binary itself changes (e.g. rebuilding from source), macOS treats it as a different app and asks again.
+
+Two rules keep it quiet:
+
+1. **For everyday use, install from the DMG** — the installer places `Echo.app` at `~/Library/Application Support/Echo/Echo.app` (fixed path, fixed bundle id `com.echoassistant.menubar`) and ad-hoc signs it. Grant once; it stays granted.
+2. **When developing from source, expect one re-grant per rebuild.** `./install.sh` detects an already-installed app and *skips* rebuilding the binary on purpose. If you do rebuild, macOS will ask once more — that is the price of changing the binary, not a bug.
+
+Echo never *initiates* a permission dialog on its own: without the grant it simply skips captures, notes it in the log, and shows one ⚠️ item in the menu-bar menu. Nothing pops up until you click it (or run the screen test in *Settings → 引导与权限*).
+
+`*` A Developer ID signature would make this permanent; it needs a paid Apple account, which a local personal tool does not warrant.
+
 ## 3. Notifications — optional
 
 Proactive messages announce themselves through `osascript`. If nothing shows up, allow notifications for your terminal/launcher app in **System Settings → Notifications**, or just rely on the unread dot in the menu bar.

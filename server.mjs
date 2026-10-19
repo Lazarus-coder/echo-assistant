@@ -62,7 +62,7 @@ import {
 import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
 import { polishText, MODES } from './lib/polish.mjs'
-import { ingestFrame, companionStatus, pendingBubbles, setCompanion, openBubble, dismissBubble } from './lib/companion.mjs'
+import { ingestFrame, companionStatus, pendingBubbles, setCompanion, openBubble, dismissBubble, expireBubble } from './lib/companion.mjs'
 import {
   UPSTREAM_PRESETS,
   MEMORY_PROFILES,
@@ -814,7 +814,7 @@ async function api(req, res, url) {
     return send(res, 200, result)
   }
   if (method === 'GET' && p === 'companion') return send(res, 200, await companionStatus({ includeBubbles: Number(url.searchParams.get('n') ?? 12) }))
-  if (method === 'GET' && p === 'companion/pending') return send(res, 200, { bubbles: await pendingBubbles() })
+  if (method === 'GET' && p === 'companion/pending') return send(res, 200, { bubbles: await pendingBubbles({ since: url.searchParams.get('since') }) })
   if (method === 'PATCH' && p === 'companion') {
     const body = await readBody(req)
     return send(res, 200, await setCompanion(body.companion ?? body))
@@ -830,6 +830,11 @@ async function api(req, res, url) {
       const r = await openBubble(id)
       if (!r) return send(res, 404, { error: 'not found' })
       return send(res, 200, { conversationId: r.conversationId, bubble: r.bubble })
+    }
+    if (method === 'POST' && action === 'expire') {
+      const b = await expireBubble(id)
+      if (!b) return send(res, 404, { error: 'not found' })
+      return send(res, 200, { ok: true })
     }
     if (method === 'POST' && action === 'dismiss') {
       const body = await readBody(req)
@@ -1107,6 +1112,7 @@ function publicConfig(c) {
     search: c.search,
     memory: c.memory,
     screen: c.screen,
+    companion: c.companion,
     storage: c.storage,
     dream: c.dream,
     proactive: c.proactive,

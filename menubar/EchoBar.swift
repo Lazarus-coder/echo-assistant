@@ -340,8 +340,10 @@ final class Controller: NSObject, NSApplicationDelegate {
 
     // 伴随：轮询待冒泡的气泡 → 悬浮窗呈现；点开进小对话窗
     let overlay = OverlayController()
+    var bubbleSince = ISO8601DateFormatter().string(from: Date())
     func pollBubbles() {
-        request("companion/pending") { [weak self] json in
+        let q = "companion/pending?since=" + (bubbleSince.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")
+        request(q) { [weak self] json in
             guard let self else { return }
             let list = (json?["bubbles"] as? [[String: Any]]) ?? []
             guard !list.isEmpty else { return }
@@ -363,6 +365,10 @@ final class Controller: NSObject, NSApplicationDelegate {
                 },
                 onDismiss: { b in
                     request("companion/\(b.id)/dismiss", method: "POST", body: ["reason": "menu_bubble"]) { _ in self.refresh() }
+                },
+                onExpire: { b in
+                    // 自动淡出只标过期：不在服务端计"被拒绝"，也不该再次弹出来
+                    request("companion/\(b.id)/expire", method: "POST", body: [:]) { _ in }
                 }
             )
         }

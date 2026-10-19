@@ -61,8 +61,10 @@ mkdir -p "$TARGET/data/logs"
 if [ -d "$SRC/Echo.app" ]; then
   rm -rf "/Applications/Echo.app" 2>/dev/null || true
   rm -rf "$TARGET/Echo.app"
+  # 先删旧 bundle 再拷贝，避免旧签名残留
   ditto "$SRC/Echo.app" "$TARGET/Echo.app"
-  ok "已安装应用：$TARGET/Echo.app"
+  codesign --force --deep --sign - --identifier com.echoassistant.menubar "$TARGET/Echo.app" >/dev/null 2>&1 || true
+  ok "已安装应用：$TARGET/Echo.app（ad-hoc 签名，路径固定；屏幕录制授权只需给一次）"
 fi
 ok "已复制程序文件到 $TARGET"
 

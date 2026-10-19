@@ -70,7 +70,7 @@ final class OverlayController: NSObject {
         w.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
     }
 
-    func present(_ bubbles: [Bubble], onOpen: @escaping (Bubble) -> Void, onDismiss: @escaping (Bubble) -> Void) {
+    func present(_ bubbles: [Bubble], onOpen: @escaping (Bubble) -> Void, onDismiss: @escaping (Bubble) -> Void, onExpire: @escaping (Bubble) -> Void) {
         guard !bubbles.isEmpty else { return }
         ensureWindow()
         guard let stack = stack, let w = window else { return }
@@ -78,7 +78,10 @@ final class OverlayController: NSObject {
             let card = BubbleCard(bubble: b)
             card.onOpen = { onOpen(b) }
             card.onDismiss = { onDismiss(b) }
-            card.onSelfDismiss = { [weak self] in self?.remove(b.id) }
+            card.onSelfDismiss = { [weak self] in
+                onExpire(b)
+                self?.remove(b.id)
+            }
             stack.addArrangedSubview(card)
             visible[b.id] = card
             // 进场

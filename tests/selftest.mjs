@@ -927,6 +927,21 @@ async function trackCompanion() {
   check('J', '可手动暂停（暂停期间静默）', paused.json?.paused === true && pausedFrame.json?.skipped === 'paused', `paused=${paused.json?.paused}`)
   await req('/api/companion/pause', { method: 'POST', body: { minutes: 0 } })
 
+  // 气泡生命周期：自动淡出 = expired（不再重复弹），且不计入"被拒绝"的退避
+  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
+  const b3 = await req('/api/companion/frame', { method: 'POST', body: { text: '又一次不同的画面内容：浏览器里打开着一篇关于本地优先软件的长文，正文大约几百字，用来产生一个会被自动淡出的气泡并验证它不会反复出现。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  const id3 = b3.json?.bubble?.id
+  const once = await req('/api/companion/pending')
+  await req(`/api/companion/${id3}/expire`, { method: 'POST', body: {} })
+  const twice = await req('/api/companion/pending')
+  const streak = (await req('/api/companion')).json?.dismissStreak
+  check('J', '自动淡出的气泡不会反复冒出来（expired）', Boolean(id3) && once.json?.bubbles?.some((b) => b.id === id3) && !twice.json?.bubbles?.some((b) => b.id === id3), `帧=${JSON.stringify(b3.json).slice(0, 90)} 再次待冒泡=${twice.json?.bubbles?.length ?? 0}`)
+  check('J', '自动淡出不计入"被拒绝"的退避（用户并没有拒绝）', (streak ?? 1) === 0, `dismissStreak=${streak}`)
+
+  const since = new Date(Date.now() + 60_000).toISOString()
+  const future = await req(`/api/companion/pending?since=${encodeURIComponent(since)}`)
+  check('J', 'pending 支持 since（重启后不把老气泡再捞回来）', (future.json?.bubbles?.length ?? 0) === 0, `since=未来 → ${future.json?.bubbles?.length ?? 0} 个`)
+
   await new Promise((r) => setTimeout(r, 2200))
   const diag = await req('/api/diagnostics')
   check('J', '伴随指标进自报告（帧数/开口率/场景分布/点开与忽略数）', (diag.json?.metrics?.companion?.frames ?? 0) >= 3 && diag.json?.metrics?.companion?.dismissed >= 1, JSON.stringify(diag.json?.metrics?.companion))
