@@ -36,6 +36,17 @@ fi
 rm -f "$DIST/SHA256SUMS"
 ( cd "$DIST" && shasum -a 256 "$NAME.tar.gz" | awk '{print $1"  "$2}' > SHA256SUMS )
 
+# 断言"产品决策演变记录"已跟上当前版本：它必须随每次发版更新，否则拒绝出包
+JOURNEY="docs/product-journey.md"
+[ -f "$JOURNEY" ] || { printf '\033[31m✗ 缺少 %s（产品决策演变记录）\033[0m\n' "$JOURNEY"; exit 1; }
+JOURNEY_VER="$(grep -m1 -oE '覆盖版本：[0-9A-Za-z.\-]+' "$JOURNEY" | sed 's/覆盖版本：//')"
+if [ "$JOURNEY_VER" != "$VER" ]; then
+  printf '\033[31m✗ 产品决策演变记录还停在 %s，当前版本是 %s\033[0m\n' "${JOURNEY_VER:-未标注}" "$VER"
+  printf '  请在 %s 里补上这一阶段做了什么决定、为什么，并把"覆盖版本"改成 %s\n' "$JOURNEY" "$VER"
+  exit 1
+fi
+printf '· 决策记录已更新至 %s\n' "$JOURNEY_VER"
+
 # 断言发布件里的版本号与当前工作区一致（防止"发了旧树"这类时序错误）
 ARCHIVED_VER="$(tar -xzOf "$OUT" "$NAME/package.json" 2>/dev/null | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version' 2>/dev/null || echo '?')"
 if [ "$ARCHIVED_VER" != "$VER" ]; then

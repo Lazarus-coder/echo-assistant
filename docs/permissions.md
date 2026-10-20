@@ -91,6 +91,10 @@ xcode-select --install      # only if you want the menu-bar app and lack swiftc
 
 Everything Echo knows lives under `data/` — `echo.env` (keys, `600`), conversations, memory (`MEMORY.md`, `observations.jsonl`, `working.jsonl`, `graph.json`, `forgetting.md`), uploads, `metrics.jsonl`, logs. You can read, back up, or delete any of it. Disk budgets for screenshots/images are enforced (`config.json → storage`), and *Settings → 隐私兜底* has a one-click “forget everything”.
 
+**Memory → 相处方式** stores response preferences and manually entered person notes in `data/state.json`. These are ordinary personal memory: existing login and write-request protections apply. With personalization and memory injection enabled, response preferences and up to three people matched to the current conversation are sent to the chosen model endpoint. A short follow-up may use the immediately preceding user message to resolve the person. Existing proactive/companion calls receive only response preferences, not these person notes; this feature creates no additional notifications or model calls.
+
+Disable personalization, turn off memory injection, or delete a person to stop including the affected saved context in subsequent requests. This does not retract prior provider requests or erase conversation history. JSON backups include these records, and “forget everything” removes them. No separate mood scores or emotional profiles are stored. Emotional restraint and source attribution are model instructions, not a guarantee about every generated response.
+
 ## 7. Workspace tools and MCP
 
 Workspace tools start disabled. On the host Mac, open **工作区**, select an existing directory, and enable reading, editing, and Shell separately. File tools stay inside this directory, reject symlinks and Echo private data, and check the current file hash before replacement. Enabling editing authorizes direct edits; before/after snapshots are saved for review.
@@ -101,6 +105,14 @@ Stop terminates the local Shell process group and requests cancellation from MCP
 
 Configuration, local execution, approvals, and output downloads are restricted to loopback connections; phone/LAN chat has no workspace or MCP tools. Run records, command logs, and edit snapshots are stored under `data/runs/` and may contain project data. They persist until “forget everything” clears them; back up this directory separately from conversation JSON exports. File contents and tool results used by the model are sent to your chosen model endpoint. Goal preparation remains read-only and receives no unattended command authority.
 
+## 8. Background research
+
+Background research starts disabled. Enable it on the host Mac in **主动服务**. The separate “discover from new chats” setting allows bounded analysis of messages written after activation; it does not turn off or on ordinary memory. It may send those messages and the current case to the configured model endpoint, and public search queries to the configured search provider. It creates no mood or relationship profiles.
+
+Each goal has its own research scope: public URLs, up to five explicitly uploaded PDF/text documents, and up to three selected folders relative to the enabled workspace. Folder reads retain workspace path/symlink/private-data protections. Background tools cannot execute Shell, call MCP, edit files, submit forms, or send messages to other people. Uploaded document extraction is local; selected extracts are sent to the model when used. Documents persist in `data/research/documents/`, are included in JSON backups, and are removed by “forget everything.” Research run outputs live in `data/runs/`.
+
+User-confirmed official domains establish which sources may support a verified deadline claim; a search result does not certify itself as official. Unknown or conflicting dates remain visible as candidates. Research and notification permissions are independent: quiet hours and delivery budgets still apply. Disable research to cancel its active work. A memory-only reset also advances the discovery start time, so retained old chats are not immediately re-imported. The Mac must be awake with Echo running for checks to execute.
+
 ---
 
 ## 中文速览
@@ -110,5 +122,7 @@ Configuration, local execution, approvals, and output downloads are restricted t
 - **通知**：主动消息走 osascript，必要时在系统设置里允许。
 - **常驻**：`./install.sh` 注册 `com.echo.chat` + `com.echo.menubar` 两个 launchd 任务（登录自启、崩溃自动拉起）。
 - **网络**：默认监听 `0.0.0.0:8787` 且免登录；公共网络下用 `./bin/echo auth on` 开启口令。
+- **相处方式**：交流偏好与手动人物背景存在 `data/state.json`，随备份导出、“忘掉一切”清除。开启功能与记忆注入时，相关资料会发给所选模型；关闭或删除只影响后续请求，不抹去历史对话。此功能不增加通知，也不单独保存情绪档案。
+- **后台研究**：默认关闭，在本机单独开启。新对话与选定来源可能发给已配置的模型，搜索词发给搜索提供方；不自动读取邮箱或所有文件。只读工具不获得 Shell/MCP/外部写权限，通知仍受静默与预算控制。关闭会取消研究，“全部忘掉”清除文档和事务；睡眠期间不运行。
 - **工作区与 MCP**：本机显式开启；文件编辑检查哈希并保存前后快照；Shell/MCP 每次确认。Shell 以本机账号权限运行，并非操作系统沙箱。局域网对话不能调用本机工具。停止不等于撤销，重启不会重放；`data/runs/` 保存输出，“全部忘掉”会清除。
 - **数据**：全在 `data/`，明文可读可删；磁盘预算自动执行；设置里有"全部忘掉"。

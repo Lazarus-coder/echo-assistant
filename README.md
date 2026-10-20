@@ -105,13 +105,15 @@ Background goal preparation keeps its existing read-only scope; enabling this ha
 <a id="proactive-agency"></a>
 ## Proactive agency
 
-Echo can hold a goal over time, prepare something useful, and wait for an appropriate moment to surface it. Open **主动服务 → 持续推进的目标** to use the five parts of this loop:
+Echo can notice an unfinished need, research it, and wait for an appropriate moment to surface useful work. Open **主动服务** and explicitly enable background research to discover needs from new chats. Research permission and notification permission are separate.
 
 1. **Durable commitments.** Create a goal or adopt a user message or Dream suggestion. Define the success criteria, next action, blocker, and optional deadline. Goals can be paused, resumed, completed with evidence, or cancelled. Dream suggestions remain candidates until you adopt them; a generated draft never marks a goal done.
-2. **Scoped preparation.** Each goal may use its own description, optionally relevant memory, and up to three approved public URLs. Confirming, editing, or resuming an active goal queues a local draft. Each attempt has one model call (1,800 output tokens, 60 seconds), at most two attempts per goal and five across goals in a rolling 24 hours. Source reads are bounded and do not follow redirects. Pausing or changing a goal discards stale in-flight results. Saved results contain source timestamps, excerpts, assumptions, and citation checks. These checks establish source correspondence and structure, not factual correctness. Preparation uses your configured model provider and performs no external writes.
+2. **Scoped research.** Opted-in goals can search public sources, read pages/PDFs, use explicitly attached documents, and read selected folders inside the enabled workspace. Research uses the existing persisted harness with a read-only tool allowlist, bounded calls/time, and no Shell, MCP, or external writes. Discovery is limited to 20 model calls daily; preparation is limited to two attempts per goal and five overall in a rolling 24 hours. Legacy goals retain the single-call drafting path. New inferred cases carry the actual user-message reference, unresolved identity questions, and a seven-day expiry; adopt one to follow it indefinitely.
 3. **Explicit outcomes.** Mark a result accepted, helpful in completing the goal, irrelevant, incorrect, or badly timed. Correcting feedback replaces the prior vote. Acceptance and completion count as one useful intervention; bad timing pauses interruptions for 30 minutes without changing the usefulness estimate. Silence and unrelated conversation stay unknown.
 4. **Shared attention limits.** Proactive messages and companion bubbles share a daily budget and minimum gap, in addition to their channel limits. Quiet hours, fresh meeting/deep-work context, and recent chat activity defer delivery. Preparation can continue while delivery is disabled. Results remain available in the panel; queued messages expire and unchanged evidence is deduplicated. Screen context is only used when enabled and recent; absence of chat activity does not establish that the device is idle.
-5. **Condition-triggered follow-up.** Choose manual follow-up, an approaching deadline, or a change to an approved source. Deadline checks trigger once per deadline within two days; source watches check at most hourly and compare readable page content. A failed source read is visible and does not count as a change. Evidence and observation times accompany the resulting preparation.
+5. **Verified, durable follow-up.** Deadline and source watches can run together. Research checks quoted dates against the institution/program/cycle/category and user-confirmed official domains; conflicting or unsupported claims stay uncertain. Date-only sources never imply a precise time or timezone. Watches keep successful-check time, retry state, and deadline milestones; relevant source text is compared to avoid footer-only alerts. Explicit, task-specific completion in new chat can close the matching goal and stop its reminders.
+
+This first version reads new Echo chats, shared public pages/PDFs, attached text documents, and explicitly selected workspace folders. It does not automatically ingest your browser, email, or calendar. Local checks pause while the Mac sleeps or Echo is stopped; startup, wake, and the periodic worker reconcile overdue work. Scanned PDFs without extractable text remain unreadable rather than producing invented evidence. Findings are source-supported, not a guarantee of factual correctness.
 
 Goals, preparation results, and explicit outcomes persist locally and are included in the JSON backup. “Forget everything” also clears this work. Settings expose shared attention limits; the goal panel keeps source permissions and lifecycle controls together.
 
@@ -127,7 +129,7 @@ Scenarios it is built for (each with its own voice):
 
 | You are… | It does |
 |---|---|
-| **chatting with someone** (WeChat, Slack, mail) | reads the thread, judges the relationship and tone, offers a line you can copy |
+| **chatting with someone** (WeChat, Slack, mail) | offers wording help when useful; avoids guessing feelings, motives, or relationship closeness from the screen |
 | **watching something** (a film, a video) | watches along as a friend — one feeling, one piece of trivia, one quip; never a lecture, never a question |
 | **working** (docs, spreadsheets) | one concrete suggestion: the next step, the easy-to-miss detail, the number to double-check |
 | **writing code** | speaks only when it can actually help: an API detail, an edge case, a shorter way |
@@ -153,12 +155,18 @@ Bubbles carry their own reasoning: the card says one line, and the conversation 
 
 Strength = importance × usage gain × exponential decay. Being retrieved strengthens a fact; unused facts *fade* (kept, revivable — not deleted); over capacity the weakest are evicted first; **every fade and deletion is written to `memory/forgetting.md` with its reason**. You can protect, revive, or explicitly forget anything. Memory profiles (`off · light · standard · deep`) choose how much of this runs at all.
 
+**Quiet relationship awareness.** Expand **Memory → 相处方式** to choose a subtle (default), warm, or direct tone and whether you prefer listening or practical help. You can optionally set a preferred name, communication boundaries, and notes about up to 12 people. Notes are manually maintained: Echo uses at most three matching people when you mention them, or when a short follow-up refers to the immediately preceding user message. Current requests take priority over saved preferences.
+
+Emotional sensitivity uses the current exchange, with brief acknowledgment only when helpful. It adds no mood scores, emotional profiles, check-ins, or notification triggers. Existing proactive messages may adapt their wording to your response preferences; they do not receive these person notes. Memory extraction and consolidation are instructed to preserve attribution and avoid turning temporary feelings or guesses about people into lasting facts.
+
+Saved preferences and matching notes are sent to your configured model only when personalization and memory injection are enabled. Disabling either, or deleting a person, affects subsequent model requests without interrupting tools already running. Deletion does not erase prior conversations or data already sent to a provider. The records live in `data/state.json`, are included in JSON backups, and are removed by “forget everything”. Automated tests use a local mock provider; tone and inference quality still depend on your chosen model.
+
 <a id="quick-start"></a>
 ## Install
 
 **macOS installer (recommended, universal binary — Apple Silicon + Intel):** grab `Echo-0.1.0-alpha.5-macos.dmg` from [Releases](https://github.com/Lazarus-coder/echo-assistant/releases), open it, double-click **Install Echo.command**. It installs `Echo.app` + the service into `~/Library/Application Support/Echo`, registers launchd, and asks for your endpoint/key (skippable — the wizard covers it). Uninstall with the bundled `Uninstall Echo.command`.
 
-**From source** (macOS, Node ≥ 20):
+**From source** (macOS, Node ≥ 22.13):
 
 ```bash
 git clone https://github.com/Lazarus-coder/echo-assistant.git && cd echo-assistant
@@ -180,7 +188,7 @@ git clone https://github.com/Lazarus-coder/echo-assistant.git && cd echo-assista
 
 Phone access: open `http://<mac-lan-ip>:8787` on the same Wi-Fi → “Add to Home Screen”. Turn on `./bin/echo auth on` on untrusted networks.
 
-For development, run `npm ci --omit=dev --ignore-scripts`, then `npm start`. Source installs require Node 20+ and npm. `npm run test:harness` exercises files, Shell, MCP, approvals, persistence, APIs, and UI with temporary data and local mock servers; `npm run test:regressions` also covers the existing product.
+For development, run `npm ci --omit=dev --ignore-scripts`, then `npm start`. Source installs require Node 22.13+ and npm for the current PDF.js parser. `npm run test:harness` exercises files, Shell, MCP, approvals, persistence, APIs, and UI with temporary data and local mock servers; `npm run test:regressions` also covers proactive research and the existing product.
 
 <a id="permissions"></a>
 ## Permissions & residency
@@ -203,6 +211,8 @@ data/
 Budgets are enforced (`config.json → storage`): screenshots 200 MB / 3 days, generated images 300 MB / 60 days, pruning oldest-first past 80 %, never deleting images referenced by recent conversations. Maintenance runs every six hours and at boot; *Settings → 隐私兜底* has a one-click “forget everything”.
 
 ## Self-improvement
+
+How the product got shaped — every phase, the decision, and what was rejected — is kept in [docs/product-journey.md](docs/product-journey.md); it is required to be updated with every release (the packager refuses to build if it lags behind the version).
 
 Echo does not rewrite its own code. It ships the conservative half of that idea: a **frozen evaluator** (`tests/selftest.mjs`, sandboxed, 69 offline + 79 live assertions against design invariants), a public iteration log with hypotheses, scores and lessons ([docs/rsi-log.md](docs/rsi-log.md)), and a rule that the score sheet is only ever tightened.
 
