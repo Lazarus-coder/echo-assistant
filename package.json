@@ -1,6 +1,6 @@
 {
   "name": "echo-assistant",
-  "version": "0.1.0-alpha.4",
+  "version": "0.1.0-alpha.5",
   "private": true,
   "description": "跑在自己 Mac 上的私人 agent：工作区执行、标准 MCP 工具、分层记忆、主动服务、屏幕感知",
   "type": "module",
