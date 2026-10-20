@@ -23,7 +23,7 @@ Delete that folder and it is gone.
 
 Requirements
 ------------
-  macOS 13+ and Node 20 or newer (brew install node, or nodejs.org).
+  macOS 13+ and Node 22.13 or newer (brew install node, or nodejs.org).
 
 Notes
 -----

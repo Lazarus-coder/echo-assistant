@@ -284,6 +284,19 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .nowrap { white-space: nowrap; }
 .right { margin-left: auto; }
 .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.memory-contents { display: contents; }
+.relationship-section { flex: none; }
+.relationship-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.relationship-more { margin: 8px 0 12px; }
+.relationship-more summary { cursor: pointer; font-size: 12px; color: var(--text-2); margin-bottom: 10px; }
+.relationship-section .field textarea { min-height: 72px; font-family: inherit; }
+.relationship-people { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.relationship-people h4 { margin: 0; }
+.relationship-person { overflow-wrap: anywhere; }
+.relationship-text { white-space: pre-wrap; }
+.relationship-editor { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.relationship-status { margin: 8px 0 0; overflow-wrap: anywhere; }
+.relationship-status:empty { display: none; }
 
 /* Confirmed goals, scoped preparation, and inspectable results. */
 .agency-title { font-size: 17px; margin: 0; }
@@ -328,6 +341,25 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .outcome-actions .selected { border-color: var(--accent); color: var(--accent); background: var(--panel-2); }
 .result-link { margin: 8px 0; }
 #proactiveOverview { display: flex; flex-direction: column; gap: 14px; padding-top: 8px; }
+.research-settings { padding: 12px 0 0; }
+.research-settings > .goal-checkbox { font-size: 13px; font-weight: 600; }
+.research-options, .goal-extra-sources, .goal-context { min-width: 0; margin: 10px 0; }
+.research-options > summary, .goal-extra-sources > summary, .goal-context > summary { cursor: pointer; font-size: 12px; color: var(--text-2); padding: 5px 0; }
+.research-options[open] > summary, .goal-extra-sources[open] > summary, .goal-context[open] > summary { margin-bottom: 10px; }
+.research-form-status { overflow-wrap: anywhere; }
+.goal-discovery { padding: 1px 0 8px; }
+.goal-discovery > p { color: var(--text-2); }
+.goal-discovery .goal-source { margin: 8px 0; }
+.goal-document { display: flex; gap: 8px; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 12px; }
+.goal-document > span { min-width: 0; overflow-wrap: anywhere; }
+.goal-document small { display: block; }
+#goalDocuments { max-width: 100%; font: inherit; font-size: 12px; }
+.deadline-assessment { border-left: 2px solid var(--border-strong); padding: 8px 10px; margin: 10px 0; font-size: 12px; color: var(--text-2); }
+.deadline-assessment.needs-check > b { color: var(--danger); }
+.deadline-claim { margin: 9px 0; }
+.deadline-claim blockquote { margin: 7px 0; white-space: pre-wrap; color: var(--text); }
+.deadline-claim p { margin: 5px 0; }
+.deadline-claim a { color: var(--accent); }
 
 /* Workspace actions retain a reviewable input and a durable result. */
 .workspace-fields { border: 0; padding: 0; margin: 0; min-width: 0; }

@@ -34,15 +34,14 @@ echo "把「跑在自己 Mac 上的私人对话窗口」装到 $TARGET"
 echo "（数据也放在那里：明文可读、删除即卸载干净）"
 echo
 
-# ── 1. 找 Node（≥20） ────────────────────────────────────────────────
+# ── 1. 找 Node（≥22.13） ─────────────────────────────────────────────
 NODE=""
 for cand in "$(command -v node 2>/dev/null || true)" /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.nvm/versions/node"/*/bin/node; do
   [ -n "$cand" ] && [ -x "$cand" ] || continue
-  major="$("$cand" -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "$major" -ge 20 ] 2>/dev/null; then NODE="$cand"; break; fi
+  if "$cand" -e 'const [major,minor]=process.versions.node.split(".").map(Number);process.exit(major>22||(major===22&&minor>=13)?0:1)' 2>/dev/null; then NODE="$cand"; break; fi
 done
 if [ -z "$NODE" ]; then
-  warn "没有找到 Node 20 或更高版本"
+  warn "没有找到 Node 22.13 或更高版本"
   echo "  装一个再回来（任选其一）："
   echo "    brew install node        # 有 Homebrew"
   echo "    或到 https://nodejs.org 下载 LTS 版"

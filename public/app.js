@@ -1527,8 +1527,10 @@ function toggleSidebar() {
 }
 
 async function renderMemoryPanel() {
-  const el = $('#panelMemory')
   const [mem, dream, forgetting, screen] = await Promise.all([api('memory'), api('dream'), api('memory/forgetting'), api('screen')])
+  const panel = $('#panelMemory')
+  if (!$('#memoryContents', panel)) panel.innerHTML = `<details id="relationshipSection" class="fold relationship-section"><summary>相处方式 <span class="muted small">· 按你的习惯回应</span></summary><div id="relationshipBody" class="fold-body"><p class="muted small" role="status">展开后加载。</p></div></details><div id="memoryContents" class="memory-contents"></div>`
+  const el = $('#memoryContents', panel)
   const f = mem.stats.forgetting ?? {}
   el.innerHTML = `
     <div class="stat-row">
@@ -1604,7 +1606,173 @@ async function renderMemoryPanel() {
     const q = e.target.value.trim().toLowerCase()
     $$('#memList .mem-item').forEach((n) => (n.style.display = n.textContent.toLowerCase().includes(q) ? '' : 'none'))
   })
+  updateRelationshipAvailability()
 }
+
+/* Preferences and people are deliberately manual, and never refreshed by polling. */
+const RELATIONSHIPS = { data: null, loading: false, version: 0 }
+
+async function loadRelationships() {
+  const body = $('#relationshipBody')
+  if (!body || body.dataset.loaded || RELATIONSHIPS.loading) return
+  const version = RELATIONSHIPS.version
+  RELATIONSHIPS.loading = true
+  body.innerHTML = '<p class="muted small" role="status">正在加载…</p>'
+  try {
+    const data = await api('relationships')
+    if (version !== RELATIONSHIPS.version || body !== $('#relationshipBody')) return
+    RELATIONSHIPS.data = data
+    body.innerHTML = relationshipProfileHtml(data.profile ?? {})
+    body.dataset.loaded = 'true'
+    renderRelationshipPeople()
+  } catch (err) {
+    if (version !== RELATIONSHIPS.version || body !== $('#relationshipBody')) return
+    body.innerHTML = `<p class="small" role="status">${esc(err.message)}</p><button class="btn small" data-action="relationship-retry">重新加载</button>`
+  } finally {
+    if (version === RELATIONSHIPS.version) RELATIONSHIPS.loading = false
+  }
+}
+
+function relationshipProfileHtml(profile) {
+  return `<p class="muted small">让回应更合你的习惯，默认保持克制。这里的人物背景只由你添加，提到相关人物时才参考；不会保存情绪画像，也不会因此增加主动消息。相关内容可能发送给你配置的模型。</p>
+    <p id="relationshipAvailability" class="muted small" ${S.boot?.config?.memory?.enabled === false || S.boot?.config?.memory?.inject === false ? '' : 'hidden'}>当前记忆注入已关闭，保存的相处方式与人物背景暂不用于回应。</p>
+    <form id="relationshipProfileForm">
+      <label class="switch" for="relationshipEnabled">在对话中使用这些设置<input id="relationshipEnabled" name="enabled" type="checkbox" ${profile.enabled !== false ? 'checked' : ''} /></label>
+      <div class="relationship-options">
+        <div class="field"><label for="relationshipTone">回应语气</label><select id="relationshipTone" name="tone">${[['subtle', '自然克制'], ['warm', '稍微温暖'], ['direct', '简洁直接']].map(([value, label]) => `<option value="${value}" ${(profile.tone ?? 'subtle') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label for="relationshipSupport">遇到难处时</label><select id="relationshipSupport" name="support">${[['balanced', '顺着当下需要'], ['listen', '先听我说'], ['practical', '先帮我解决']].map(([value, label]) => `<option value="${value}" ${(profile.support ?? 'balanced') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+      </div>
+      <details class="relationship-more"><summary>称呼与边界（可选）</summary>
+        <div class="field"><label for="relationshipName">希望怎么称呼你</label><input id="relationshipName" name="preferredName" type="text" maxlength="80" value="${esc(profile.preferredName)}" autocomplete="off" /></div>
+        <div class="field"><label for="relationshipBoundaries">希望它注意什么</label><textarea id="relationshipBoundaries" name="boundaries" maxlength="600" placeholder="例如：工作讨论直接一点，不要反复问我感觉如何。">${esc(profile.boundaries)}</textarea></div>
+      </details>
+      <p class="muted small">停用只暂停使用这些设置，不会删除已保存的内容。</p>
+      <button class="btn small primary" type="submit">保存相处方式</button><p class="relationship-status small" role="status"></p>
+    </form>
+    <div class="relationship-people"><div class="row"><h4>人物背景 <span id="relationshipPeopleCount" class="muted"></span></h4><button class="btn small right" data-action="relationship-new">添加人物</button></div>
+      <p class="muted small">只记需要的背景，随时修改或删除。最多 12 人。</p><div id="relationshipPeople" class="list"></div><div id="relationshipEditor"></div></div>`
+}
+
+function updateRelationshipAvailability() {
+  const notice = $('#relationshipAvailability')
+  if (notice) notice.hidden = S.boot?.config?.memory?.enabled !== false && S.boot?.config?.memory?.inject !== false
+}
+
+function relationshipPersonHtml(person) {
+  return `<div class="mem-item relationship-person" data-person-id="${esc(person.id)}"><div class="txt"><b>${esc(person.name)}</b>${person.relationship ? `<span class="muted small"> · ${esc(person.relationship)}</span>` : ''}
+    ${person.aliases?.length ? `<p class="muted small">也称：${person.aliases.map(esc).join('、')}</p>` : ''}
+    ${person.context || person.boundaries ? `<details class="relationship-more"><summary>查看背景</summary>${person.context ? `<p class="relationship-text small">${esc(person.context)}</p>` : ''}${person.boundaries ? `<p class="relationship-text muted small">注意：${esc(person.boundaries)}</p>` : ''}</details>` : ''}
+    <div class="row"><button class="btn small ghost" data-action="relationship-edit" data-id="${esc(person.id)}">编辑</button><button class="btn small ghost" data-action="relationship-delete" data-id="${esc(person.id)}">删除</button></div>
+    <div class="relationship-delete-confirm" hidden><p class="small">删除后不再附加这份背景；已经出现在会话中的内容会保留。</p><div class="row"><button class="btn small" data-action="relationship-delete-confirm" data-id="${esc(person.id)}">确认删除</button><button class="btn small ghost" data-action="relationship-delete-cancel">保留</button></div></div>
+    <p class="relationship-status small" role="status"></p></div></div>`
+}
+
+function renderRelationshipPeople() {
+  const people = RELATIONSHIPS.data?.people ?? []
+  $('#relationshipPeople').innerHTML = people.map(relationshipPersonHtml).join('') || '<p class="muted small">还没有人物背景。需要时再添加。</p>'
+  $('#relationshipPeopleCount').textContent = `· ${people.length}/12`
+  syncRelationshipEditorButtons()
+}
+
+function syncRelationshipEditorButtons() {
+  const editing = Boolean($('#relationshipPersonForm'))
+  $$('button', $('#relationshipPeople')).forEach((button) => { button.disabled = editing })
+  $('[data-action="relationship-new"]').disabled = editing || (RELATIONSHIPS.data?.people?.length ?? 0) >= 12
+}
+
+function showRelationshipEditor(id) {
+  if ($('#relationshipPersonForm')) return
+  const person = id ? RELATIONSHIPS.data?.people?.find((item) => item.id === id) : {}
+  if (!person || !id && (RELATIONSHIPS.data?.people?.length ?? 0) >= 12) return
+  $('#relationshipEditor').innerHTML = `<form id="relationshipPersonForm" class="relationship-editor" data-id="${esc(id ?? '')}">
+    <h4>${id ? '编辑人物背景' : '添加人物'}</h4>
+    <div class="field"><label for="relationshipPersonName">名字或常用称呼</label><input id="relationshipPersonName" name="name" type="text" minlength="2" maxlength="80" required value="${esc(person.name)}" autocomplete="off" /></div>
+    <div class="field"><label for="relationshipPersonRole">与你的关系（可选）</label><input id="relationshipPersonRole" name="relationship" type="text" maxlength="120" value="${esc(person.relationship)}" placeholder="例如：同事、朋友、导师" /></div>
+    <div class="field"><label for="relationshipPersonContext">对话需要的背景（可选）</label><textarea id="relationshipPersonContext" name="context" maxlength="1200" placeholder="例如：我们在一起做项目，最近正在协调分工。">${esc(person.context)}</textarea></div>
+    <details class="relationship-more" ${person.aliases?.length || person.boundaries ? 'open' : ''}><summary>其他称呼与边界（可选）</summary>
+      <div class="field"><label for="relationshipPersonAliases">其他称呼（用逗号分隔，最多 5 个）</label><input id="relationshipPersonAliases" name="aliases" type="text" maxlength="404" value="${esc((person.aliases ?? []).join(', '))}" /></div>
+      <div class="field"><label for="relationshipPersonBoundaries">谈到这个人时需要注意</label><textarea id="relationshipPersonBoundaries" name="boundaries" maxlength="600" placeholder="例如：讨论具体沟通方式，不猜测对方的动机。">${esc(person.boundaries)}</textarea></div>
+    </details>
+    <div class="row"><button class="btn small primary" type="submit">${id ? '保存修改' : '添加人物背景'}</button><button class="btn small" type="button" data-action="relationship-editor-cancel">取消</button></div><p class="relationship-status small" role="status"></p></form>`
+  syncRelationshipEditorButtons()
+  $('#relationshipPersonName').focus()
+}
+
+function closeRelationshipEditor(id) {
+  $('#relationshipEditor').innerHTML = ''
+  syncRelationshipEditorButtons()
+  ;($$('[data-action="relationship-edit"]').find((button) => button.dataset.id === id) ?? $('[data-action="relationship-new"]'))?.focus()
+}
+
+async function saveRelationshipForm(form) {
+  if (form.dataset.saving || !form.reportValidity()) return
+  const values = new FormData(form), person = form.id === 'relationshipPersonForm'
+  const status = $('.relationship-status', form)
+  const body = person ? {
+    name: String(values.get('name') ?? '').trim(),
+    aliases: String(values.get('aliases') ?? '').split(/[,，\n]/).map((alias) => alias.trim()).filter(Boolean),
+    relationship: String(values.get('relationship') ?? '').trim(),
+    context: String(values.get('context') ?? '').trim(),
+    boundaries: String(values.get('boundaries') ?? '').trim(),
+  } : {
+    enabled: values.get('enabled') === 'on', tone: values.get('tone'), support: values.get('support'),
+    preferredName: String(values.get('preferredName') ?? '').trim(), boundaries: String(values.get('boundaries') ?? '').trim(),
+  }
+  if (person && (body.aliases.length > 5 || body.aliases.some((alias) => alias.length < 2 || alias.length > 80))) { status.textContent = '其他称呼最多 5 个，每个 2–80 个字符。'; return }
+  const id = form.dataset.id, version = RELATIONSHIPS.version
+  const focused = form.contains(document.activeElement) ? document.activeElement : null
+  form.dataset.saving = 'true'
+  $$('input, textarea, select, button', form).forEach((control) => { control.disabled = true })
+  status.textContent = '正在保存…'
+  try {
+    const result = await api(person ? `relationships/people${id ? `/${encodeURIComponent(id)}` : ''}` : 'relationships/profile', { method: person && !id ? 'POST' : 'PATCH', body })
+    if (version !== RELATIONSHIPS.version) return
+    if (person) {
+      RELATIONSHIPS.data.people = id ? RELATIONSHIPS.data.people.map((item) => item.id === id ? result.person : item) : [...RELATIONSHIPS.data.people, result.person]
+      renderRelationshipPeople()
+      closeRelationshipEditor(result.person.id)
+    } else {
+      RELATIONSHIPS.data.profile = result.profile ?? body
+      status.textContent = body.enabled ? '已保存。' : '已停用。已保存的内容仍可在这里修改或删除。'
+    }
+  } catch (err) {
+    status.textContent = err.message
+  } finally {
+    delete form.dataset.saving
+    $$('input, textarea, select, button', form).forEach((control) => { control.disabled = false })
+    if (focused?.isConnected && document.activeElement === document.body) focused.focus()
+  }
+}
+
+async function deleteRelationshipPerson(button) {
+  const card = button.closest('[data-person-id]')
+  if (!card || card.dataset.deleting) return
+  const version = RELATIONSHIPS.version
+  card.dataset.deleting = 'true'
+  $$('button', card).forEach((control) => { control.disabled = true })
+  const status = $('.relationship-status', card)
+  status.textContent = '正在删除…'
+  try {
+    await api(`relationships/people/${encodeURIComponent(button.dataset.id)}`, { method: 'DELETE' })
+    if (version !== RELATIONSHIPS.version) return
+    RELATIONSHIPS.data.people = RELATIONSHIPS.data.people.filter((item) => item.id !== button.dataset.id)
+    renderRelationshipPeople()
+    $('[data-action="relationship-new"]')?.focus()
+  } catch (err) {
+    status.textContent = err.message
+    delete card.dataset.deleting
+    $$('button', card).forEach((control) => { control.disabled = false })
+  }
+}
+
+document.addEventListener('toggle', (event) => {
+  if (event.target.id === 'relationshipSection' && event.target.open) loadRelationships()
+}, true)
+document.addEventListener('submit', (event) => {
+  if (!['relationshipProfileForm', 'relationshipPersonForm'].includes(event.target.id)) return
+  event.preventDefault()
+  saveRelationshipForm(event.target).catch((err) => toast(err.message, true))
+})
 
 function screenBlock(screen) {
   const s = screen.screen
@@ -1641,7 +1809,7 @@ function obsHtml(o) {
   </div>`
 }
 
-const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, loading: false, version: 0, proactiveEnabled: null }
+const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, loading: false, version: 0, proactiveEnabled: null, research: null, researchRevision: 0 }
 const GOAL_STATUS = { active: '进行中', paused: '已暂停', done: '已完成', cancelled: '已取消' }
 const PREPARATION_STATUS = { idle: '尚未准备', queued: '等待准备', running: '正在准备', ready: '已有准备结果', failed: '准备失败' }
 const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
@@ -1651,13 +1819,95 @@ function agencyTime(value) {
   return value && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '时间未记录'
 }
 
+function researchSettingsHtml(research = {}) {
+  return `<form id="researchSettingsForm" class="research-settings">
+    <label class="goal-checkbox"><input type="checkbox" name="enabled" ${research.enabled ? 'checked' : ''} /> 允许 Echo 在后台做只读研究</label>
+    <p class="muted small">只分析启用之后的新对话，发现值得跟进的事情。自动发现的事项先限时跟进 7 天；由你选择是否继续。</p>
+    <details class="research-options"><summary>读取范围与发现方式</summary>
+      <label class="goal-checkbox"><input type="checkbox" name="discoverChats" ${research.discoverChats !== false ? 'checked' : ''} /> 从新对话发现需要跟进的事项</label>
+      <p class="muted small">对话和你为目标指定的资料可能发送给已配置的模型；搜索词会发送给搜索服务。文件只读取你明确附加或指定的文件夹，不会扫描整个 Mac。研究不会发送消息或修改外部内容。</p>
+      <p class="muted small">后台研究与主动提醒独立。关闭研究会停止后续研究，已保存的目标和结果仍保留。</p>
+    </details>
+    <div class="row"><button class="btn small" type="submit">保存研究设置</button><span class="research-form-status small" role="status"></span></div>
+  </form>`
+}
+
+function renderResearchStatus(research = {}) {
+  COMMITMENTS.research = research
+  const holder = $('#researchSettings')
+  const form = $('#researchSettingsForm')
+  if (holder && (!form || !form.dataset.dirty && !form.dataset.saving && !form.contains(document.activeElement))) {
+    const signature = JSON.stringify([research.enabled, research.discoverChats])
+    if (holder.dataset.signature !== signature) {
+      const expanded = $('.research-options', holder)?.open
+      holder.innerHTML = researchSettingsHtml(research)
+      if (expanded) $('.research-options', holder).open = true
+      holder.dataset.signature = signature
+    }
+  }
+  const status = $('#researchStatus')
+  const statusHtml = `<p class="muted small">${research.enabled ? '后台研究已开启' : '后台研究已关闭'}${research.lastScanAt ? ` · 上次发现检查 ${esc(agencyTime(research.lastScanAt))}` : ''}</p>
+    ${research.enabled && research.state === 'unconfigured' ? '<p class="small needs-check">尚未配置可用模型，研究暂不运行。请在设置中连接模型。</p>' : ''}
+    ${research.enabled && research.state === 'budget_wait' ? `<p class="muted small">过去 24 小时的发现检查已达上限（${esc(research.budget?.used ?? 20)}/${esc(research.budget?.limit ?? 20)} 次）${research.budget?.resetsAt ? `，最早恢复 ${esc(agencyTime(research.budget.resetsAt))}` : ''}。</p>` : ''}
+    ${research.lastError ? `<p class="small needs-check">最近发现检查失败：${esc(research.lastError)}${research.enabled && research.state === 'retry_wait' && research.nextRetryAt ? ` · 计划重试 ${esc(agencyTime(research.nextRetryAt))}` : ''}</p>` : ''}
+    <p class="muted small">仅在这台 Mac 唤醒、Echo 运行且联网时检查；恢复后补查。休眠或离线期间无法保证及时发现变化。</p>`
+  if (status && status.innerHTML !== statusHtml) status.innerHTML = statusHtml
+}
+
+async function saveResearchSettings(form) {
+  if (form.dataset.saving) return
+  const values = new FormData(form)
+  const research = { enabled: values.get('enabled') === 'on', discoverChats: values.get('discoverChats') === 'on' }
+  const controls = $$('input, button', form)
+  const status = $('.research-form-status', form)
+  form.dataset.saving = 'true'
+  controls.forEach((control) => { control.disabled = true })
+  try {
+    await api('settings', { method: 'PATCH', body: { config: { proactive: { research } } } })
+    if (S.boot?.config) {
+      S.boot.config.proactive ??= {}
+      S.boot.config.proactive.research = research
+    }
+    COMMITMENTS.research = { ...COMMITMENTS.research, ...research }
+    COMMITMENTS.researchRevision++
+    $('#researchSettings').dataset.signature = JSON.stringify([research.enabled, research.discoverChats])
+    delete form.dataset.dirty
+    status.textContent = research.enabled ? '已开启；从现在的新对话开始' : '已关闭后台研究'
+    renderResearchStatus(COMMITMENTS.research)
+    syncCommitmentCards()
+  } catch (err) {
+    status.textContent = `保存失败：${err.message}。设置草稿仍保留。`
+  } finally {
+    delete form.dataset.saving
+    controls.forEach((control) => { control.disabled = false })
+  }
+}
+
+function deadlineLabel(date, time, timezone) {
+  return `${esc(date)}${time && timezone ? ` ${esc(time)} ${esc(timezone)}` : /^\d{4}-\d{2}-\d{2}$/.test(date ?? '') ? '（时间未指定）' : ''}`
+}
+
+function deadlineAssessmentHtml(assessment, evidence = []) {
+  if (!assessment || assessment.status === 'none') return ''
+  const label = { verified: '来源已核对', conflicting: '来源有冲突 · 待核实', unverified: '待核实' }[assessment.status] || '待核实'
+  return `<div class="deadline-assessment ${assessment.status === 'verified' ? '' : 'needs-check'}"><b>截止信息：${label}${assessment.date ? ` · ${deadlineLabel(assessment.date, assessment.time, assessment.timezone)}` : ''}</b>
+    ${(assessment.claims ?? []).map((claim) => {
+      const item = evidence.find((entry) => entry.id === claim.evidenceId)
+      const url = typeof item?.source === 'string' ? item.source : item?.source?.url
+      const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">查看原文</a>` : ''
+      return `<div class="deadline-claim"><span class="small">${claim.status === 'verified' ? '已核对来源与事项' : '待核实'}${claim.date ? ` · ${deadlineLabel(claim.date, claim.time, claim.timezone)}` : ''}${claim.evidenceId ? ` · [${esc(claim.evidenceId)}]` : ''} ${link}</span>
+        ${claim.quote ? `<blockquote>${esc(claim.quote)}</blockquote>` : ''}<p class="muted small">${[claim.institution, claim.program, claim.cycle, claim.category, claim.stage].filter(Boolean).map(esc).join(' · ')}</p>
+        ${claim.reasons?.length ? `<p class="small">${claim.reasons.map(esc).join('；')}</p>` : ''}</div>`
+    }).join('')}${assessment.checkedAt ? `<p class="muted small">核对时间：${esc(agencyTime(assessment.checkedAt))}</p>` : ''}</div>`
+}
+
 function evidenceHtml(item) {
   const source = item.source
   const url = typeof source === 'string' ? source : source?.url
   const isGoal = typeof source === 'string' && source.startsWith('commitment:')
   const message = typeof source === 'string' ? source.match(/^conversation:([^/]+)\/(.+)$/) : null
   const isMemory = typeof source === 'string' && source.startsWith('memory:')
-  const label = isGoal ? '已确认目标' : message ? '原始消息' : isMemory ? '记忆记录（请核对当前是否成立）' : item.label || (/^https?:\/\//i.test(url ?? '') ? host(url) : '来源')
+  const label = isGoal ? item.discovered ? '从对话发现的目标记录' : '已确认目标' : message ? '原始消息' : isMemory ? '记忆记录（请核对当前是否成立）' : item.label || (/^https?:\/\//i.test(url ?? '') ? host(url) : '来源')
   const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>` : esc(label)
   let excerpt = item.excerpt ? `<p>${esc(item.excerpt)}</p>` : ''
   if (isGoal && item.excerpt) {
@@ -1693,16 +1943,18 @@ function preparationHtml(preparation) {
     : preparation.delivery?.status === 'superseded' ? '已不再安排提醒，使用前请核对最新目标与来源。'
     : preparation.delivery?.status === 'pending' && preparation.proactiveEnabled === false ? '主动提醒已关闭；结果可在此查看。'
     : waiting ? '已准备好，等待合适时机提醒你。' : '结果保留在这里，可随时查看。'
-  return `<details class="preparation" data-preparation-id="${esc(preparation.id)}" data-detail-key="${esc(preparation.id)}">
+  return `<details class="preparation" data-preparation-id="${esc(preparation.id)}" data-detail-key="${esc(preparation.id)}" ${preparation.latest ? 'open' : ''}>
     <summary>${esc(preparation.title || '准备结果')}<span class="muted small">${esc(agencyTime(preparation.createdAt))}</span></summary>
     <div class="preparation-body">
       ${preparation.outdated && !['done', 'cancelled'].includes(preparation.goalStatus) ? '<p class="small needs-check">这份结果生成后，目标状态或内容已变化；继续使用前请核对。</p>' : ''}
       <div class="content">${md(preparation.content ?? '')}</div>
+      ${deadlineAssessmentHtml(preparation.deadlineAssessment, preparation.evidence)}
+      ${preparation.error ? `<p class="small needs-check">这次研究未完成：${esc(preparation.error)}${preparation.failedAt ? ` · ${esc(agencyTime(preparation.failedAt))}` : ''}${preparation.retryAt && !goalStopped && !preparation.researchStopped ? ` · 计划重试 ${esc(agencyTime(preparation.retryAt))}` : ''}</p>` : ''}
       ${preparation.assumptions?.length ? `<div class="preparation-assumptions"><b>仍需确认的假设</b><ul>${preparation.assumptions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
       ${preparation.question ? `<p class="preparation-question"><b>待你确认：</b>${esc(preparation.question)}</p>` : ''}
       <p class="verification ${verified ? '' : 'needs-check'}">${verified ? '生成时的来源引用已检查；这不等于事实已经证实。' : '来源引用尚未通过检查，请先核对。'}${checkText ? `<br><span class="small">${esc(checkText)}</span>` : ''}</p>
       <details class="evidence" data-detail-key="evidence-${esc(preparation.id)}"><summary>查看依据 · ${(preparation.evidence ?? []).length} 条</summary>
-        <ol>${(preparation.evidence ?? []).map(evidenceHtml).join('') || '<li>没有可展示的来源。</li>'}</ol>
+        <ol>${(preparation.evidence ?? []).map((item) => evidenceHtml({ ...item, discovered: preparation.goalOrigin === 'discovered' })).join('') || '<li>没有可展示的来源。</li>'}</ol>
       </details>
       <p class="muted small">${deliveryText}${waiting && preparation.delivery.expiresAt ? ` 提醒有效至 ${esc(agencyTime(preparation.delivery.expiresAt))}。` : ''}</p>
       <div class="outcome-actions" aria-label="这份结果是否有帮助">${['accepted', 'completed', 'wrong_time', 'irrelevant', 'incorrect'].map((signal) => `<button class="btn small ${signal === outcome || signal === 'wrong_time' && wrongTime ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === 'wrong_time' && wrongTime}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
@@ -1714,23 +1966,37 @@ function preparationHtml(preparation) {
 function commitmentHtml(goal, preparations) {
   const finished = goal.status === 'done' || goal.status === 'cancelled'
   const stopped = finished || goal.status === 'paused'
+  const researchStopped = goal.scope?.research && COMMITMENTS.research?.enabled === false
+  const discovered = goal.origin === 'discovered'
+  const discoverySource = goal.discovery?.source ?? goal.source
+  const unadopted = discovered && !goal.discovery?.adopted
+  const situation = Object.entries({ institution: '机构', program: '项目', cycle: '届次', category: '类别', stage: '阶段' }).filter(([key]) => goal.situation?.[key])
   const progress = goal.status === 'done' ? '目标已完成，不再准备'
     : goal.status === 'cancelled' ? '目标已取消，不再准备'
     : goal.status === 'paused' ? '已暂停准备和提醒' : PREPARATION_STATUS[goal.preparation?.state] || '尚未准备'
   return `<div class="goal-heading"><h4>${esc(goal.title)}</h4><span class="goal-status">${esc(GOAL_STATUS[goal.status] || goal.status)}</span></div>
-    <dl class="goal-facts"><dt>完成标准</dt><dd>${esc(goal.successCriteria || '尚未填写')}</dd><dt>下一步</dt><dd>${esc(goal.nextAction || '尚未填写')}</dd>${goal.blocker ? `<dt>待解决</dt><dd>${esc(goal.blocker)}</dd>` : ''}${goal.deadline ? `<dt>截止</dt><dd>${esc(goal.deadline)}</dd>` : ''}</dl>
+    ${discovered ? `<div class="goal-discovery"><p class="small">${unadopted ? '从对话发现 · 事项待你核实' : '从对话发现 · 你已选择继续跟进'}${unadopted && goal.discovery?.expiresAt && !stopped ? ` · 临时跟进至 ${esc(agencyTime(goal.discovery.expiresAt))}` : ''}</p>
+      ${goal.discovery?.quote ? `<blockquote class="goal-source">${esc(goal.discovery.quote)}</blockquote>` : ''}
+      ${discoverySource?.conversationId && discoverySource?.messageId ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(discoverySource.conversationId)}" data-message-id="${esc(discoverySource.messageId)}">查看发现依据的原消息</button>` : ''}</div>` : ''}
+    <dl class="goal-facts"><dt>完成标准</dt><dd>${esc(goal.successCriteria || '尚未填写')}</dd><dt>下一步</dt><dd>${esc(goal.nextAction || '尚未填写')}</dd>${goal.blocker ? `<dt>待解决</dt><dd>${esc(goal.blocker)}</dd>` : ''}${goal.deadline ? `<dt>目标截止</dt><dd>${esc(goal.deadline)}${/^\d{4}-\d{2}-\d{2}$/.test(goal.deadline) ? '（时间未指定）' : ''}</dd>` : ''}</dl>
+    ${situation.length ? `<details class="goal-context" data-detail-key="situation-${esc(goal.id)}"><summary>事项背景${unadopted ? ' · 待核实' : ''}</summary><dl class="goal-facts">${situation.map(([key, label]) => `<dt>${label}</dt><dd>${esc(goal.situation[key])}</dd>`).join('')}</dl></details>` : ''}
+    ${goal.situation?.questions?.length ? `<p class="preparation-question"><b>还需要确认：</b>${goal.situation.questions.map(esc).join('；')}</p>` : ''}
+    ${!preparations.some((item) => item.deadlineAssessment) ? deadlineAssessmentHtml(goal.deadlineAssessment) : ''}
     <p class="goal-progress small" role="status">${esc(progress)}${!stopped && goal.preparation?.error ? ` · ${esc(goal.preparation.error)}` : ''}</p>
     ${goal.watch?.lastError ? `<p class="small needs-check">来源检查失败：${esc(goal.watch.lastError)}</p>` : ''}
-    <p class="muted small">读取范围：${goal.scope?.memory ? '本地记忆' : '未授权记忆'}${goal.scope?.urls?.length ? ` · ${goal.scope.urls.length} 个指定网页` : ' · 未指定网页'} · ${stopped ? '当前不自动跟进' : goal.watch?.type === 'deadline' ? '临近截止时准备' : goal.watch?.type === 'source_change' ? '来源变化时准备' : '手动准备'}</p>
+    <p class="muted small">读取范围：${goal.scope?.memory ? '本地记忆' : '未授权记忆'}${goal.scope?.urls?.length ? ` · ${goal.scope.urls.length} 个指定网页` : ' · 未指定网页'}${goal.scope?.research ? ' · 网页研究' : ''}${goal.scope?.documents?.length ? ` · ${goal.scope.documents.length} 份附加资料` : ''}${goal.scope?.folders?.length ? ` · ${goal.scope.folders.length} 个工作区文件夹` : ''} · ${stopped ? '当前不自动跟进' : goal.watch?.type === 'combined' ? '按来源变化与截止进展跟进' : goal.watch?.type === 'deadline' ? '临近截止时准备' : goal.watch?.type === 'source_change' ? '来源变化时准备' : '手动准备'}</p>
+    ${goal.scope?.research && COMMITMENTS.research?.enabled === false ? '<p class="muted small">后台研究已关闭，这个目标的研究暂不运行。</p>' : ''}
+    ${goal.watch?.lastCheckAt || goal.watch?.nextCheckAt || goal.preparation?.retryAt ? `<p class="muted small">${goal.watch?.lastCheckAt ? `上次核对 ${esc(agencyTime(goal.watch.lastCheckAt))}` : '尚未核对'}${!stopped && !researchStopped && goal.watch?.nextCheckAt ? ` · 下次计划 ${esc(agencyTime(goal.watch.nextCheckAt))}` : ''}${!stopped && !researchStopped && goal.preparation?.retryAt ? ` · 失败重试 ${esc(agencyTime(goal.preparation.retryAt))}` : ''}</p>` : ''}
     ${goal.completionEvidence ? `<p class="small">完成依据：${esc(typeof goal.completionEvidence === 'string' ? goal.completionEvidence : JSON.stringify(goal.completionEvidence))}</p>` : ''}
     <div class="goal-actions">
-      ${!finished ? `<button class="btn small primary" data-action="goal-prepare" data-id="${esc(goal.id)}" ${goal.status !== 'active' || ['queued', 'running'].includes(goal.preparation?.state) ? 'disabled' : ''}>准备下一步</button>
+      ${unadopted && !finished ? `<button class="btn small primary" data-action="goal-adopt" data-id="${esc(goal.id)}">继续帮我跟进</button>` : ''}
+      ${!finished ? `<button class="btn small primary" data-action="goal-prepare" data-id="${esc(goal.id)}" ${goal.status !== 'active' || researchStopped || ['queued', 'running'].includes(goal.preparation?.state) ? 'disabled' : ''}${researchStopped ? ' title="请先在上方开启后台研究"' : ''}>准备下一步</button>
       <button class="btn small" data-action="goal-edit" data-id="${esc(goal.id)}">编辑</button>
       <button class="btn small ghost" data-action="goal-status" data-status="${goal.status === 'paused' ? 'active' : 'paused'}" data-id="${esc(goal.id)}">${goal.status === 'paused' ? '恢复' : '暂停'}</button>
       <button class="btn small ghost" data-action="goal-complete" data-id="${esc(goal.id)}">完成目标</button>
-      <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">取消目标</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">重新开启</button>`}
+      <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">${discovered ? '停止这项研究' : '取消目标'}</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">重新开启</button>`}
     </div>
-    ${preparations.length ? `<div class="goal-results">${preparations.map((item) => preparationHtml({ ...item, goalStatus: goal.status, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision })).join('')}</div>` : ''}`
+    ${preparations.length ? `<div class="goal-results">${preparations.map((item, index) => preparationHtml({ ...item, latest: index === 0, goalOrigin: goal.origin, goalStatus: goal.status, researchStopped, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision })).join('')}</div>` : ''}`
 }
 
 function syncCommitmentCards({ force = false } = {}) {
@@ -1742,10 +2008,11 @@ function syncCommitmentCards({ force = false } = {}) {
   for (const goal of COMMITMENTS.items) {
     const preparations = COMMITMENTS.preparations.filter((item) => item.commitmentId === goal.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
     let card = $$('[data-goal-id]', list).find((node) => node.dataset.goalId === goal.id)
-    const signature = JSON.stringify([goal, preparations, COMMITMENTS.proactiveEnabled, preparations.map(preparationExpired)])
+    const signature = JSON.stringify([goal, preparations, COMMITMENTS.proactiveEnabled, COMMITMENTS.research?.enabled, preparations.map(preparationExpired)])
     if (card?.dataset.signature === signature) continue
     const focused = card?.contains(document.activeElement) ? document.activeElement : null
     if (focused && !force) continue
+    const previousDetails = new Set(card ? $$('details[data-detail-key]', card).map((node) => node.dataset.detailKey) : [])
     const opened = new Set(card ? $$('details[open][data-detail-key]', card).map((node) => node.dataset.detailKey) : [])
     const focusAction = focused?.dataset.action
     const focusSignal = focused?.dataset.signal
@@ -1759,7 +2026,7 @@ function syncCommitmentCards({ force = false } = {}) {
     }
     card.innerHTML = commitmentHtml(goal, preparations)
     card.dataset.signature = signature
-    for (const detail of $$('details[data-detail-key]', card)) detail.open = opened.has(detail.dataset.detailKey)
+    for (const detail of $$('details[data-detail-key]', card)) if (previousDetails.has(detail.dataset.detailKey)) detail.open = opened.has(detail.dataset.detailKey)
     if (focused) ($$('[data-action]', card).find((node) => node.dataset.action === focusAction && node.dataset.signal === focusSignal && node.dataset.preparationId === focusPreparation && !node.disabled) ?? card).focus()
   }
 }
@@ -1779,9 +2046,10 @@ function restoreGoalActionFocus(button) {
 async function renderProactivePanel({ poll = false, force = false } = {}) {
   const el = $('#panelProactive')
   if (!$('#commitmentList', el)) {
-    el.innerHTML = `<section class="sect"><div class="row"><h3 class="agency-title">持续推进的目标</h3><button class="btn small primary right" data-action="goal-new">新增目标</button></div>
-      <p class="muted small">由你确认目标和读取范围。Echo 准备下一步，保留依据；只有你确认完成，目标才结束。</p>
-      <p class="muted small">准备上限：24 小时内每个目标 2 次，全部目标 5 次。只读取已授权的记忆与网页。</p>
+    el.innerHTML = `<section class="sect"><h3 class="agency-title">让 Echo 先做一点功课</h3><div id="researchSettings"></div><div id="researchStatus"></div></section>
+      <section class="sect"><div class="row"><h3 class="agency-title">持续推进的目标</h3><button class="btn small primary right" data-action="goal-new">新增目标</button></div>
+      <p class="muted small">Echo 准备下一步，保留依据。自动发现的事项会标明出处与待核实信息，你可以随时停止。</p>
+      <p class="muted small">准备上限：24 小时内每个目标 2 次，全部目标 5 次。只读取目标授权的范围。</p>
       <div id="commitmentEditor"></div><p id="commitmentLoadStatus" class="muted small" role="status"></p>
       <p id="commitmentEmpty" class="muted small">还没有已确认目标。可以从一条自己的消息或下面的候选事项开始。</p>
       <div id="commitmentList" class="list"></div></section>
@@ -1795,14 +2063,16 @@ async function renderProactivePanel({ poll = false, force = false } = {}) {
   }
   COMMITMENTS.loading = true
   const version = COMMITMENTS.version
+  const researchRevision = COMMITMENTS.researchRevision
   try {
-    COMMITMENTS.pending = Promise.all([api('proactive'), api('dream'), api('agency'), api('commitments')])
-    const [p, dream, agency, data] = await COMMITMENTS.pending
+    COMMITMENTS.pending = Promise.all([api('proactive'), api('dream'), api('agency'), api('commitments'), api('research')])
+    const [p, dream, agency, data, research] = await COMMITMENTS.pending
     if (version !== COMMITMENTS.version || !$('#commitmentList', el)) return
     COMMITMENTS.items = data.commitments ?? []
     COMMITMENTS.preparations = data.preparations ?? []
     COMMITMENTS.loops = dream.loops ?? []
     COMMITMENTS.proactiveEnabled = p.enabled
+    if (researchRevision === COMMITMENTS.researchRevision) renderResearchStatus(research)
     syncCommitmentCards({ force })
     const candidates = $('#commitmentCandidates')
     if (!candidates.contains(document.activeElement)) {
@@ -1832,7 +2102,7 @@ function showCommitmentEditor(goal = {}, { mode = 'edit', source, candidateLoopI
     $('input, textarea', el)?.focus()
     return
   }
-  COMMITMENTS.editor = { id: goal.id, source: source ?? goal.source, candidateLoopId: candidateLoopId ?? goal.candidateLoopId, preparationId, mode }
+  COMMITMENTS.editor = { id: goal.id, revision: goal.revision, source: source ?? goal.source, candidateLoopId: candidateLoopId ?? goal.candidateLoopId, preparationId, mode, documents: [...(goal.scope?.documents ?? [])] }
   if (mode === 'complete') {
     el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>完成「${esc(goal.title)}」</h4>
       <div class="field"><label for="goalCompletion">依据什么确认已经完成？</label><textarea id="goalCompletion" name="completionEvidence" rows="2" maxlength="2000" required placeholder="例如：最终稿已交付，或已核对的结果链接"></textarea></div>
@@ -1846,19 +2116,78 @@ function showCommitmentEditor(goal = {}, { mode = 'edit', source, candidateLoopI
       <div class="field"><label for="goalDeadline">截止日期（可不填）</label><input id="goalDeadline" name="deadline" type="date" value="${esc(goal.deadline ?? '')}" /></div>
       <fieldset class="goal-scope"><legend>允许读取的范围</legend>
         <label class="goal-checkbox"><input name="memory" type="checkbox" ${goal.scope?.memory ? 'checked' : ''} /> 使用本地记忆中与目标相关的内容</label>
+        <label class="goal-checkbox"><input name="research" type="checkbox" ${goal.scope?.research ? 'checked' : ''} /> 为这个目标做只读研究（搜索网页和读取所选资料）</label>
+        <p class="muted small">${COMMITMENTS.research?.enabled ? '研究使用上方的全局授权；只读，不执行外部操作。' : '后台研究目前关闭。可以先保存目标范围，再在上方开启。'}</p>
         <div class="field"><label for="goalUrls">指定网页（最多 3 个，每行一个）</label><textarea id="goalUrls" name="urls" rows="3" placeholder="https://…">${esc((goal.scope?.urls ?? []).join('\n'))}</textarea></div>
+        <details class="goal-extra-sources"><summary>附加资料与已确认的官方网站（可选）</summary>
+          <div class="field"><label for="goalDocuments">为这个目标附加资料（最多 5 份）</label><input id="goalDocuments" type="file" accept=".pdf,.txt,.md" multiple aria-describedby="goalDocumentsHelp" /><p id="goalDocumentsHelp" class="muted small">PDF、TXT 或 Markdown，每份最多 5 MB。本地 Echo 只保存提取的文字，只有加入这个目标才会用于研究。取消草稿不会删除已上传的资料。</p></div>
+          <div id="goalDocumentList"></div><p id="goalUploadStatus" class="small" role="status"></p>
+          <div class="field"><label for="goalFolders">工作区文件夹（最多 3 个，每行一个）</label><textarea id="goalFolders" name="folders" rows="2" placeholder="例如：admissions/2027">${esc((goal.scope?.folders ?? []).join('\n'))}</textarea><p class="muted small">相对于设置中的工作区，只授权这些文件夹。留空不读取其他本地文件。</p></div>
+          <div class="field"><label for="goalOfficialDomains">已确认的官方网站域名（最多 5 个，可选）</label><textarea id="goalOfficialDomains" name="officialDomains" rows="2" placeholder="例如：admissions.example.edu">${esc((goal.scope?.officialDomains ?? []).join('\n'))}</textarea><p class="muted small">每行一个你已确认的域名。没有它也能寻找线索；只有匹配此范围的来源才能核对为官方截止信息。找到的网页不会自动成为官网。</p></div>
+        </details>
         <p class="muted small">准备内容只保存到 Echo。发送消息、发布或修改外部内容需要另行授权。</p>
       </fieldset>
+      <details class="goal-context"><summary>事项背景（可选）</summary>
+        ${Object.entries({ institution: ['机构', 160], program: ['项目', 200], cycle: ['届次或年份', 80], category: ['申请或活动类别', 80], stage: ['当前阶段', 80] }).map(([key, [label, max]]) => `<div class="field"><label for="goal-${key}">${label}</label><input id="goal-${key}" name="${key}" maxlength="${max}" value="${esc(goal.situation?.[key] ?? '')}" /></div>`).join('')}
+        <div class="field"><label for="goalQuestions">还需要确认的问题（最多 5 个，每行一个）</label><textarea id="goalQuestions" name="questions" rows="2" maxlength="1504">${esc((goal.situation?.questions ?? []).join('\n'))}</textarea></div>
+      </details>
       <p class="muted small">${goal.status === 'paused' ? '目标暂停期间不会准备，恢复时会准备一次。' : '确认、修改或恢复目标时会准备一次。'}后续按下面的方式跟进，所有准备共用次数预算。</p>
-      <div class="field"><label for="goalWatch">后续何时准备</label><select id="goalWatch" name="watch"><option value="manual" ${!goal.watch?.type || goal.watch.type === 'manual' ? 'selected' : ''}>之后由我点击「准备下一步」</option><option value="deadline" ${goal.watch?.type === 'deadline' ? 'selected' : ''}>临近截止日期</option><option value="source_change" ${goal.watch?.type === 'source_change' ? 'selected' : ''}>指定网页有变化时</option></select></div>
+      <div class="field"><label for="goalWatch">后续何时准备</label><select id="goalWatch" name="watch"><option value="manual" ${!goal.watch?.type || goal.watch.type === 'manual' ? 'selected' : ''}>之后由我点击「准备下一步」</option><option value="combined" ${goal.watch?.type === 'combined' ? 'selected' : ''}>综合跟进来源变化和截止进展</option><option value="deadline" ${goal.watch?.type === 'deadline' ? 'selected' : ''}>临近截止日期</option><option value="source_change" ${goal.watch?.type === 'source_change' ? 'selected' : ''}>指定网页有变化时</option></select></div>
       <div class="row"><button class="btn small primary" type="submit">${goal.id ? '保存修改' : '确认并加入目标'}</button><button class="btn small" type="button" data-action="goal-editor-cancel">取消</button></div><p class="form-status small" role="status"></p></form>`
   }
+  if (mode !== 'complete') renderGoalDocuments()
   el.scrollIntoView({ block: 'nearest' })
   $('input, textarea', el)?.focus()
 }
 
+function renderGoalDocuments() {
+  const list = $('#goalDocumentList')
+  if (!list || !COMMITMENTS.editor) return
+  list.innerHTML = (COMMITMENTS.editor.documents ?? []).map((id) => {
+    const document = COMMITMENTS.research?.documents?.find((item) => item.id === id)
+    return `<div class="goal-document"><span>${esc(document?.name || '已附加资料')}<small class="muted">${esc(id)}</small></span><button class="btn small ghost" type="button" data-action="goal-document-remove" data-id="${esc(id)}" aria-label="从这个目标移除${esc(document?.name || '资料')}">移除</button></div>`
+  }).join('')
+}
+
+async function uploadGoalDocuments(input) {
+  const editor = COMMITMENTS.editor
+  if (!editor || editor.uploading) return
+  const files = Array.from(input.files ?? [])
+  const status = $('#goalUploadStatus')
+  if (!files.length) return
+  editor.uploading = true
+  input.disabled = true
+  try {
+    if (editor.documents.length + files.length > 5) throw new Error('每个目标最多附加 5 份资料。')
+    if (files.some((file) => !/\.(pdf|txt|md)$/i.test(file.name))) throw new Error('请选择 PDF、TXT 或 Markdown 文件。')
+    if (files.some((file) => file.size > 5 * 1024 * 1024)) throw new Error('每份资料不能超过 5 MB。')
+    for (const file of files) {
+      if (COMMITMENTS.editor !== editor) return
+      status.textContent = `正在上传 ${file.name}…`
+      const data = String(await readAsDataUrl(file)).split(',')[1]
+      if (COMMITMENTS.editor !== editor) return
+      const result = await api('research/documents', { method: 'POST', body: { name: file.name, data } })
+      if (COMMITMENTS.editor !== editor) return
+      if (!result.document?.id) throw new Error('上传响应缺少资料信息，请重试。')
+      editor.documents.push(result.document.id)
+      COMMITMENTS.research ??= {}
+      COMMITMENTS.research.documents ??= []
+      COMMITMENTS.research.documents.push(result.document)
+      renderGoalDocuments()
+    }
+    status.textContent = '资料已附加到草稿；保存目标后才会用于研究。'
+  } catch (err) {
+    if (COMMITMENTS.editor === editor) status.textContent = `上传失败：${err.message} 已上传的资料与目标草稿仍保留。`
+  } finally {
+    editor.uploading = false
+    input.disabled = false
+    input.value = ''
+  }
+}
+
 async function saveCommitmentForm(form) {
   if (!form.reportValidity() || form.dataset.saving) return
+  if (COMMITMENTS.editor?.uploading) return toast('资料还在上传，请稍候再保存', true)
   const editor = { ...COMMITMENTS.editor }
   const values = new FormData(form)
   const status = $('.form-status', form)
@@ -1887,11 +2216,24 @@ async function saveCommitmentForm(form) {
       const watch = String(values.get('watch'))
       const deadline = String(values.get('deadline') ?? '') || null
       if (watch === 'deadline' && !deadline) throw new Error('请填写截止日期，或选择手动准备。')
-      if (watch === 'source_change' && !urls.length) throw new Error('来源变化触发需要至少一个指定网页。')
+      if (watch === 'source_change' && !urls.length && values.get('research') !== 'on') throw new Error('来源变化触发需要至少一个指定网页，或勾选只读研究。')
       const body = { title: String(values.get('title')).trim(), successCriteria: String(values.get('successCriteria')).trim(), nextAction: String(values.get('nextAction')).trim(), deadline, scope: { memory: values.get('memory') === 'on', urls }, watch: { type: watch } }
+      if (values.get('folders') !== null) {
+        const lines = (key) => [...new Set(String(values.get(key) ?? '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean))]
+        const folders = lines('folders'), officialDomains = lines('officialDomains').map((domain) => domain.toLowerCase())
+        if (folders.length > 3 || folders.some((folder) => /^(?:\/|~|[a-z]:)/i.test(folder) || folder.includes('\\') || folder.split('/').includes('..') || folder === '.')) throw new Error('请填写最多 3 个工作区内的相对文件夹路径，不能使用绝对路径或上级目录。')
+        if (officialDomains.length > 5 || officialDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(domain))) throw new Error('请填写最多 5 个完整官方网站域名，不含协议、路径或通配符。')
+        body.scope = { ...body.scope, research: values.get('research') === 'on', documents: editor.documents ?? [], folders, officialDomains }
+        body.situation = Object.fromEntries(['institution', 'program', 'cycle', 'category', 'stage'].map((key) => [key, String(values.get(key) ?? '').trim()]))
+        body.situation.questions = lines('questions')
+        if (body.situation.questions.length > 5 || body.situation.questions.some((question) => question.length > 300)) throw new Error('最多填写 5 个待确认问题，每个最多 300 字。')
+        if (!body.scope.research && (body.scope.documents.length || folders.length || officialDomains.length)) throw new Error('使用附加资料、工作区文件夹或官网域名，需要先勾选这个目标的只读研究。')
+      }
+      if (watch === 'combined' && !deadline && !urls.length && !body.scope.research) throw new Error('综合跟进需要截止日期、指定网页，或勾选只读研究。')
       if (!body.title || !body.successCriteria || !body.nextAction) throw new Error('请填写目标、完成标准和下一步。')
       if (!editor.id && editor.source) body.source = editor.source
       if (!editor.id && editor.candidateLoopId) body.candidateLoopId = editor.candidateLoopId
+      if (editor.id && editor.revision) body.expectedRevision = editor.revision
       await api(editor.id ? `commitments/${encodeURIComponent(editor.id)}` : 'commitments', { method: editor.id ? 'PATCH' : 'POST', body })
     }
     COMMITMENTS.editor = null
@@ -1908,6 +2250,11 @@ async function saveCommitmentForm(form) {
 }
 
 document.addEventListener('submit', (event) => {
+  if (event.target.id === 'researchSettingsForm') {
+    event.preventDefault()
+    saveResearchSettings(event.target).catch((err) => toast(err.message, true))
+    return
+  }
   if (event.target.id !== 'commitmentForm') return
   event.preventDefault()
   saveCommitmentForm(event.target).catch((err) => toast(err.message, true))
@@ -1934,7 +2281,7 @@ function renderProactiveOverview(p, dream, agency) {
     </div>
     <p class="muted small">共同打扰预算：今天 ${p.attention?.todayCount ?? 0}/${p.attention?.budget ?? S.boot?.config?.attention?.dailyBudget ?? 20} 次 · 最少间隔 ${p.attention?.minGapSeconds ?? 75} 秒。主动消息、伴随气泡和准备结果一起计数。</p>
     <p class="muted small">${p.queue?.length ? `${p.queue.length} 项等待合适时机提醒。` : '没有等待提醒的事项。'}${p.attention?.focus ? ` 当前状态：${esc(({ deep: '专注中', meeting: '会议中', normal: '工作中', idle: '空闲', entertainment: '休闲' })[p.attention.focus] || p.attention.focus)}。` : ''}${p.attention?.observedAt ? ` 状态依据：${esc(agencyTime(p.attention.observedAt))}。` : ''}</p>
-    <label class="switch"><span>启用主动服务</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
+    <label class="switch"><span>启用主动提醒</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
     <div class="row">
       <button class="btn small" data-action="pro-run">现在检查一次</button>
       <span class="muted small">上次检查：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
@@ -2049,7 +2396,7 @@ async function renderSettingsPanel() {
     </div>
     <div class="sect">
       <h4>隐私兜底</h4>
-      <p class="muted small">「全部忘掉」会清空事实清单、工作记忆、实体图、核心记忆、目标和准备结果，并在遗忘日志里留一条记录。会话记录默认保留。</p>
+      <p class="muted small">「全部忘掉」会清空事实清单、工作记忆、实体图、核心记忆、相处方式、人物背景、目标和准备结果，并在遗忘日志里留一条记录。会话记录默认保留。</p>
       <div class="row">
         <button class="btn small" data-action="wipe" data-scope="memory">清空全部记忆</button>
         <button class="btn small" data-action="wipe" data-scope="all">连会话一起清空</button>
@@ -2400,6 +2747,18 @@ async function handleAction(e) {
   const act = btn.dataset.action
   const id = btn.dataset.id
 
+  if (act === 'relationship-retry') return loadRelationships()
+  if (act === 'relationship-new') return showRelationshipEditor()
+  if (act === 'relationship-edit') return showRelationshipEditor(id)
+  if (act === 'relationship-editor-cancel') return closeRelationshipEditor(btn.closest('form')?.dataset.id)
+  if (act === 'relationship-delete' || act === 'relationship-delete-cancel') {
+    const confirmation = $('.relationship-delete-confirm', btn.closest('[data-person-id]'))
+    confirmation.hidden = act === 'relationship-delete-cancel'
+    if (!confirmation.hidden) $('[data-action="relationship-delete-confirm"]', confirmation).focus()
+    else $('[data-action="relationship-delete"]', btn.closest('[data-person-id]')).focus()
+    return
+  }
+  if (act === 'relationship-delete-confirm') return deleteRelationshipPerson(btn)
   if (act === 'run-approval') return decideApproval(btn)
   if (act === 'refresh-runs') return refreshRuns({ force: true })
   if (act === 'view-run') {
@@ -2409,6 +2768,14 @@ async function handleAction(e) {
     return
   }
   if (act === 'goal-new') return showCommitmentEditor()
+  if (act === 'goal-document-remove') {
+    if (COMMITMENTS.editor) {
+      COMMITMENTS.editor.documents = COMMITMENTS.editor.documents.filter((documentId) => documentId !== id)
+      renderGoalDocuments()
+      $('#goalDocuments')?.focus()
+    }
+    return
+  }
   if (act === 'goal-editor-cancel') {
     COMMITMENTS.editor = null
     $('#commitmentEditor').innerHTML = ''
@@ -2434,12 +2801,15 @@ async function handleAction(e) {
     if (goal) showCommitmentEditor(goal, { mode: act === 'goal-complete' ? 'complete' : 'edit' })
     return
   }
-  if (act === 'goal-prepare' || act === 'goal-status') {
+  if (act === 'goal-prepare' || act === 'goal-status' || act === 'goal-adopt') {
     btn.disabled = true
     try {
       if (act === 'goal-prepare') {
         await api(`commitments/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: {} })
         toast('已加入准备队列，结果会保留在这个目标下')
+      } else if (act === 'goal-adopt') {
+        await api(`commitments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { adopt: true } })
+        toast('已选择继续跟进，不再受临时七天期限限制')
       } else {
         await api(`commitments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: btn.dataset.status } })
         toast(`目标${GOAL_STATUS[btn.dataset.status] === '进行中' ? '已恢复' : GOAL_STATUS[btn.dataset.status]}`)
@@ -2750,7 +3120,7 @@ async function handleAction(e) {
   }
   if (act === 'wipe') {
     const scope = btn.dataset.scope
-    const word = prompt(`这会清空${scope === 'all' ? '全部记忆和会话' : '全部记忆'}，以及目标、准备结果和相关记录，不可撤销。输入 WIPE 确认：`)
+    const word = prompt(`这会清空${scope === 'all' ? '全部记忆和会话' : '全部记忆'}，以及相处方式、人物背景、目标、准备结果和相关记录，不可撤销。输入 WIPE 确认：`)
     if (word !== 'WIPE') return
     const r = await api('memory/wipe', { method: 'POST', body: { confirm: 'WIPE', scope } })
     COMMITMENTS.editor = null
@@ -2758,6 +3128,10 @@ async function handleAction(e) {
     COMMITMENTS.preparations = []
     COMMITMENTS.version++
     $('#panelProactive').innerHTML = ''
+    RELATIONSHIPS.version++
+    RELATIONSHIPS.data = null
+    RELATIONSHIPS.loading = false
+    $('#panelMemory').innerHTML = ''
     toast(`已清空：${r.before.observations} 条事实${scope === 'all' ? `、${r.wiped.conversations} 个会话` : ''}`)
     await boot({ keep: true })
     return renderSettingsPanel()
@@ -2807,6 +3181,11 @@ async function handleAction(e) {
 }
 
 document.addEventListener('change', async (e) => {
+  if (e.target.closest?.('#researchSettingsForm')) e.target.closest('#researchSettingsForm').dataset.dirty = 'true'
+  if (e.target.id === 'goalDocuments') {
+    await uploadGoalDocuments(e.target).catch((err) => toast(err.message, true))
+    return
+  }
   if (e.target.id !== 'setAuthRequired') return
   const input = e.target
   const required = input.checked

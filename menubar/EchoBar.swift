@@ -305,6 +305,13 @@ final class Controller: NSObject, NSApplicationDelegate {
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in self?.refresh() }
         RunLoop.current.add(timer!, forMode: .common)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
+                                                         name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc func didWake(_ notification: Notification) {
+        request("research/reconcile", method: "POST", body: [:]) { _ in }
+        refresh()
     }
 
     func refresh() {

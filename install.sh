@@ -19,7 +19,7 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ -n "$NODE" ] || die "没找到 node。先装 Node（brew install node）再跑这个脚本。"
-[ "$("$NODE" -p 'Number(process.versions.node.split(".")[0])')" -ge 20 ] || die "需要 Node 20 或更高版本。"
+"$NODE" -e 'const [major,minor]=process.versions.node.split(".").map(Number);process.exit(major>22||(major===22&&minor>=13)?0:1)' || die "需要 Node 22.13 或更高版本。"
 info "node: $NODE"
 info "项目目录: $ROOT"
 

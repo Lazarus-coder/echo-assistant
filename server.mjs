@@ -47,8 +47,12 @@ import {
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { proactiveTick, proactiveStatus, recordUserEngagement } from './lib/proactive.mjs'
 import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
-import { listCommitments, createCommitment, updateCommitment, requestPreparation, prepareDueCommitments } from './lib/commitments.mjs'
+import { listCommitments, createCommitment, updateCommitment, requestPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
+import { discoverNeeds, cancelDiscovery, researchStatus, validateResearchSettings } from './lib/discovery.mjs'
+import { cancelAndDrainResearch } from './lib/research.mjs'
+import { saveResearchDocument, listResearchDocuments, getResearchDocument, clearResearchDocuments } from './lib/research-sources.mjs'
 import { validateHarnessConfig, listRuns, getRun, decideApproval, artifactFile, recoverRuns, cancelHarnessRuns, clearRuns } from './lib/harness.mjs'
+import { getRelationships, saveRelationshipProfile, createRelationshipPerson, updateRelationshipPerson, deleteRelationshipPerson } from './lib/relationships.mjs'
 import { webSearch, searchWithFallback, engineStatus } from './lib/search.mjs'
 import { nativeSearch } from './lib/native.mjs'
 import { generateImage, saveImage, parseDataUrl } from './lib/media.mjs'
@@ -195,13 +199,13 @@ function send(res, status, body, headers = {}) {
   res.end(payload)
 }
 
-async function readBody(req) {
+async function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0
     const chunks = []
     req.on('data', (c) => {
       size += c.length
-      if (size > MAX_BODY) {
+      if (size > limit) {
         reject(Object.assign(new Error('请求体过大'), { status: 413 }))
         req.destroy()
         return
@@ -591,9 +595,21 @@ async function api(req, res, url) {
       return send(res, 403, { error: 'local_tools_only', message: '工作区与 MCP 能力只能在本机浏览器配置' })
     }
     if (patch.harness !== undefined) patch.harness = await validateHarnessConfig(patch.harness, cfg.harness)
+    if (patch.proactive?.research !== undefined) {
+      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '后台研究只能在本机浏览器配置' })
+      patch.proactive.research = validateResearchSettings(patch.proactive.research, cfg.proactive?.research)
+    }
     // 记忆档位是预设：选档就把具体旋钮一次性写实，避免"档位与数值打架"
     if (patch.memory?.profile) patch = applyProfilePatch(patch, patch.memory.profile)
     cfg = await saveConfig(patch)
+    if (patch.proactive?.research) {
+      if (!cfg.proactive.research.enabled || !cfg.proactive.research.discoverChats) await cancelDiscovery('后台研究权限已改变')
+      if (!cfg.proactive.research.enabled) {
+        cancelCommitmentWork('后台研究已关闭', { researchOnly: true })
+        await cancelAndDrainResearch('后台研究已关闭')
+      }
+      else kickPreparation()
+    }
     if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns('工具权限已更改，请重新发起')
     if (body.env && typeof body.env === 'object') {
       const written = await writeEnvValues(body.env)
@@ -762,6 +778,21 @@ async function api(req, res, url) {
     return send(res, 200, { report, swept, stats: await storageStats() })
   }
 
+  if (seg[1] === 'relationships') {
+    if (method === 'GET' && seg.length === 2) return send(res, 200, await getRelationships())
+    if (method === 'PATCH' && p === 'relationships/profile') return send(res, 200, await saveRelationshipProfile(await readBody(req)))
+    if (method === 'POST' && p === 'relationships/people') return send(res, 200, { person: await createRelationshipPerson(await readBody(req)) })
+    if (seg[2] === 'people' && seg[3] && seg.length === 4) {
+      const id = assertId(seg[3])
+      if (method === 'PATCH') return send(res, 200, { person: await updateRelationshipPerson(id, await readBody(req)) })
+      if (method === 'DELETE') {
+        const removed = await deleteRelationshipPerson(id)
+        return send(res, removed ? 200 : 404, removed ? { ok: true } : { error: '人物背景不存在' })
+      }
+    }
+    return send(res, 404, { error: 'unknown_relationship_route' })
+  }
+
   if (method === 'GET' && p === 'backup') {
     const convs = []
     for (const m of await listConversations()) {
@@ -785,7 +816,10 @@ async function api(req, res, url) {
       commitments: state.commitments ?? [],
       preparations: state.preparations ?? [],
       commitmentWork: state.commitmentWork ?? { runs: [] },
+      proactiveDiscovery: state.proactiveDiscovery ?? {},
+      researchDocuments: await Promise.all((await listResearchDocuments()).map((document) => getResearchDocument(document.id))),
       agencyOutcomes: state.agency?.outcomes ?? {},
+      relationship: await getRelationships(),
       note: '凭据（API key / 口令哈希 / 会话 cookie）不在此备份里',
     }
     res.writeHead(200, {
@@ -1024,9 +1058,23 @@ async function api(req, res, url) {
   }
 
   if (method === 'GET' && p === 'agency') return send(res, 200, await agencyStats())
+  if (method === 'GET' && p === 'research') return send(res, 200, { ...await researchStatus(), documents: await listResearchDocuments() })
+  if (method === 'POST' && p === 'research/documents') {
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
+    if (backgroundSuspended) return send(res, 409, { error: 'privacy_reset_running' })
+    const document = await saveResearchDocument(await readBody(req, 8 * 1024 * 1024))
+    return send(res, 201, { document })
+  }
+  if (method === 'POST' && p === 'research/reconcile') {
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
+    kickPreparation()
+    return send(res, 202, { queued: !backgroundSuspended })
+  }
   if (method === 'GET' && p === 'commitments') return send(res, 200, await listCommitments())
   if (method === 'POST' && p === 'commitments') {
-    const commitment = await createCommitment(await readBody(req))
+    const body = await readBody(req)
+    if (body.scope?.folders?.length && !isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
+    const commitment = await createCommitment(body)
     send(res, 201, { commitment })
     kickPreparation()
     return
@@ -1035,6 +1083,7 @@ async function api(req, res, url) {
     const id = assertId(seg[2])
     if (method === 'PATCH' && !seg[3]) {
       const patch = await readBody(req)
+      if (patch.scope?.folders?.length && !isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
       const commitment = await updateCommitment(id, patch)
       if (!commitment) return send(res, 404, { error: '目标不存在' })
       if (patch.status === 'done') record({ kind: 'commitment_completed', commitmentId: id })
@@ -1108,12 +1157,20 @@ function upstreamReady() {
 
 /** 隐私兜底：把记忆（可选连同会话）清空，但在遗忘日志里留一条可解释的记录。 */
 async function wipeEverything({ includeConversations = false } = {}) {
+  backgroundSuspended = true
+  try {
+  await cancelDiscovery('隐私重置')
+  cancelCommitmentWork('隐私重置')
+  await cancelAndDrainResearch('隐私重置')
+  await clearResearchDocuments()
   await clearRuns()
   // Revoke background work before any file I/O so an in-flight run cannot restore it.
   await mutateState((s) => {
     s.commitments = []
     s.preparations = []
     s.commitmentWork = { runs: [] }
+    delete s.proactiveDiscovery
+    delete s.relationship
     return s
   })
   if (includeConversations) for (const ctrl of inflight.values()) ctrl.abort()
@@ -1151,9 +1208,16 @@ async function wipeEverything({ includeConversations = false } = {}) {
     s.commitments = []
     s.preparations = []
     s.commitmentWork = { runs: [] }
+    delete s.proactiveDiscovery
+    delete s.relationship
     return s
   })
+  // A memory-only wipe must not rediscover the retained chat history.
+  if (cfg.proactive?.research?.enabled) cfg = await saveConfig({ proactive: { research: { enabledAt: nowIso() } } })
   return counts
+  } finally {
+    backgroundSuspended = false
+  }
 }
 
 /** 自我报告：跑过什么、多快、失败在哪——RSI 的度量面。 */
@@ -1188,6 +1252,7 @@ async function diagnostics() {
     memory: mem,
     graph,
     agency,
+    research: await researchStatus(),
     search: { provider: cfg.search.provider, engines: await engineStatus() },
     screen: { enabled: screen.enabled, lastAt: screen.lastAt, todayCount: screen.todayCount, working: screen.workingCount, sessions: screen.sessions.length },
     mcp: mcp.status(),
@@ -1377,6 +1442,7 @@ async function streamChatHandler(req, res) {
     clearInterval(heartbeat)
     inflight.delete(conversationId)
     if (!res.writableEnded) res.end()
+    if (body.userText && !body.regenerate) kickPreparation()
   }
 }
 
@@ -1449,8 +1515,14 @@ async function readDreamState() {
 
 let proactiveBusy = false
 let lastProactiveAttempt = 0
+let backgroundSuspended = false
+let preparationWork = null
 function kickPreparation() {
-  prepareDueCommitments().catch((err) => log.warn('目标准备失败', err.message))
+  if (backgroundSuspended || preparationWork) return
+  preparationWork = (async () => {
+    await discoverNeeds()
+    if (!backgroundSuspended) await prepareDueCommitments()
+  })().catch((err) => log.warn('目标准备失败', err.message)).finally(() => { preparationWork = null })
 }
 const preparationTimer = setInterval(kickPreparation, 60000)
 const proactiveTimer = setInterval(async () => {
@@ -1527,6 +1599,9 @@ async function shutdown(signal) {
   clearInterval(tick)
   clearInterval(proactiveTimer)
   clearInterval(preparationTimer)
+  cancelDiscovery('服务正在停止').catch(() => {})
+  cancelCommitmentWork('服务正在停止')
+  cancelAndDrainResearch('服务正在停止').catch(() => {})
   for (const [, ctrl] of inflight) ctrl.abort()
   cancelHarnessRuns('服务正在停止')
   try {
