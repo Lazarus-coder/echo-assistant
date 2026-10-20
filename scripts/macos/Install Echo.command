@@ -69,7 +69,6 @@ chmod +x "$TARGET/bin/echo" "$TARGET/bin/echo" 2>/dev/null
 [ -e "$SRC/docs" ] && true
 mkdir -p "$TARGET/data/logs"
 if [ -d "$SRC/Echo.app" ]; then
-  rm -rf "/Applications/Echo.app" 2>/dev/null || true
   rm -rf "$TARGET/Echo.app"
   # 先删旧 bundle 再拷贝，避免旧签名残留
   ditto "$SRC/Echo.app" "$TARGET/Echo.app"
@@ -197,7 +196,9 @@ if [ -d "$APP_PATH" ] && xattr -p com.apple.quarantine "$APP_PATH" >/dev/null 2>
   read -r ans
   case "$ans" in
     y|Y) xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null && ok "已移除隔离标记"
-         launchctl kickstart -k "gui/$UID_NUM/$MENUBAR_LABEL" 2>/dev/null || true ;;
+         if [ "$DO_LAUNCHD" = "1" ]; then
+           launchctl kickstart -k "gui/$UID_NUM/$MENUBAR_LABEL" 2>/dev/null || true
+         fi ;;
     *) info "保留标记：首次可右键点图标 → 打开；或自行运行 xattr -dr com.apple.quarantine \"$APP_PATH\"" ;;
   esac
 fi

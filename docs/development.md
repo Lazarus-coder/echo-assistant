@@ -79,7 +79,7 @@ The HTTP parsing and cleanup-accounting fixes in current source were added after
 
 Run the full suite in a disposable environment, or apply a test-only filesystem mock to every spawned server before it imports `server.mjs`. A preload on the parent test runner alone is insufficient when child processes replace their environment. The fixture in [server-regressions.mjs](../tests/server-regressions.mjs) shows the required ordering. Do not use a running user's captures as test data or restart their installed service to run tests.
 
-The offline evaluator, `npm run selftest`, creates its own configuration and does not read real credentials. It still starts a server, so the shared-directory caveat applies. It also writes the untracked `tests/last-report.json`. `npm run selftest:live` explicitly reads the checkout's configuration and credentials and calls real model/search services. It is outside the offline regression workflow.
+The offline evaluator, `npm run selftest`, creates its own configuration and does not read real credentials. Its server startup mocks access to the shared capture directory before importing the server. It also writes the untracked `tests/last-report.json`. `npm run selftest:live` explicitly reads the checkout's configuration and credentials and calls real model/search services. It is outside the offline regression workflow.
 
 Use the current command output for pass/fail counts. Historical release notes and development logs describe their own revisions, not today's test coverage.
 

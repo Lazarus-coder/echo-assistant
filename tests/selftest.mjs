@@ -15,6 +15,7 @@
 import { spawn } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
+import net from 'node:net'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
@@ -24,8 +25,8 @@ const args = process.argv.slice(2)
 const LIVE = args.includes('--live')
 const JSON_OUT = args.includes('--json')
 const KEEP = args.includes('--keep')
-const PORT = Number(args[args.indexOf('--port') + 1]) || 8899
-const BASE = `http://127.0.0.1:${PORT}`
+let PORT = Number(args[args.indexOf('--port') + 1]) || 0
+let BASE
 const PASSWORD = 'selftest-pass-123'
 
 const results = []
@@ -84,6 +85,14 @@ async function req(pathname, { method = 'GET', body, headers = {}, auth = true, 
 /* --------------------------------- 沙箱 ---------------------------------- */
 
 async function bootSandbox() {
+  const reservation = net.createServer()
+  await new Promise((resolve, reject) => {
+    reservation.once('error', reject)
+    reservation.listen(PORT, '127.0.0.1', resolve)
+  })
+  PORT = reservation.address().port
+  BASE = `http://127.0.0.1:${PORT}`
+  await new Promise((resolve) => reservation.close(resolve))
   sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'echo-selftest-'))
   // 关键：单元检查也必须在沙箱里跑，否则会污染真实数据目录
   process.env.ECHO_DATA_DIR = sandbox
@@ -112,7 +121,13 @@ async function bootSandbox() {
     await fs.writeFile(path.join(sandbox, 'echo.env'), raw, { mode: 0o600 })
   } catch {}
   baselineEnvRaw = await fs.readFile(path.join(sandbox, 'echo.env'), 'utf8').catch(() => '')
-  child = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], {
+  child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { promises as fs } from 'node:fs'
+    const readdir = fs.readdir
+    // ECHO_DATA_DIR does not redirect the installed app's shared captures.
+    fs.readdir = (dir, ...args) => dir === '/tmp/echo-capture' ? Promise.resolve([]) : readdir(dir, ...args)
+    await import(${JSON.stringify(new URL('../server.mjs', import.meta.url).href)})
+  `], {
     cwd: ROOT,
     env: {
       ...(LIVE ? process.env : { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, ECHO_CONFIG: process.env.ECHO_CONFIG }),
@@ -130,11 +145,13 @@ async function bootSandbox() {
   })
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 250))
+    if (child.exitCode !== null) throw new Error(`沙箱服务退出：${child.exitCode}`)
     try {
       const res = await fetch(`${BASE}/api/health`)
       if (res.ok) break
     } catch {}
   }
+  if (child.exitCode !== null) throw new Error(`沙箱服务退出：${child.exitCode}`)
   const r = await fetch(`${BASE}/api/password`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
