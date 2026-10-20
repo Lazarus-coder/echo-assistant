@@ -134,6 +134,7 @@ if [ "$VERIFY" = "1" ]; then
 
   info "用装出来的副本跑离线自测…"
   if ( cd "$INST" && env -u NODE_OPTIONS node tests/selftest.mjs --json >"$INSTALL_TEST_ROOT/selftest.json" 2>&1 ); then
+    cp "$INST/tests/last-report.json" "$OUT/$NAME.selftest.json"
     ok "安装副本自测通过"
   else
     tail -12 "$INSTALL_TEST_ROOT/selftest.json"
@@ -143,7 +144,7 @@ if [ "$VERIFY" = "1" ]; then
   # 隔离/凭据检查
   if [ -f "$INST/data/echo.env" ]; then
     perm=$(stat -f '%Lp' "$INST/data/echo.env")
-    [ "$perm" = "600" ] || die "echo.env 权限不是 600（是 $perm）"
+    [ "$perm" = "600" ] || die "echo.env 权限不是 600（是 ${perm}）"
     ok "凭据文件权限 600"
   fi
   cleanup_verify

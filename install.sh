@@ -35,7 +35,7 @@ mkdir -p "$ROOT/data/logs" "$ROOT/data/conversations" "$ROOT/data/memory" "$ROOT
 # 若已经用 DMG 装过 App，就不再重编裸二进制（重建 = 新二进制 = macOS 会重新要授权）
 INSTALLED_APP="$HOME/Library/Application Support/Echo/Echo.app"
 if [ -x "$INSTALLED_APP/Contents/MacOS/EchoBar" ]; then
-  echo "检测到已安装的 App（$INSTALLED_APP），本次不再重编状态栏二进制，避免触发重新授权"
+  echo "检测到已安装的 App（${INSTALLED_APP}），本次不再重编状态栏二进制，避免触发重新授权"
   export ECHO_SKIP_MENUBAR_BUILD=1
 fi
 
@@ -69,7 +69,7 @@ else
     echo "OPENAI_BASE_URL=$BASEURL"
   } > "$ROOT/data/echo.env"
   chmod 600 "$ROOT/data/echo.env"
-  ok "已写入 data/echo.env（base=$BASEURL）"
+  ok "已写入 data/echo.env（base=${BASEURL}）"
 fi
 
 # ------------------------------------------------------------------- 2. 口令

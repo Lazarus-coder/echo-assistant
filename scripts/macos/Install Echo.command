@@ -80,7 +80,7 @@ ok "已复制程序文件到 $TARGET"
 # ── 3. 模型端点与密钥（可跳过，之后在网页引导里填） ──────────────────
 ENV_FILE="$TARGET/data/echo.env"
 if [ -f "$ENV_FILE" ]; then
-  ok "沿用已有凭据（$ENV_FILE）"
+  ok "沿用已有凭据（${ENV_FILE}）"
 else
   BASE="${OPENAI_BASE_URL:-}"
   KEY="${OPENAI_API_KEY:-}"
@@ -101,7 +101,7 @@ else
       [ -n "$BASE" ] && echo "OPENAI_BASE_URL=$BASE"
     } > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    ok "凭据已写入 $ENV_FILE（权限 600）"
+    ok "凭据已写入 ${ENV_FILE}（权限 600）"
   else
     info "跳过：首次打开网页时会有六步引导"
   fi

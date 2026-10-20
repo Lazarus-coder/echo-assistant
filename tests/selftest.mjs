@@ -145,13 +145,13 @@ async function bootSandbox() {
   })
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 250))
-    if (child.exitCode !== null) throw new Error(`沙箱服务退出：${child.exitCode}`)
+    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`沙箱服务退出：${child.signalCode ?? child.exitCode}`)
     try {
       const res = await fetch(`${BASE}/api/health`)
       if (res.ok) break
     } catch {}
   }
-  if (child.exitCode !== null) throw new Error(`沙箱服务退出：${child.exitCode}`)
+  if (child.exitCode !== null || child.signalCode !== null) throw new Error(`沙箱服务退出：${child.signalCode ?? child.exitCode}`)
   const r = await fetch(`${BASE}/api/password`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
