@@ -164,7 +164,7 @@ Saved preferences and matching notes are sent to your configured model only when
 <a id="quick-start"></a>
 ## Install
 
-**macOS installer (recommended, universal binary — Apple Silicon + Intel):** grab `Echo-0.1.0-alpha.5-macos.dmg` from [Releases](https://github.com/Lazarus-coder/echo-assistant/releases), open it, double-click **Install Echo.command**. It installs `Echo.app` + the service into `~/Library/Application Support/Echo`, registers launchd, and asks for your endpoint/key (skippable — the wizard covers it). Uninstall with the bundled `Uninstall Echo.command`.
+**macOS installer (recommended, universal binary — Apple Silicon + Intel):** grab `Echo-0.1.0-alpha.6-macos.dmg` from [Releases](https://github.com/Lazarus-coder/echo-assistant/releases), open it, double-click **Install Echo.command**. It installs `Echo.app` + the service into `~/Library/Application Support/Echo`, registers launchd, and asks for your endpoint/key (skippable — the wizard covers it). Uninstall with the bundled `Uninstall Echo.command`.
 
 **From source** (macOS, Node ≥ 22.13):
 

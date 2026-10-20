@@ -164,7 +164,7 @@ Dream 继续整理记忆、提出跟进候选，但不会默默把候选变成�
 <a id="安装"></a>
 ## 安装
 
-**macOS 安装包（推荐，通用二进制：Apple Silicon + Intel）**：到 [Releases](https://github.com/Lazarus-coder/echo-assistant/releases) 下载 `Echo-0.1.0-alpha.5-macos.dmg`，打开后双击 **Install Echo.command**。它把 `Echo.app` 与服务装到 `~/Library/Application Support/Echo`、注册 launchd 常驻、并询问模型端点与 Key（可跳过，网页里有向导）。卸载双击同一目录里的 `Uninstall Echo.command`。
+**macOS 安装包（推荐，通用二进制：Apple Silicon + Intel）**：到 [Releases](https://github.com/Lazarus-coder/echo-assistant/releases) 下载 `Echo-0.1.0-alpha.6-macos.dmg`，打开后双击 **Install Echo.command**。它把 `Echo.app` 与服务装到 `~/Library/Application Support/Echo`、注册 launchd 常驻、并询问模型端点与 Key（可跳过，网页里有向导）。卸载双击同一目录里的 `Uninstall Echo.command`。
 
 **从源码装**（macOS，Node ≥ 22.13）：
 
