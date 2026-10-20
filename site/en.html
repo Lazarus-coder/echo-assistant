@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f4ef">
+  <meta name="description" content="Meet Echo, a personal AI assistant for your Mac. Connect your own model, manage your memory, and choose when to research and follow up on what matters.">
+  <meta property="og:title" content="Echo — Your next step, ready when you are.">
+  <meta property="og:description" content="Your model. Your context. Your pace. Meet Echo, a personal AI assistant for your Mac.">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="en_US">
+  <title>Echo — Your next step, ready when you are.</title>
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="alternate" hreflang="zh-CN" href="index.html">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="en.html" aria-label="Echo home"><img src="assets/logo.svg" width="34" height="34" alt=""><span>echo</span></a>
+    <nav aria-label="Main navigation">
+      <a href="#experience">Experience</a><a href="#control">Privacy &amp; control</a><a href="#questions">FAQ</a>
+    </nav>
+    <div class="header-actions"><a class="language" href="index.html" lang="zh-CN" aria-label="阅读简体中文版">简体中文</a><a class="button small" href="#download">Get Echo <span aria-hidden="true">↗</span></a></div>
+  </header>
+  <main id="main">
+    <section class="hero section-shell" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> PERSONAL AI, AT YOUR PACE</p>
+        <h1 id="hero-title">Your next step,<br><em>ready when you are.</em></h1>
+        <p class="hero-description">Some things are worth remembering.<br>Let Echo keep the context, follow what matters,<br class="desktop-break">and help you pick up where you left off.</p>
+        <div class="hero-actions"><a class="button" href="#download">Download for Mac <span aria-hidden="true">↓</span></a><a class="text-link" href="#experience">See how it works <span aria-hidden="true">↗</span></a></div>
+        <p class="hero-meta">macOS 13+ <span>·</span> Bring your own model <span>·</span> Alpha preview</p>
+      </div>
+      <div class="hero-visual" aria-label="Illustrative Echo research workflow using fictional sample data">
+        <div class="echo-orbit orbit-one" aria-hidden="true"></div><div class="echo-orbit orbit-two" aria-hidden="true"></div>
+        <div class="window">
+          <div class="window-bar"><span class="traffic" aria-hidden="true"><i></i><i></i><i></i></span><span>Echo / Follow-up</span><span class="window-label">Illustrative workflow</span></div>
+          <div class="window-body">
+            <aside class="mock-sidebar" aria-hidden="true"><span class="mock-brand">e.</span><span>Chat</span><span>Memory</span><span class="mock-active">Follow-up</span><span>Workspace</span><span class="sidebar-bottom">Your control</span></aside>
+            <div class="mock-content">
+              <div class="mock-top"><span class="micro">FOLLOWING UP</span><span class="tag">Research enabled</span></div>
+              <h2>Start with an idea.<br>Keep a way forward.</h2>
+              <p class="mock-question">“Compare these two options. Show me the differences and what still needs checking.”</p>
+              <div class="research-progress"><span class="progress-icon" aria-hidden="true">✓</span><div><strong>Findings ready to review</strong><span>Evidence, differences, and open questions</span></div></div>
+              <div class="evidence-stack"><span><i aria-hidden="true"></i> Sources &amp; citations</span><span><i aria-hidden="true"></i> Suggested next steps</span></div>
+              <div class="mock-bottom"><span class="status-dot" aria-hidden="true"></span> Ready when you are <span aria-hidden="true">↗</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="floating-note"><span class="note-icon" aria-hidden="true">↳</span><div><strong>Remember what matters.</strong><span>You choose to continue, pause, or forget.</span></div></div>
+        <p class="visual-caption">Illustrative workflow · Sample data, not actual research results</p>
+      </div>
+    </section>
+    <div class="principles section-shell" aria-label="Product principles"><span>YOUR MODEL.<b>Choose your connection</b></span><span>YOUR CONTEXT.<b>Manage what stays</b></span><span>YOUR PACE.<b>Decide when to continue</b></span><a href="#control">Understand your data <span aria-hidden="true">↗</span></a></div>
+
+    <section class="experience section-shell" id="experience" aria-labelledby="experience-title">
+      <div class="section-heading"><p class="eyebrow">01 / FROM CONTEXT TO ACTION</p><h2 id="experience-title">Start a conversation.<br><span class="muted">Give it somewhere to go.</span></h2><p>Bring research, memory, and your workspace together.<br>Return with the context and controls you need.</p></div>
+      <div class="experience-layout">
+        <div class="scenario-tabs" role="tablist" aria-label="Explore use cases" aria-orientation="vertical">
+          <button role="tab" id="tab-research" aria-controls="panel-research" aria-selected="true" tabindex="0"><span class="scenario-number">01</span><span><strong>Turn a lead into useful preparation</strong><span>Research &amp; follow-up</span></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+          <button role="tab" id="tab-memory" aria-controls="panel-memory" aria-selected="false" tabindex="-1"><span class="scenario-number">02</span><span><strong>Keep the context worth repeating</strong><span>Memory &amp; preferences</span></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+          <button role="tab" id="tab-workspace" aria-controls="panel-workspace" aria-selected="false" tabindex="-1"><span class="scenario-number">03</span><span><strong>Take the conversation into your work</strong><span>Workspace &amp; tools</span></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+        </div>
+        <div class="scenario-panels">
+          <article id="panel-research" class="scenario-panel" role="tabpanel" aria-labelledby="tab-research" tabindex="0">
+            <div class="panel-preview research-preview"><div class="preview-heading"><span>Research brief</span><span class="tag">Sample</span></div><h3>Your comparison is ready.</h3><div class="brief-row"><span>Found</span><strong>Differences backed by sources</strong><span aria-hidden="true">↗</span></div><div class="brief-row"><span>To verify</span><strong>Details that still need checking</strong><span class="uncertain" aria-hidden="true">◌</span></div><div class="brief-row"><span>Next</span><strong>You choose where to take it</strong><span aria-hidden="true">→</span></div></div>
+            <h3 class="panel-title">Prepared for you. Decided by you.</h3><p>When you explicitly enable background research, Echo can identify follow-up needs in new conversations, consult public sources, and read documents within your chosen scope. Sources stay with the findings; open questions stay open.</p><a class="text-link" href="#start">See how to get started <span aria-hidden="true">↗</span></a>
+          </article>
+          <article id="panel-memory" class="scenario-panel" role="tabpanel" aria-labelledby="tab-memory" tabindex="0" hidden>
+            <div class="panel-preview memory-preview"><div class="preview-heading"><span>Memory &amp; preferences</span><span class="tag">Sample</span></div><h3>Keep what helps. Let go of the rest.</h3><div class="memory-line"><span class="memory-symbol" aria-hidden="true">◎</span><div><strong>I prefer concise, specific suggestions</strong><span>Communication preference · Editable</span></div><span class="memory-state">Keep</span></div><div class="memory-line faded"><span class="memory-symbol" aria-hidden="true">◌</span><div><strong>A temporary plan that has ended</strong><span>Remove it from Memory when it is no longer useful</span></div></div></div>
+            <h3 class="panel-title">More context. Yours to edit.</h3><p>Manage long-term memory, tone preferences, and the personal profiles you add yourself. Protect useful information, restore faded memories, or explicitly delete them. Your current instructions take priority over past preferences.</p><a class="text-link" href="#control">Explore memory and data <span aria-hidden="true">↗</span></a>
+          </article>
+          <article id="panel-workspace" class="scenario-panel" role="tabpanel" aria-labelledby="tab-workspace" tabindex="0" hidden>
+            <div class="panel-preview workspace-preview"><div class="preview-heading"><span>Workspace activity</span><span class="tag">Sample</span></div><h3>A record of each step.</h3><div class="run-step"><span aria-hidden="true">✓</span><span>Read files in the selected project</span><small>Done</small></div><div class="run-step"><span aria-hidden="true">✓</span><span>Save snapshots before and after edits</span><small>Viewable</small></div><div class="run-step pending"><span aria-hidden="true">◷</span><span>Run a validation command</span><small>Needs approval</small></div></div>
+            <h3 class="panel-title">Clear permissions. Reviewable results.</h3><p>Choose a project folder and enable file reading, editing, and Shell separately. Approve each command or MCP call, then inspect the results and saved edit snapshots. Background research remains read-only.</p><a class="text-link" href="#control">Understand tool permissions <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+      </div>
+      <p class="section-note">Illustrative workflows. Actual results depend on your model, the material you provide, and the permissions you grant.</p>
+    </section>
+
+    <section class="control" id="control" aria-labelledby="control-title">
+      <div class="section-shell control-layout">
+        <div class="control-copy"><p class="eyebrow">02 / TRUST IS A PRODUCT FEATURE</p><h2 id="control-title">Personal assistance.<br>Clear boundaries.</h2><p>Records on your device. Access by choice.<br>Inspect, adjust, or pause as you go.</p><a class="light-link" href="https://github.com/Lazarus-coder/echo-assistant/blob/aj/request-storage-hardening/docs/permissions.md">Read the full permissions guide <span aria-hidden="true">↗</span></a><div class="echo-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div>
+        <div class="control-list">
+          <article><span>01</span><div><h3>Your model, with a clear path for your data</h3><p>Conversations, memory, and execution records are stored on your device. Content used to generate responses is sent to your configured model; search queries go to your selected search service.</p></div></article>
+          <article><span>02</span><div><h3>Separate controls for research, screen, and tools</h3><p>Background research, screen awareness, companion mode, and workspace tools start off. Selecting the deep memory profile also enables screen awareness. OCR text or images may be sent to your model; capture can be paused at any time.</p></div></article>
+          <article><span>03</span><div><h3>A way to continue, and a way to stop</h3><p>Pause or cancel goals, and manage or delete memories. Quiet hours and frequency limits help reduce interruptions. Activity records are available for review.</p></div></article>
+          <article><span>04</span><div><h3>Approval before execution. Records afterward.</h3><p>Shell and MCP calls require approval. Shell runs with your local account's privileges, without an operating-system sandbox. Stopping a run cannot undo actions that have already completed.</p></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="start section-shell" id="start" aria-labelledby="start-title">
+      <div class="section-heading"><p class="eyebrow">03 / MAKE IT YOURS</p><h2 id="start-title">Three steps.<br><span class="muted">Your own pace from there.</span></h2></div>
+      <ol class="start-steps"><li><span class="step-number">01</span><h3>Install Echo</h3><p>You will need macOS 13+ and Node.js 22.13 or newer. Download the package and follow the installation guide.</p></li><li><span class="step-number">02</span><h3>Connect your model</h3><p>Enter a compatible endpoint and API key in the setup wizard. Verify the connection, then choose your chat and background models.</p></li><li><span class="step-number">03</span><h3>Start with something specific</h3><p>Talk through a question. Enable research, select sources, or grant workspace access when you want help preparing the next step.</p></li></ol>
+    </section>
+
+    <section class="download section-shell" id="download" aria-labelledby="download-title">
+      <div class="download-main"><p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> AVAILABLE FOR MAC</p><h2 id="download-title">Your next step<br>starts with Echo.</h2><p>A personal assistant that keeps the context as your ideas develop.</p><a class="button" href="https://github.com/Lazarus-coder/echo-assistant/releases/download/v0.1.0-alpha.6/Echo-0.1.0-alpha.6-macos.dmg">Download for macOS <span aria-hidden="true">↓</span></a><p class="download-requirements">macOS 13+ · Requires Node.js ≥ 22.13</p><a class="text-link" href="https://github.com/Lazarus-coder/echo-assistant/blob/aj/request-storage-hardening/docs/getting-started.md#english">Installation &amp; first-time setup <span aria-hidden="true">↗</span></a></div>
+      <div class="release-card"><span class="release-label">CURRENT PUBLIC RELEASE</span><h3>0.1.0-alpha.6</h3><span class="tag">Early preview</span><p>This release adds background research, source and deadline checks, and editable communication preferences.</p><ul><li>Separate permission for background research</li><li>Sources and unverified details kept distinct</li><li>Goals and feedback saved for follow-up</li></ul><a class="text-link" href="https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6">Release notes, other downloads &amp; checksums <span aria-hidden="true">↗</span></a><p class="release-note">Features and data formats may change during alpha. Back up before upgrading. The macOS app is not Developer ID signed or notarized.</p></div>
+    </section>
+
+    <section class="faq section-shell" id="questions" aria-labelledby="questions-title">
+      <div><p class="eyebrow">A FEW THINGS TO KNOW</p><h2 id="questions-title">Before you begin,<br>a little clarity.</h2></div>
+      <div class="faq-list">
+        <details><summary>Do I need an Echo account or model credits?</summary><p>Echo does not require an account. You supply your own model endpoint and credentials. Model and paid search usage are billed by the providers you choose. Available features depend on what your endpoint supports.</p></details>
+        <details><summary>Does local-first mean fully offline?</summary><p>No. Conversations and memory are stored locally, but responses use your configured model, and online research accesses external sources. If you connect a compatible local model, check each tool's network requirements separately.</p></details>
+        <details><summary>Will Echo automatically read my email, browser, or calendar?</summary><p>Echo does not currently connect to these apps automatically. Research uses new Echo conversations, public sources you share, attached documents, and selected folders. Screen awareness is a separate, optional capability.</p></details>
+        <details><summary>Will Echo keep following up when my Mac is closed?</summary><p>No. Checks stop when your Mac sleeps or Echo is not running. Overdue checks resume when it runs again. Review research results yourself, and keep independent reminders for important commitments.</p></details>
+        <details><summary>Is Echo ready for production use?</summary><p>Echo is still in alpha, intended for early users willing to share feedback. Research quality has not yet been evaluated in real-world use. By default, the service listens on your local network without a password. Enable a password or restrict the listening address before using it on shared or untrusted networks.</p></details>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer section-shell"><div><a class="brand" href="en.html"><img src="assets/logo.svg" width="30" height="30" alt=""><span>echo</span></a><p>Your model. Your context. Your pace.</p></div><nav aria-label="Footer navigation"><a href="https://github.com/Lazarus-coder/echo-assistant">GitHub</a><a href="https://github.com/Lazarus-coder/echo-assistant/issues">Report an issue</a><a href="https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6">Releases</a><a href="index.html" lang="zh-CN">简体中文</a></nav><p class="copyright">© 2026 Echo · Personal AI for macOS</p></footer>
+</body>
+</html>
