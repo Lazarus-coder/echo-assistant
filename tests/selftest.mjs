@@ -1087,7 +1087,7 @@ async function main() {
     console.log(`\n报告已写入 tests/last-report.json`)
   }
   await stopSandbox()
-  process.exit(0)
+  process.exit(passed === total ? 0 : 1)
 }
 
 main().catch(async (err) => {

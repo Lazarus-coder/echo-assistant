@@ -82,7 +82,7 @@ codesign -dv "$APP" 2>&1 | grep -q 'adhoc' && ok "已 ad-hoc 签名（Identifier
 ok "Echo.app 组装完成（$(du -sh "$APP" | awk '{print $1}')）"
 
 # 3) 仅打包已提交的程序文件，排除目录内未跟踪的本机文件。
-git archive HEAD -- server.mjs package.json package-lock.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md | tar -x -C "$STAGE"
+git archive HEAD -- server.mjs install.sh package.json package-lock.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md | tar -x -C "$STAGE"
 info "打包锁定版本的运行依赖（安装 DMG 时无需联网下载）…"
 ( cd "$STAGE" && npm ci --omit=dev --ignore-scripts ) || die "运行依赖安装失败"
 ( cd "$STAGE" && node --input-type=module -e "await import('./lib/mcp.mjs')" ) || die "MCP 运行依赖校验失败"

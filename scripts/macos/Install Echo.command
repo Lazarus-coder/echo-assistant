@@ -51,7 +51,7 @@ ok "Node: $NODE ($("$NODE" -v))"
 
 # ── 2. 复制文件 ─────────────────────────────────────────────────────
 mkdir -p "$TARGET"
-for item in server.mjs package.json package-lock.json node_modules bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
+for item in server.mjs install.sh package.json package-lock.json node_modules bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
   if [ -e "$SRC/$item" ]; then
     rm -rf "$TARGET/$item" && cp -R "$SRC/$item" "$TARGET/$item" || die "复制失败：$item"
   fi
@@ -73,7 +73,7 @@ if [ -d "$SRC/Echo.app" ]; then
   # 先删旧 bundle 再拷贝，避免旧签名残留
   ditto "$SRC/Echo.app" "$TARGET/Echo.app"
   codesign --force --deep --sign - --identifier com.echoassistant.menubar "$TARGET/Echo.app" >/dev/null 2>&1 || true
-  ok "已安装应用：$TARGET/Echo.app（ad-hoc 签名，路径固定；屏幕录制授权只需给一次）"
+  ok "已安装应用：$TARGET/Echo.app（ad-hoc 签名；更新后可能需要重新授权屏幕录制）"
 fi
 ok "已复制程序文件到 $TARGET"
 
@@ -192,7 +192,7 @@ APP_PATH="$TARGET/Echo.app"
 if [ -d "$APP_PATH" ] && xattr -p com.apple.quarantine "$APP_PATH" >/dev/null 2>&1; then
   echo
   warn "检测到 macOS 隔离标记：这会阻止状态栏图标启动"
-  printf '要现在移除吗？（这是你自己下载的开源项目，源码在本机可查）[y/N] '
+  printf '要现在移除吗？（请先确认安装包来源可信，源码在本机可查）[y/N] '
   read -r ans
   case "$ans" in
     y|Y) xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null && ok "已移除隔离标记"
