@@ -19,7 +19,7 @@ struct Bubble {
 
 let SCENARIO_EMOJI: [String: String] = ["chat": "💬", "video": "🎬", "work": "💼", "code": "⌨️", "browse": "🌐", "other": "💡"]
 
-final class OverlayController: NSObject {
+final class OverlayController: NSObject, WKUIDelegate {
     private var window: NSWindow?
     private var stack: NSStackView?
     private var visible: [String: NSView] = [:]
@@ -76,8 +76,14 @@ final class OverlayController: NSObject {
         guard let stack = stack, let w = window else { return }
         for b in bubbles where visible[b.id] == nil {
             let card = BubbleCard(bubble: b)
-            card.onOpen = { onOpen(b) }
-            card.onDismiss = { onDismiss(b) }
+            card.onOpen = { [weak self] in
+                self?.remove(b.id)
+                onOpen(b)
+            }
+            card.onDismiss = { [weak self] in
+                self?.remove(b.id)
+                onDismiss(b)
+            }
             card.onSelfDismiss = { [weak self] in
                 onExpire(b)
                 self?.remove(b.id)
@@ -92,9 +98,7 @@ final class OverlayController: NSObject {
         let arranged = stack.arrangedSubviews
         if arranged.count > maxVisible {
             for view in arranged.prefix(arranged.count - maxVisible) {
-                stack.removeArrangedSubview(view)
-                view.removeFromSuperview()
-                if let id = visible.first(where: { $0.value === view })?.key { visible.removeValue(forKey: id) }
+                (view as? BubbleCard)?.expire()
             }
         }
         reposition()
@@ -104,6 +108,7 @@ final class OverlayController: NSObject {
 
     private func remove(_ id: String) {
         guard let view = visible[id], let stack = stack else { return }
+        (view as? BubbleCard)?.stopAutoDismiss()
         visible.removeValue(forKey: id)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
@@ -132,10 +137,13 @@ final class OverlayController: NSObject {
         panel.titlebarAppearsTransparent = true
         panel.level = .floating
         panel.isReleasedWhenClosed = false
-        let web = WKWebView(frame: panel.contentView?.bounds ?? .zero, configuration: WKWebViewConfiguration())
+        let config = WKWebViewConfiguration()
+        if let source = Self.miniAuthScript(origin: "http://127.0.0.1:\(port)", token: token) {
+            config.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
+        let web = WKWebView(frame: panel.contentView?.bounds ?? .zero, configuration: config)
+        web.uiDelegate = self
         web.autoresizingMask = [.width, .height]
-        // 小窗内不需要 cookie 之外的任何注入；本机访问免登录时直接可用
-        _ = token
         if let url = URL(string: "http://127.0.0.1:\(port)/mini.html?b=\(bubble.id)") {
             web.load(URLRequest(url: url))
         }
@@ -147,6 +155,35 @@ final class OverlayController: NSObject {
             self?.miniPanels.removeValue(forKey: bubble.id)
         }
     }
+
+    static func miniAuthScript(origin: String, token: String) -> String? {
+        guard !token.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: ["origin": origin, "token": token]),
+              let payload = String(data: data, encoding: .utf8) else { return nil }
+        // 只给本机小窗注入；mini.js 读取后删除，外部网页和子框架拿不到口令。
+        return """
+        (() => {
+          const auth = \(payload);
+          if (location.origin === auth.origin && location.pathname === '/mini.html') {
+            Object.defineProperty(window, '__echoLocalToken', { value: auth.token, configurable: true });
+          }
+        })();
+        """
+    }
+
+    static func browserURL(_ url: URL?) -> URL? {
+        guard let url, let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), url.host != nil else { return nil }
+        return url
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if navigationAction.targetFrame == nil, let url = Self.browserURL(navigationAction.request.url) {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
 }
 
 /// 单张气泡：图标 + 一句话 + 悬停显示的按钮；12 秒自动淡出（鼠标停在上面就不走）
@@ -155,8 +192,8 @@ final class BubbleCard: NSView {
     var onDismiss: (() -> Void)?
     var onSelfDismiss: (() -> Void)?
     private var tracking: NSTrackingArea?
-    private var hovering = false
     private var timer: Timer?
+    private var resolved = false
 
     init(bubble: Bubble) {
         super.init(frame: .zero)
@@ -209,13 +246,37 @@ final class BubbleCard: NSView {
         let click = NSClickGestureRecognizer(target: self, action: #selector(openTapped))
         addGestureRecognizer(click)
 
-        timer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
-            guard let self, !self.hovering else { return }
-            self.onSelfDismiss?()
-        }
+        scheduleAutoDismiss()
     }
 
     required init?(coder: NSCoder) { nil }
+
+    deinit { timer?.invalidate() }
+
+    func stopAutoDismiss() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func expire() {
+        guard finish() else { return }
+        onSelfDismiss?()
+    }
+
+    private func scheduleAutoDismiss() {
+        guard !resolved else { return }
+        stopAutoDismiss()
+        timer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
+            self?.expire()
+        }
+    }
+
+    private func finish() -> Bool {
+        guard !resolved else { return false }
+        resolved = true
+        stopAutoDismiss()
+        return true
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -226,13 +287,19 @@ final class BubbleCard: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        hovering = true
+        stopAutoDismiss()
     }
 
     override func mouseExited(with event: NSEvent) {
-        hovering = false
+        scheduleAutoDismiss()
     }
 
-    @objc private func openTapped() { onOpen?() }
-    @objc private func dismissTapped() { onDismiss?() }
+    @objc private func openTapped() {
+        guard finish() else { return }
+        onOpen?()
+    }
+    @objc private func dismissTapped() {
+        guard finish() else { return }
+        onDismiss?()
+    }
 }

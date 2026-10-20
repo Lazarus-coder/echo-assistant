@@ -361,7 +361,6 @@ final class Controller: NSObject, NSApplicationDelegate {
                 bubbles,
                 onOpen: { b in
                     self.overlay.openMini(for: b, port: port, token: localToken())
-                    request("companion/\(b.id)/open", method: "POST", body: [:]) { _ in self.refresh() }
                 },
                 onDismiss: { b in
                     request("companion/\(b.id)/dismiss", method: "POST", body: ["reason": "menu_bubble"]) { _ in self.refresh() }

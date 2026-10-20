@@ -28,6 +28,10 @@ const S = {
   filter: '',
   panel: 'memory',
   poll: null,
+  followOutput: true,
+  attachmentDrafts: new Map(),
+  uploading: 0,
+  drawing: null,
 }
 
 /* ---------------------------------- api ----------------------------------- */
@@ -50,7 +54,7 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
   }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
-    try { msg = (await res.json()).message ?? msg } catch {}
+    try { const error = await res.json(); msg = error.message ?? (typeof error.error === 'string' ? error.error : msg) } catch {}
     throw new Error(msg)
   }
   return raw ? res : res.json()
@@ -148,7 +152,7 @@ function md(src) {
     const line = lines[i]
     if (!line.trim()) { i++; continue }
     const cm = /^\u0000CODE(\d+)\u0000$/.exec(line.trim())
-    if (cm) {
+    if (cm && code[Number(cm[1])]) {
       const { lang, body } = code[Number(cm[1])]
       out.push(
         `<pre class="code"><div class="code-head"><span>${esc(lang || 'text')}</span><button data-action="copy-code">复制</button></div><code>${highlight(body, lang)}</code></pre>`,
@@ -166,7 +170,7 @@ function md(src) {
       continue
     }
     if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1] ?? '')) {
-      const cells = (l) => l.trim().replace(/^\||\|/g, '').split('|').map((c) => c.trim())
+      const cells = (l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim())
       const head = cells(line)
       i += 2
       const rows = []
@@ -192,6 +196,7 @@ function md(src) {
     }
     const para = []
     while (i < lines.length && lines[i].trim() && !isList(lines[i]) && !/^(#{1,6}\s|\s*>|\s*\||\u0000CODE)/.test(lines[i]) && !/^\s*(?:-{3,}|\*{3,})\s*$/.test(lines[i])) para.push(lines[i++])
+    if (!para.length) para.push(lines[i++])
     out.push(`<p>${inline(para.join('\n')).replace(/\n/g, '<br />')}</p>`)
   }
   return out.join('\n')
@@ -266,7 +271,7 @@ function renderConvs() {
   list.innerHTML = convs.length
     ? convs
         .map(
-          (c) => `<li class="conv ${c.id === S.current ? 'active' : ''} ${c.isMain ? 'main' : ''}" data-action="select-conv" data-id="${esc(c.id)}" title="${esc(c.preview || c.title)}">
+          (c) => `<li class="conv ${c.id === S.current ? 'active' : ''} ${c.isMain ? 'is-main' : ''}" tabindex="0" data-action="select-conv" data-id="${esc(c.id)}" title="${esc(c.preview || c.title)}">
             <div class="col">
               <div class="name">${c.isMain ? '<span>主对话</span>' : esc(c.title)}${c.unread ? '<i class="dot" title="有新消息"></i>' : ''}${c.pinned && !c.isMain ? '<svg viewBox="0 0 24 24" width="11" height="11" style="fill:currentColor;stroke:none"><path d="M14 3l7 7-4 1-3 3-1 4-4-4-5 5 1-6-4-4 6-1 3-3z"/></svg>' : ''}</div>
               <div class="sub">${c.isMain ? '主动服务会出现在这里' : esc(c.preview || '空')} · ${ago(c.updatedAt)}</div>
@@ -301,7 +306,7 @@ function messageNode(m) {
     wrap.innerHTML = `<div class="body"><div class="content">${esc(m.content)}</div>${imageGallery(imgs)}</div>`
     wrap.insertAdjacentHTML(
       'beforeend',
-      `<div class="msg-actions" style="align-self:flex-start"><button data-action="edit-user">编辑重发</button><button data-action="copy-msg">复制</button></div>`,
+      `<div class="msg-actions" style="align-self:flex-start"><button data-action="edit-user">编辑重发</button><button data-action="copy-msg">复制</button>${String(m.content ?? '').trim() ? '<button data-action="adopt-message">设为目标</button>' : ''}</div>`,
     )
     wrap.style.alignItems = 'flex-end'
     return wrap
@@ -312,13 +317,15 @@ function messageNode(m) {
         <span class="msg-actions">
           <button data-action="copy-msg">复制</button>
           ${m.proactive ? '' : '<button data-action="regen">重新生成</button>'}
-          <button data-action="fb" data-signal="good" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="这条有用（会调高这类消息的开口倾向）">有用</button>
-          <button data-action="fb" data-signal="bad" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="这条没用（会调低）">没用</button>
+          ${m.proactive || m.companion ? `<button data-action="fb" data-signal="good" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="明确反馈这条内容有帮助">有用</button>
+          <button data-action="fb" data-signal="bad" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="明确反馈这条内容没有帮助">没用</button>` : ''}
         </span>
       </div>
       ${m.reasoning ? `<details class="fold reasoning"><summary>思考过程 · ${m.reasoning.length} 字</summary><div class="fold-body">${esc(m.reasoning)}</div></details>` : ''}
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
+      ${m.runId ? `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
       <div class="content"></div>
+      ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
       ${imageGallery(m.images)}
       <div class="tail"></div>
     </div>`
@@ -331,13 +338,36 @@ function renderSteps(tools) {
   const items = tools
     .map((t) => {
       const args = Object.values(t.args ?? {}).map(String).join(' · ').slice(0, 80)
-      return `<div class="step ${t.ok === false ? 'bad' : ''}"><i class="st-dot"></i><span class="st-name">${esc(t.label ?? t.name)}</span><span class="st-arg">${esc(args)}</span><span class="st-ms">${t.ms ? `${t.ms}ms` : ''}</span></div>`
+      return `<div class="step ${t.ok === false ? 'bad' : ''}"><i class="st-dot"></i><span class="st-name">${esc(t.label ?? t.name)}</span><span class="st-arg">${esc(args)}</span><span class="st-ms">${esc(toolStatus(t))}${t.exitCode != null ? ` · 退出码 ${esc(t.exitCode)}` : ''}</span></div>`
     })
     .join('')
   const detail = tools
-    .map((t) => `<div class="st-out">${esc(String(t.result ?? '').slice(0, 3000))}</div>`)
+    .map((t) => `<div class="st-out">${esc(toolOutputText(t.result ?? t.error).slice(0, 6000))}</div>${artifactLinks(t.artifacts)}`)
     .join('<hr style="border:0;border-top:1px solid var(--border);margin:8px 0"/>')
   return `<details class="fold steps-fold"><summary>调用 ${tools.length} 次工具</summary><div class="fold-body"><div class="steps">${items}</div><div style="margin-top:8px">${detail}</div></div></details>`
+}
+
+const RUN_STATUS = { pending: '待执行', awaiting_approval: '等待确认', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已停止', interrupted: '已中断', limit_reached: '已达执行上限', denied: '已拒绝', timed_out: '已超时' }
+function toolText(value) { return value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
+function toolOutputText(value) {
+  let parsed = value
+  if (typeof value === 'string') { try { parsed = JSON.parse(value) } catch {} }
+  if (parsed && typeof parsed === 'object') {
+    if (typeof parsed.stdout === 'string' || typeof parsed.stderr === 'string') {
+      return [parsed.stdout ? `标准输出\n${parsed.stdout}` : '', parsed.stderr ? `错误输出\n${parsed.stderr}` : '', parsed.reason ? `结束原因：${parsed.reason}` : ''].filter(Boolean).join('\n\n') || '（没有输出）'
+    }
+    if (typeof parsed.content === 'string') return parsed.content
+  }
+  return toolText(parsed)
+}
+function toolStatus(tool) {
+  if (tool.approval?.status === 'denied') return RUN_STATUS.denied
+  if (tool.status) return RUN_STATUS[tool.status] ?? tool.status
+  return tool.ok === false ? '失败' : tool.ms != null ? `${tool.ms}ms` : '…'
+}
+function artifactLinks(artifacts) {
+  return (artifacts ?? []).filter((item) => /^\/api\/runs\/[^\\\s?#]+\/artifacts\/[^\\\s?#]+$/.test(item.url ?? ''))
+    .map((item) => `<a class="run-artifact" href="${esc(item.url)}" download>${esc(item.name || '输出文件')}${Number.isFinite(item.bytes) ? ` · ${Math.ceil(item.bytes / 1024)} KB` : ''}</a>`).join('')
 }
 
 function renderTail(node, m) {
@@ -392,8 +422,10 @@ function imageGallery(images) {
     .join('')}</div>`
 }
 
-function renderThread() {
+function renderThread({ resetScroll = true } = {}) {
   const thread = $('#thread')
+  const scrollTop = thread.scrollTop
+  if (resetScroll) S.followOutput = true
   thread.innerHTML = ''
   const inner = document.createElement('div')
   inner.className = 'thread-inner'
@@ -405,7 +437,14 @@ function renderThread() {
   } else {
     for (const m of msgs) inner.append(messageNode(m))
   }
+  updateRegenerateButtons()
+  if (!S.followOutput) thread.scrollTop = scrollTop
   scrollBottom(false)
+}
+
+function updateRegenerateButtons() {
+  const buttons = $$('#threadInner [data-action="regen"]')
+  buttons.forEach((button, i) => { button.hidden = i !== buttons.length - 1 })
 }
 
 function heroNode() {
@@ -413,24 +452,68 @@ function heroNode() {
   el.className = 'hero'
   const main = S.current === 'main'
   el.innerHTML = `<img src="/logo.svg" width="42" height="42" alt="" />
-    <h3>${main ? '这是你的主对话' : '想问点什么？'}</h3>
+    <h3>${main ? '今天，想一起做点什么？' : '从一个想法开始'}</h3>
     <p>${
       main
-        ? '这里会长期保留，助手的主动跟进、建议和提醒都会出现在这个窗口。换模型不影响它的连续性。'
-        : '本地跑的私人助手，回答会带着来源。你的记忆只存在这台机器的 data/memory/ 里。'
+        ? '随手记下想法，整理一件事，或继续上次的话题。Echo 的主动跟进也会留在这里。'
+        : '问题还没想清楚也没关系。先写下来，再用「润色」一起理清。'
     }</p>
     <div class="suggestions">
-      ${[main ? '帮我看看最近在跟进什么' : '今天有什么值得关注的新闻？', '美元兑人民币汇率', '帮我起草一条请假消息', '搜索最近一次 AI 模型发布']
+      ${['帮我把今天的待办理清楚', '把这个想法变成下一步行动', '帮我起草一条消息', '一起梳理一个难题']
         .map((t) => `<button class="sug" data-action="sug">${esc(t)}</button>`)
         .join('')}
-    </div>`
+    </div><p class="suggestion-hint">选一个起点，编辑后再发送</p>`
   return el
 }
 
-function scrollBottom(force = true) {
+function scrollBottom(force = false) {
   const t = $('#thread')
-  const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 260
-  if (force || nearBottom) t.scrollTop = t.scrollHeight
+  if (force) S.followOutput = true
+  if (S.followOutput) t.scrollTop = t.scrollHeight
+  $('#jumpLatest').hidden = S.followOutput || t.scrollHeight <= t.clientHeight
+}
+
+function updateScrollState() {
+  const t = $('#thread')
+  S.followOutput = t.scrollHeight - t.scrollTop - t.clientHeight < 80
+  $('#jumpLatest').hidden = S.followOutput
+}
+
+function saveDraft() {
+  if (!S.current) return
+  const text = $('#input').value
+  if (text) localStorage.setItem(`echo.draft.${S.current}`, text)
+  else localStorage.removeItem(`echo.draft.${S.current}`)
+  S.attachmentDrafts.set(S.current, S.att.slice())
+}
+
+function updateComposer() {
+  const cfg = S.boot?.config ?? {}
+  const ready = cfg.upstreamConfigured === true
+  const drawing = Boolean(S.drawing && S.drawing === S.current)
+  const busy = Boolean(S.stream || S.selecting || S.preparing || S.uploading || drawing)
+  const text = $('#input').value.trim()
+  $('#sendBtn').disabled = !S.current || !ready || busy || (!text && !S.att.length)
+  $('#polishBtn').disabled = !ready || busy || !text || POLISH.running
+  $('[data-action="attach"]').hidden = cfg.media?.imageInput === false
+  const draw = $('[data-action="draw"]')
+  draw.hidden = cfg.media?.imageOutput === false || !cfg.defaultImageModel
+  draw.disabled = !ready || busy || Boolean(S.drawing)
+  draw.textContent = drawing ? '正在画…' : '画图'
+  $('#connectionNotice').hidden = ready
+  $('#connectionText').textContent = '连接你的模型后即可开始。你可以先写下草稿。'
+  $('#composerHint').textContent = matchMedia('(pointer: coarse)').matches
+    ? '回车换行 · 点「发送」开始'
+    : 'Enter 发送 · Shift+Enter 换行'
+  const draftState = S.uploading ? '正在处理图片…' : text || S.att.length
+    ? `草稿已保留${S.att.length ? ' · 图片保留至关闭页面' : ''}` : ''
+  if ($('#composerState').textContent !== draftState) $('#composerState').textContent = draftState
+  const status = $('#replyStatus')
+  status.hidden = !S.stream && !drawing && !S.selecting
+  const replyState = S.selecting ? '正在打开对话…' : drawing ? '正在生成图片，完成后会保存在这个对话里…'
+    : S.stream ? S.stream.status ?? 'Echo 正在准备回复…' : ''
+  if (status.textContent !== replyState) status.textContent = replyState
+  $('#thread').setAttribute('aria-busy', String(Boolean(S.stream || S.selecting)))
 }
 
 /* ------------------------------ attachments -------------------------------- */
@@ -443,7 +526,7 @@ function renderAttachments() {
   strip.innerHTML = S.att
     .map(
       (a, i) =>
-        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${a.dataUrl}" alt="" /><button type="button" data-action="rm-att" data-i="${i}" title="移除">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
+        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${a.dataUrl}" alt="${esc(a.name || '待发送图片')}" /><button type="button" data-action="rm-att" data-i="${i}" aria-label="移除${esc(a.name || '图片')}" title="移除">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
     )
     .join('')
 }
@@ -487,22 +570,34 @@ async function shrinkImage(file, maxEdge) {
 
 async function addFiles(files) {
   const media = S.boot?.config?.media ?? {}
+  if (media.imageInput === false || !S.current) return toast('当前未开启图片输入', true)
+  const conversationId = S.current
+  saveDraft()
   const max = media.maxImagesPerMessage ?? 4
   const maxEdge = media.maxEdge ?? 1536
-  for (const file of [...(files ?? [])]) {
-    if (!/^image\//.test(file.type ?? '')) continue
-    if (S.att.length >= max) {
-      toast(`一条消息最多 ${max} 张图`, true)
-      break
+  S.uploading++
+  updateComposer()
+  try {
+    for (const file of [...(files ?? [])]) {
+      if (!/^image\//.test(file.type ?? '')) continue
+      try {
+        const image = await shrinkImage(file, maxEdge)
+        const attachments = S.current === conversationId ? S.att : S.attachmentDrafts.get(conversationId) ?? []
+        if (attachments.length >= max) {
+          toast(`一条消息最多 ${max} 张图`, true)
+          break
+        }
+        attachments.push(image)
+        S.attachmentDrafts.set(conversationId, attachments.slice())
+      } catch (err) {
+        toast(`图片处理失败：${err.message}`, true)
+      }
     }
-    try {
-      S.att.push(await shrinkImage(file, maxEdge))
-    } catch (err) {
-      toast(`图片处理失败：${err.message}`, true)
-    }
+  } finally {
+    S.uploading--
+    renderAttachments()
+    autogrow()
   }
-  renderAttachments()
-  autogrow()
 }
 
 /* --------------------------- 首次引导（BYOK 向导） -------------------------- */
@@ -531,6 +626,7 @@ const STEPS = ['端点', '模型', '记忆', '搜索', '权限', '完成']
 async function openWizard({ restart = false } = {}) {
   const [cat, cfgRes] = await Promise.all([api('providers'), api('settings').catch(() => null)])
   W.catalog = cat
+  if (!W.open) W.returnFocus = document.activeElement
   W.open = true
   if (!restart) {
     // 从现状预填，避免让人重填一遍
@@ -545,12 +641,15 @@ async function openWizard({ restart = false } = {}) {
   W.step = restart ? 0 : cat.onboarding.completed ? 0 : 0
   $('#wizard').hidden = false
   renderWizard()
+  syncScrim()
   void cfgRes
 }
 
 function closeWizard() {
   W.open = false
   $('#wizard').hidden = true
+  syncScrim()
+  restoreFocus(W.returnFocus)
 }
 
 function renderWizard() {
@@ -586,6 +685,7 @@ function renderWizard() {
   if (step === 4) body.innerHTML = stepPermissions()
   if (step === 5) body.innerHTML = stepDone()
   bindWizard()
+  $('input, select, button', body)?.focus()
 }
 
 function stepEndpoint() {
@@ -805,8 +905,10 @@ async function runPolish({ mode } = {}) {
   const original = btn.textContent
   btn.textContent = '润色中…'
   btn.disabled = true
+  const conversationId = S.current
   try {
-    const r = await api('polish', { method: 'POST', body: { text, mode: POLISH.mode, conversationId: S.current } })
+    const r = await api('polish', { method: 'POST', body: { text, mode: POLISH.mode, conversationId } })
+    if (S.current !== conversationId || input.value.trim() !== text || S.stream) return
     POLISH.last = r
     if (!r.ok && r.error) toast(r.error, true)
     renderPolishBox()
@@ -815,7 +917,7 @@ async function runPolish({ mode } = {}) {
   } finally {
     POLISH.running = false
     btn.textContent = original
-    btn.disabled = false
+    updateComposer()
   }
 }
 
@@ -828,7 +930,7 @@ function renderPolishBox() {
   }
   const modes = POLISH.modes ?? {}
   const chips = Object.entries(modes)
-    .map(([id, m]) => `<button data-pmode="${id}" aria-pressed="${id === POLISH.mode}" title="${esc(m.note ?? '')}">${esc(m.label ?? id)}</button>`)
+    .map(([id, m]) => `<button type="button" data-pmode="${id}" aria-pressed="${id === POLISH.mode}" title="${esc(m.note ?? '')}">${esc(m.label ?? id)}</button>`)
     .join('')
   const list = (arr, label) => (arr?.length ? `<div><b>${label}</b><ul>${arr.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : '')
   box.hidden = false
@@ -847,10 +949,10 @@ function renderPolishBox() {
     <div class="acts">
       <span class="muted small">${esc((r.usage?.total_tokens ? `${r.usage.total_tokens} tokens · ` : '') + '这段不会自动替换你的输入')}</span>
       <div class="right">
-        <button class="btn small" data-pact="cancel">取消</button>
-        <button class="btn small" data-pact="retry">换个说法</button>
-        <button class="btn small" data-pact="use">替换输入框</button>
-        <button class="btn small primary" data-pact="send">直接发送</button>
+        <button type="button" class="btn small" data-pact="cancel">取消</button>
+        <button type="button" class="btn small" data-pact="retry">换个说法</button>
+        <button type="button" class="btn small" data-pact="use">替换输入框</button>
+        <button type="button" class="btn small primary" data-pact="send">直接发送</button>
       </div>
     </div>`
   box.querySelectorAll('[data-pmode]').forEach((b) =>
@@ -875,12 +977,12 @@ function renderPolishBox() {
         return toast('已替换输入框内容')
       }
       if (act === 'send') {
+        if (S.stream) return toast('正在生成中…', true)
         POLISH.last = null
         renderPolishBox()
         $('#input').value = text
         autogrow()
-        localStorage.removeItem(`echo.draft.${S.current}`)
-        return startStream({ userText: text })
+        return $('#composer').requestSubmit()
       }
     }),
   )
@@ -890,10 +992,19 @@ function renderPolishBox() {
 /* -------------------------------- streaming -------------------------------- */
 
 async function startStream({ userText, regenerate = false, editId }) {
-  if (S.stream) return toast('正在生成中…', true)
+  if (S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return toast('请稍候…', true)
+  if (!S.boot?.config?.upstreamConfigured) return toast('先连接模型，草稿会保留在这里', true)
   const conversationId = S.current
   if (editId) {
-    await api(`conversations/${conversationId}/truncate`, { method: 'POST', body: { messageId: editId } })
+    S.preparing = true
+    try {
+      await api(`conversations/${conversationId}/truncate`, { method: 'POST', body: { messageId: editId } })
+      const messages = $$('#threadInner .msg')
+      const index = messages.findIndex((node) => node.dataset.id === editId)
+      if (index >= 0) messages.slice(index).forEach((node) => node.remove())
+    } finally {
+      S.preparing = false
+    }
   }
   const inner = $('#threadInner')
   $('.hero', inner)?.remove()
@@ -902,10 +1013,12 @@ async function startStream({ userText, regenerate = false, editId }) {
     S.att = []
     renderAttachments()
   }
+  if (!regenerate && !editId) saveDraft()
+  let userNode
   if (userText != null || outgoing.length) {
-    const node = messageNode({ id: uid(), role: 'user', content: userText ?? '', images: outgoing.map((a) => ({ url: a.dataUrl })) })
-    inner.append(node)
-    scrollBottom()
+    userNode = messageNode({ id: uid(), role: 'user', content: userText ?? '', images: outgoing.map((a) => ({ url: a.dataUrl })) })
+    inner.append(userNode)
+    scrollBottom(true)
   }
   if (regenerate) {
     const nodes = $$('.msg.assistant', inner)
@@ -914,13 +1027,14 @@ async function startStream({ userText, regenerate = false, editId }) {
 
   const node = messageNode({ id: uid(), role: 'assistant', content: '', createdAt: new Date().toISOString(), model: $('#modelSelect').value })
   inner.append(node)
+  updateRegenerateButtons()
   const contentEl = $('.content', node)
   const stepsHost = { tools: [] }
-  const st = { buffer: '', reasoning: '', ctrl: new AbortController(), node, contentEl, sources: [], notices: [] }
+  const st = { buffer: '', reasoning: '', ctrl: new AbortController(), node, contentEl, sources: [], notices: [], searchMode: $('#searchSelect').value }
   S.stream = st
   setBusy(true)
   contentEl.innerHTML = '<span class="cursor"></span>'
-  scrollBottom()
+  scrollBottom(true)
 
   let rendered = ''
   let pending = false
@@ -929,6 +1043,7 @@ async function startStream({ userText, regenerate = false, editId }) {
     pending = true
     requestAnimationFrame(() => {
       pending = false
+      if (st.finished) return
       if (rendered === st.buffer) return
       rendered = st.buffer
       contentEl.innerHTML = `${md(st.buffer)}<span class="cursor"></span>`
@@ -980,11 +1095,11 @@ async function startStream({ userText, regenerate = false, editId }) {
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
-      contentEl.innerHTML = `<div class="err">${esc(err.message)}</div>`
+      st.error = err.message
       toast(err.message, true)
     }
   } finally {
-    finishStream(st, stepsHost)
+    await finishStream(st)
   }
 
   function handleEvent(name, d) {
@@ -992,32 +1107,94 @@ async function startStream({ userText, regenerate = false, editId }) {
     switch (name) {
       case 'meta':
         node.dataset.id = d.messageId
+        if (d.runId) st.runId = d.runId
+        if (userNode && d.userMessageId) userNode.dataset.id = d.userMessageId
         if (d.memory?.length) {
           $('.meta', node).insertAdjacentHTML('beforeend', `<span title="注入了 ${d.memory.length} 条记忆">记忆×${d.memory.length}</span>`)
         }
         break
       case 'reasoning':
+        st.status = 'Echo 正在思考…'
+        updateComposer()
         st.reasoning += d.text
         openReasoning()
         break
       case 'delta':
+        if (st.status !== 'Echo 正在回复…') {
+          st.status = 'Echo 正在回复…'
+          updateComposer()
+        }
         st.buffer += d.text
         paint()
         break
+      case 'run_start':
+        st.runId = d.runId
+        if (!$('.run-link', node)) $('.meta', node).insertAdjacentHTML('afterend', `<button class="btn small run-link" data-action="view-run" data-id="${esc(d.runId)}">查看执行记录</button>`)
+        break
       case 'tool_call':
-        stepsHost.tools.push({ id: d.id, name: d.name, label: d.label, args: d.args })
+        st.status = `正在${d.label ?? d.name}…`
+        updateComposer()
+        if (!stepsHost.tools.some((tool) => tool.id === d.id)) stepsHost.tools.push({ id: d.id, name: d.name, label: d.label, args: d.args, status: 'running' })
+        else Object.assign(stepsHost.tools.find((tool) => tool.id === d.id), { name: d.name, label: d.label, args: d.args })
         renderStepsInto(stepsHost.tools)
         break
+      case 'tool_start': {
+        const tool = stepsHost.tools.find((item) => item.id === d.id)
+        if (tool) tool.status = 'running'
+        else stepsHost.tools.push({ id: d.id, name: d.name, status: 'running' })
+        renderStepsInto(stepsHost.tools)
+        break
+      }
+      case 'tool_approval': {
+        st.status = '等待你确认这次操作，可批准、拒绝或停止'
+        updateComposer()
+        const tool = stepsHost.tools.find((item) => item.id === d.id)
+        if (tool) tool.status = 'awaiting_approval'
+        let approvals = $('.run-approvals', node)
+        if (!approvals) {
+          approvals = document.createElement('div')
+          approvals.className = 'run-approvals'
+          contentEl.before(approvals)
+        }
+        if (!$$('[data-approval-id]', approvals).some((card) => card.dataset.approvalId === d.approval.id)) {
+          approvals.insertAdjacentHTML('beforeend', approvalHtml(d.runId, { ...tool, ...d, args: d.approval.args ?? tool?.args }))
+        }
+        renderStepsInto(stepsHost.tools)
+        scrollBottom(false)
+        break
+      }
+      case 'tool_output': {
+        const tool = stepsHost.tools.find((item) => item.id === d.id)
+        if (tool) {
+          tool.output = `${tool.output ?? ''}${String(d.text ?? '')}`.slice(-12000)
+          tool.status = 'running'
+        }
+        if (st.status !== '正在执行工具…') {
+          st.status = '正在执行工具…'
+          updateComposer()
+        }
+        renderStepsInto(stepsHost.tools)
+        break
+      }
       case 'tool_result': {
         const t = stepsHost.tools.find((x) => x.id === d.id)
         if (t) {
           t.ok = d.ok
           t.ms = d.ms
-          t.result = d.preview ?? d.error
+          t.result = d.result ?? d.preview ?? d.error
+          t.status = d.status ?? (d.ok === false ? 'failed' : 'completed')
+          t.exitCode = d.exitCode
+          t.artifacts = d.artifacts
+          if (t.approval?.id) settleApproval(t.approval.id, t.status)
         }
+        $$('[data-approval-id]', node).filter((card) => card.dataset.callId === d.id).forEach((card) => settleApproval(card.dataset.approvalId, t?.status ?? 'completed'))
         renderStepsInto(stepsHost.tools)
         break
       }
+      case 'run_complete':
+        st.runStatus = d.status
+        if (d.status && d.status !== 'completed') st.notices.push(`执行${RUN_STATUS[d.status] ?? d.status}`)
+        break
       case 'sources':
         st.sources.push(...(d.items ?? []))
         break
@@ -1039,7 +1216,7 @@ async function startStream({ userText, regenerate = false, editId }) {
         st.done = d
         break
       case 'error':
-        contentEl.innerHTML = `<div class="err">${esc(d.message)}</div>`
+        st.error = d.message
         break
     }
   }
@@ -1062,23 +1239,17 @@ async function startStream({ userText, regenerate = false, editId }) {
       const anchor = $('details.reasoning', node) ?? $('.meta', node)
       anchor.after(fold)
     }
-    const rows = tools
-      .map(
-        (t) =>
-          `<div class="step ${t.ok === false ? 'bad' : ''}"><i class="st-dot"></i><span class="st-name">${esc(t.label ?? t.name)}</span><span class="st-arg">${esc(
-            Object.values(t.args ?? {}).map(String).join(' · ').slice(0, 90),
-          )}</span><span class="st-ms">${t.ok === false ? '失败' : t.ms ? `${t.ms}ms` : '…'}</span></div>`,
-      )
-      .join('')
-    fold.innerHTML = `<summary>调用 ${tools.length} 次工具</summary><div class="fold-body"><div class="steps">${rows}</div></div>`
+    fold.innerHTML = renderSteps(tools.map((tool) => ({ ...tool, result: tool.result ?? tool.output }))).replace(/^<details[^>]*>|<\/details>$/g, '')
     scrollBottom(false)
   }
 
-  async function finishStream(st, host) {
+  async function finishStream(st) {
+    st.finished = true
     const d = st.done
     const finalText = d?.message?.content ?? st.buffer
-    st.contentEl.innerHTML = md(finalText)
-    if (!finalText.trim() && !$('.err', node)) st.contentEl.innerHTML = '<p class="muted">（没有内容）</p>'
+    if (!d && !st.error && !st.ctrl.signal.aborted) st.error = '连接中断，回复可能不完整，请重试'
+    st.contentEl.innerHTML = md(finalText) + (st.error ? `<div class="err" role="alert">${esc(st.error)}</div>` : '')
+    if (!finalText.trim() && !st.error) st.contentEl.innerHTML = `<p class="muted">${d?.aborted || st.ctrl.signal.aborted ? '已停止生成' : '（没有内容）'}</p>`
     if (st.reasoning) {
       const el = $('details.reasoning', node)
       if (el) {
@@ -1088,15 +1259,17 @@ async function startStream({ userText, regenerate = false, editId }) {
       }
     }
     const sources = d?.sources?.length ? d.sources : st.sources
-    renderTail(node, { ...(d?.message ?? {}), usage: d?.usage, sources, searchMode: $('#searchSelect').value })
-    setBusy(false)
+    renderTail(node, { ...(d?.message ?? {}), usage: d?.usage, sources, searchMode: st.searchMode, aborted: d?.aborted || st.ctrl.signal.aborted })
     S.stream = null
-    await refreshList()
+    $$('[data-approval-id]', node).forEach((card) => settleApproval(card.dataset.approvalId, st.ctrl.signal.aborted ? 'cancelled' : 'interrupted'))
+    if (st.runStatus && st.runStatus !== 'completed') $('.tail', node).insertAdjacentHTML('beforeend', `<p class="muted small">执行状态：${esc(RUN_STATUS[st.runStatus] ?? st.runStatus)}。已保存的输出可在执行记录中查看。</p>`)
+    setBusy(false)
+    try { await refreshList() } catch (err) { toast(`会话列表更新失败：${err.message}`, true) }
     if (S.boot) {
       const c = S.convs.find((x) => x.id === S.current)
       if (c) $('#convTitle').textContent = c.title
     }
-    scrollBottom(st.buffer.length > 40)
+    scrollBottom(false)
   }
 }
 
@@ -1105,24 +1278,252 @@ function setBusy(busy) {
   $('#sendBtn').disabled = busy
   $('#sendBtn').textContent = busy ? '生成中' : '发送'
   document.body.classList.toggle('busy', busy)
+  updateComposer()
 }
 
 /* --------------------------------- panels ---------------------------------- */
 
 async function openPanel(name) {
+  if ($('#drawer').hidden) S.returnFocus = document.activeElement
   S.panel = name
+  if (!matchMedia('(min-width: 861px)').matches) $('#app').dataset.sidebar = 'closed'
   $('#drawer').hidden = false
   $('#scrim').hidden = false
-  $$('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.panel === name)))
-  ;['memory', 'proactive', 'settings'].forEach((p) => ($(`#panel${cap(p)}`).hidden = p !== name))
+  $$('.tab').forEach((t) => {
+    t.setAttribute('aria-selected', String(t.dataset.panel === name))
+    t.tabIndex = t.dataset.panel === name ? 0 : -1
+  })
+  ;['memory', 'proactive', 'workspace', 'settings'].forEach((p) => ($(`#panel${cap(p)}`).hidden = p !== name))
+  syncScrim()
+  $(`#tab-${name}`)?.focus()
   if (name === 'memory') await renderMemoryPanel()
   if (name === 'proactive') await renderProactivePanel()
   if (name === 'settings') await renderSettingsPanel()
+  if (name === 'workspace') await renderWorkspacePanel()
 }
 const cap = (s) => s[0].toUpperCase() + s.slice(1)
+
+/* ---------------------------- workspace harness --------------------------- */
+
+const WORKSPACE = { config: null, local: false, selected: null, loading: false, conversationId: null }
+
+function updateWorkspaceBadge() {
+  const badge = $('#workspaceBadge')
+  if (!badge) return
+  const config = S.boot?.config?.harness ?? WORKSPACE.config ?? {}
+  badge.textContent = config.enabled ? `工作区 · ${config.allowShell ? '命令' : config.allowWrites ? '读写' : '只读'}` : '工作区 · 未启用'
+  badge.classList.toggle('on', Boolean(config.enabled))
+  badge.title = config.enabled ? `${config.workspaceRoot || '工作区'} · 查看权限与执行记录` : '配置工作区与查看执行记录'
+}
+
+function approvalHtml(runId, step) {
+  const approval = step.approval
+  if (!approval || !['pending', 'awaiting_approval', undefined].includes(approval.status)) return ''
+  return `<section class="tool-approval" data-approval-id="${esc(approval.id)}" data-call-id="${esc(step.id)}" aria-label="确认工具操作">
+    <strong>需要确认 · ${esc(step.name ?? '工作区操作')}</strong>
+    <p>${esc(approval.summary || '请核对本次操作的完整输入。')}</p>
+    ${step.workspaceRoot ? `<p class="muted small">项目目录：${esc(step.workspaceRoot)}</p>` : ''}
+    <pre class="run-code">${esc(toolText(approval.args ?? step.args))}</pre>
+    <p class="muted small">批准仅限这一次操作。${step.name === 'shell_exec' ? 'Shell 命令使用运行 Echo 的账户权限，不受文件工具的目录边界保护。' : '工具将使用对应服务的已配置权限。'}</p>
+    <div class="row"><button class="btn small primary" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="approve">批准这一次</button>
+    <button class="btn small" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="deny">拒绝</button></div>
+    <p class="approval-status small" role="status"></p></section>`
+}
+
+function settleApproval(id, status) {
+  $$('[data-approval-id].tool-approval').filter((card) => card.dataset.approvalId === id && !card.dataset.settled).forEach((card) => {
+    card.dataset.settled = 'true'
+    $$('button', card).forEach((button) => { button.disabled = true })
+    $('.approval-status', card).textContent = card.dataset.decision === 'deny' ? '已拒绝这次操作' : RUN_STATUS[status] ?? status
+  })
+}
+
+async function decideApproval(button) {
+  const { runId, approvalId, decision } = button.dataset
+  const cards = $$('[data-approval-id].tool-approval').filter((card) => card.dataset.approvalId === approvalId)
+  if (cards.some((card) => card.dataset.submitting || card.dataset.settled)) return
+  cards.forEach((card) => {
+    card.dataset.submitting = 'true'
+    card.dataset.decision = decision
+    $$('button', card).forEach((control) => { control.disabled = true })
+    $('.approval-status', card).textContent = '正在提交…'
+  })
+  try {
+    await api(`runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', body: { decision } })
+    cards.forEach((card) => {
+      card.dataset.decision = decision
+      if (!card.dataset.settled) $('.approval-status', card).textContent = decision === 'approve' ? '已批准这一次，等待执行结果' : '已拒绝这次操作'
+    })
+    if (!$('#drawer').hidden && S.panel === 'workspace') await refreshRuns({ force: true })
+  } catch (err) {
+    cards.forEach((card) => {
+      if (card.dataset.settled) return
+      delete card.dataset.submitting
+      delete card.dataset.decision
+      $$('button', card).forEach((control) => { control.disabled = false })
+      $('.approval-status', card).textContent = err.message
+    })
+  }
+}
+
+async function renderWorkspacePanel() {
+  const panel = $('#panelWorkspace')
+  const data = await api('harness')
+  WORKSPACE.config = data.config
+  WORKSPACE.local = data.local === true
+  const config = data.config ?? {}
+  if (S.boot?.config) S.boot.config.harness = config
+  updateWorkspaceBadge()
+  // Only opening the panel rebuilds its form; background polling updates the runs below.
+  panel.innerHTML = `<section class="sect"><h3>工作区执行</h3>
+    <p class="muted small">让 Echo 读取项目、编辑文件、执行命令，并保存每一步的输入、输出和结果。启用后，在对话中直接描述任务。</p>
+    ${!WORKSPACE.local ? '<p class="notice">在本机打开 Echo 后可设置权限、批准操作和查看执行记录。</p>' : ''}
+    <form id="workspaceForm"><fieldset class="workspace-fields" ${!WORKSPACE.local ? 'disabled' : ''}>
+      <label class="switch" for="workspaceEnabled">启用工作区工具<input id="workspaceEnabled" name="enabled" type="checkbox" ${config.enabled ? 'checked' : ''} /></label>
+      <div class="field"><label for="workspaceRoot">项目目录（绝对路径）</label><input id="workspaceRoot" name="workspaceRoot" type="text" placeholder="/Users/you/projects/my-project" value="${esc(config.workspaceRoot)}" autocomplete="off" spellcheck="false" /></div>
+      <label class="switch" for="workspaceWrites">允许编辑工作区文件<input id="workspaceWrites" name="allowWrites" type="checkbox" ${config.allowWrites ? 'checked' : ''} /></label>
+      <label class="switch" for="workspaceShell">允许申请 Shell 命令<input id="workspaceShell" name="allowShell" type="checkbox" ${config.allowShell ? 'checked' : ''} /></label>
+      <p class="muted small">文件工具限制在选定目录内；启用编辑后，Echo 可直接修改其中的文件。Shell 和 MCP 操作每次都展示完整输入，等你批准后执行。Shell 是受信任的本机命令，不是操作系统沙箱，可能访问目录外的文件或网络。</p>
+      <div class="workspace-limits"><div class="field"><label for="workspaceRounds">最多工具轮次</label><input id="workspaceRounds" name="maxToolRounds" type="number" min="1" max="24" value="${esc(config.maxToolRounds ?? 12)}" required /></div>
+      <div class="field"><label for="workspaceTimeout">命令超时（秒）</label><input id="workspaceTimeout" name="timeout" type="number" min="1" max="120" value="${esc((config.shellTimeoutMs ?? 60000) / 1000)}" required /></div></div>
+      <button class="btn small primary" type="submit">保存工作区权限</button>
+    </fieldset><p id="workspaceStatus" class="small" role="status"></p></form></section>
+    <section class="sect"><div class="row"><h3>本对话的执行记录</h3><button class="btn small right" data-action="refresh-runs" ${!WORKSPACE.local ? 'disabled' : ''}>刷新</button></div>
+      <p class="muted small">查看记录不会再次运行工具。输出文件可下载；中断的执行保留已完成的步骤。</p>
+      <div id="runList" class="list"></div><p id="runListStatus" class="small" role="status"></p>
+    </section><section id="runInspector" class="run-inspector" tabindex="-1" aria-label="执行详情"></section>`
+  if (!WORKSPACE.local) {
+    $('#runList').innerHTML = '<p class="muted small">执行记录和输出文件仅在运行 Echo 的本机提供。</p>'
+    return
+  }
+  await refreshRuns({ force: true })
+}
+
+async function saveWorkspaceForm(form) {
+  if (!WORKSPACE.local || !form.reportValidity() || form.dataset.saving) return
+  const values = new FormData(form)
+  const config = {
+    enabled: values.get('enabled') === 'on',
+    workspaceRoot: String(values.get('workspaceRoot') ?? '').trim(),
+    allowWrites: values.get('allowWrites') === 'on',
+    allowShell: values.get('allowShell') === 'on',
+    maxToolRounds: Number(values.get('maxToolRounds')),
+    shellTimeoutMs: Number(values.get('timeout')) * 1000,
+  }
+  const status = $('#workspaceStatus')
+  if (config.enabled && !config.workspaceRoot) { status.textContent = '请先填写项目目录。'; $('#workspaceRoot').focus(); return }
+  form.dataset.saving = 'true'
+  const submit = $('button[type="submit"]', form)
+  submit.disabled = true
+  status.textContent = '正在保存…'
+  try {
+    const result = await api('harness', { method: 'PATCH', body: { config } })
+    WORKSPACE.config = result.config ?? config
+    if (S.boot?.config) S.boot.config.harness = WORKSPACE.config
+    updateWorkspaceBadge()
+    status.textContent = '已保存。下一条对话将使用这些权限。'
+  } catch (err) {
+    status.textContent = err.message
+  } finally {
+    delete form.dataset.saving
+    submit.disabled = false
+  }
+}
+
+function runStepHtml(runId, step, workspaceRoot) {
+  const output = step.approval?.status === 'denied' ? '已拒绝本次操作，未执行。' : toolOutputText(step.result ?? step.error ?? step.output)
+  return `<details class="run-step" data-step-id="${esc(step.id)}" ${step.status === 'awaiting_approval' ? 'open' : ''}><summary>${esc(step.name || '工具')} <span class="muted small">${esc(toolStatus(step))}${step.exitCode != null ? ` · 退出码 ${esc(step.exitCode)}` : ''}</span></summary>
+    <h4>完整输入</h4><pre class="run-code">${esc(toolText(step.args))}</pre>
+    ${approvalHtml(runId, { ...step, workspaceRoot })}
+    ${output ? `<h4>输出${output.length > 12000 ? '（显示末尾 12,000 字符）' : ''}</h4><pre class="run-code">${esc(output.slice(-12000))}</pre>` : ''}
+    ${step.truncated ? '<p class="muted small">输出达到记录上限，记录可能不完整。</p>' : ''}
+    ${artifactLinks(step.artifacts)}
+    ${(step.changes ?? []).length ? `<p class="small">已修改：${step.changes.map((change) => esc(change.path)).join('、')}。上方可下载修改前后的快照。</p>` : ''}
+    ${step.error && step.result ? `<p class="err">${esc(toolText(step.error))}</p>` : ''}</details>`
+}
+
+async function refreshRuns({ force = false } = {}) {
+  if (!WORKSPACE.local || !$('#runList') || WORKSPACE.loading) return
+  const conversationId = S.current
+  WORKSPACE.loading = true
+  try {
+    const data = await api(`runs?conversationId=${encodeURIComponent(conversationId)}`)
+    if (S.current !== conversationId || S.panel !== 'workspace') return
+    const list = $('#runList')
+    const runs = data.runs ?? []
+    const key = JSON.stringify(runs)
+    if (WORKSPACE.conversationId !== conversationId) { WORKSPACE.selected = null; WORKSPACE.conversationId = conversationId }
+    if (force || list.dataset.key !== key) {
+      const focusedId = document.activeElement?.closest('[data-action="view-run"]')?.dataset.id
+      list.innerHTML = runs.map((run) => `<button class="run-row" data-action="view-run" data-id="${esc(run.id)}" aria-pressed="${WORKSPACE.selected === run.id}"><span>${esc(fmtTime(run.startedAt))} · ${esc(RUN_STATUS[run.status] ?? run.status)}</span><span class="muted small">${Array.isArray(run.steps) ? run.steps.length : run.stepCount ?? 0} 步${run.workspaceRoot ? ` · ${esc(run.workspaceRoot)}` : ''}</span></button>`).join('') || '<p class="muted small">还没有执行记录。启用工作区后，让 Echo 先检查项目文件。</p>'
+      list.dataset.key = key
+      if (focusedId) $$('[data-action="view-run"]', list).find((button) => button.dataset.id === focusedId)?.focus()
+    }
+    $('#runListStatus').textContent = ''
+    if (WORKSPACE.selected) await inspectRun(WORKSPACE.selected, { poll: !force })
+  } catch (err) {
+    $('#runListStatus').textContent = `记录加载失败：${err.message}`
+  } finally {
+    WORKSPACE.loading = false
+  }
+}
+
+async function inspectRun(id, { poll = false } = {}) {
+  if (!WORKSPACE.local) return
+  WORKSPACE.selected = id
+  const data = await api(`runs/${encodeURIComponent(id)}`)
+  if (WORKSPACE.selected !== id || S.panel !== 'workspace') return
+  const run = data.run ?? data
+  const inspector = $('#runInspector')
+  if (!inspector) return
+  const key = JSON.stringify(run)
+  if (poll && (inspector.dataset.key === key || inspector.contains(document.activeElement))) return
+  const openSteps = new Set($$('details[open]', inspector).map((details) => details.dataset.stepId))
+  inspector.innerHTML = `<h3>执行详情 · ${esc(RUN_STATUS[run.status] ?? run.status)}</h3>
+    <p class="muted small">${esc(run.workspaceRoot ?? '')}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
+    ${run.error ? `<p class="err" role="status">${esc(toolText(run.error))}</p>` : ''}
+    ${(run.steps ?? []).map((step) => runStepHtml(id, step, run.workspaceRoot)).join('') || '<p class="muted small">尚未调用工具。</p>'}
+    ${artifactLinks(run.artifacts)}`
+  inspector.dataset.key = key
+  $$('details', inspector).forEach((details) => { if (openSteps.has(details.dataset.stepId)) details.open = true })
+  $$('[data-action="view-run"]', $('#runList')).forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.id === id)))
+  if (!poll) inspector.scrollIntoView({ block: 'nearest' })
+}
+
+document.addEventListener('submit', (event) => {
+  if (event.target.id !== 'workspaceForm') return
+  event.preventDefault()
+  saveWorkspaceForm(event.target).catch((err) => toast(err.message, true))
+})
+
 function closeDrawer() {
   $('#drawer').hidden = true
-  $('#scrim').hidden = true
+  syncScrim()
+  restoreFocus(S.returnFocus)
+}
+function syncScrim() {
+  const mobile = !matchMedia('(min-width: 861px)').matches
+  const drawer = !$('#drawer').hidden
+  if (mobile && drawer) $('#app').dataset.sidebar = 'closed'
+  const sidebar = $('#app').dataset.sidebar === 'open'
+  $('#scrim').hidden = !drawer && (!mobile || !sidebar)
+  $('#app').inert = W.open
+  $('main.main').inert = drawer || (mobile && sidebar)
+  $('#sidebar').inert = drawer || !sidebar
+  $$('[data-action="toggle-sidebar"]').forEach((button) => button.setAttribute('aria-expanded', String(sidebar)))
+}
+function restoreFocus(previous) {
+  if (previous?.isConnected && !previous.closest('[inert]') && previous.getClientRects().length) previous.focus()
+  else $('#input').focus()
+}
+function toggleSidebar() {
+  const app = $('#app')
+  app.dataset.sidebar = app.dataset.sidebar === 'open' ? 'closed' : 'open'
+  syncScrim()
+  if (!matchMedia('(min-width: 861px)').matches) {
+    if (app.dataset.sidebar === 'open') $('#convFilter').focus()
+    else $('.topbar [data-action="toggle-sidebar"]').focus()
+  }
 }
 
 async function renderMemoryPanel() {
@@ -1157,7 +1558,8 @@ async function renderMemoryPanel() {
           ? dream.loops
               .map(
                 (l) => `<div class="loop"><div class="row"><b>${esc(l.topic)}</b>${l.due ? `<span class="due">截止 ${esc(l.due)}</span>` : ''}
-                  <button class="btn small ghost right" data-action="loop-done" data-id="${esc(l.id)}">完成</button></div>
+                  <button class="btn small right" data-action="adopt-loop" data-id="${esc(l.id)}">接下这件事</button>
+                  <button class="btn small ghost" data-action="loop-done" data-id="${esc(l.id)}">不再跟进</button></div>
                   <div class="muted small">${esc(l.why ?? '')}${l.raised ? ` · 已提过 ${l.raised} 次` : ''}</div></div>`,
               )
               .join('')
@@ -1239,9 +1641,280 @@ function obsHtml(o) {
   </div>`
 }
 
-async function renderProactivePanel() {
+const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, loading: false, version: 0, proactiveEnabled: null }
+const GOAL_STATUS = { active: '进行中', paused: '已暂停', done: '已完成', cancelled: '已取消' }
+const PREPARATION_STATUS = { idle: '尚未准备', queued: '等待准备', running: '正在准备', ready: '已有准备结果', failed: '准备失败' }
+const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
+
+function agencyTime(value) {
+  const date = new Date(value)
+  return value && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '时间未记录'
+}
+
+function evidenceHtml(item) {
+  const source = item.source
+  const url = typeof source === 'string' ? source : source?.url
+  const isGoal = typeof source === 'string' && source.startsWith('commitment:')
+  const message = typeof source === 'string' ? source.match(/^conversation:([^/]+)\/(.+)$/) : null
+  const isMemory = typeof source === 'string' && source.startsWith('memory:')
+  const label = isGoal ? '已确认目标' : message ? '原始消息' : isMemory ? '记忆记录（请核对当前是否成立）' : item.label || (/^https?:\/\//i.test(url ?? '') ? host(url) : '来源')
+  const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>` : esc(label)
+  let excerpt = item.excerpt ? `<p>${esc(item.excerpt)}</p>` : ''
+  if (isGoal && item.excerpt) {
+    try {
+      const fields = JSON.parse(item.excerpt)
+      const labels = { title: '目标', successCriteria: '完成标准', nextAction: '下一步', blocker: '待解决', deadline: '截止日期' }
+      const rows = Object.entries(labels).filter(([key]) => typeof fields?.[key] === 'string' && fields[key].trim())
+      if (rows.length) excerpt = `<dl class="goal-facts">${rows.map(([key, name]) => `<dt>${name}</dt><dd>${esc(fields[key])}</dd>`).join('')}</dl>`
+    } catch {}
+  }
+  return `<li>${link}<div class="muted small"><time datetime="${esc(item.observedAt ?? '')}">${esc(agencyTime(item.observedAt))}</time>${item.id ? ` · [${esc(item.id)}]` : ''}</div>${excerpt}${message ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(message[1])}" data-message-id="${esc(message[2])}">查看原消息</button>` : ''}</li>`
+}
+
+function preparationExpired(preparation) {
+  return preparation.delivery?.status === 'expired' || preparation.delivery?.status === 'pending' && Date.parse(preparation.delivery.expiresAt) <= Date.now()
+}
+
+function preparationHtml(preparation) {
+  const rawOutcome = typeof preparation.outcome === 'string' ? preparation.outcome : preparation.outcome?.signal
+  const outcome = OUTCOME_LABEL[rawOutcome] ? rawOutcome : null
+  const wrongTime = preparation.outcome?.timing === 'wrong_time'
+  const verified = preparation.verification?.passed === true
+  const checks = preparation.verification?.checks ?? []
+  const checkText = Array.isArray(checks) ? checks.map((check) => typeof check === 'string' ? check : check.label || check.name || check.message || '').filter(Boolean).join('；') : ''
+  const goalStopped = ['paused', 'done', 'cancelled'].includes(preparation.goalStatus)
+  const expired = preparationExpired(preparation)
+  const waiting = !goalStopped && !expired && preparation.delivery?.status === 'pending' && preparation.proactiveEnabled !== false
+  const deliveryText = preparation.goalStatus === 'done' ? '目标已完成，不再准备或提醒；结果保留供回顾。'
+    : preparation.goalStatus === 'cancelled' ? '目标已取消，不再准备或提醒；结果仍保留。'
+    : preparation.goalStatus === 'paused' ? '目标已暂停，当前不会准备或提醒；结果仍可查看。'
+    : expired ? '提醒已过期，不会再推送；结果可在此查看。'
+    : preparation.delivery?.status === 'reviewed' ? '你已评阅这份结果，不再另行提醒。'
+    : preparation.delivery?.status === 'superseded' ? '已不再安排提醒，使用前请核对最新目标与来源。'
+    : preparation.delivery?.status === 'pending' && preparation.proactiveEnabled === false ? '主动提醒已关闭；结果可在此查看。'
+    : waiting ? '已准备好，等待合适时机提醒你。' : '结果保留在这里，可随时查看。'
+  return `<details class="preparation" data-preparation-id="${esc(preparation.id)}" data-detail-key="${esc(preparation.id)}">
+    <summary>${esc(preparation.title || '准备结果')}<span class="muted small">${esc(agencyTime(preparation.createdAt))}</span></summary>
+    <div class="preparation-body">
+      ${preparation.outdated && !['done', 'cancelled'].includes(preparation.goalStatus) ? '<p class="small needs-check">这份结果生成后，目标状态或内容已变化；继续使用前请核对。</p>' : ''}
+      <div class="content">${md(preparation.content ?? '')}</div>
+      ${preparation.assumptions?.length ? `<div class="preparation-assumptions"><b>仍需确认的假设</b><ul>${preparation.assumptions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
+      ${preparation.question ? `<p class="preparation-question"><b>待你确认：</b>${esc(preparation.question)}</p>` : ''}
+      <p class="verification ${verified ? '' : 'needs-check'}">${verified ? '生成时的来源引用已检查；这不等于事实已经证实。' : '来源引用尚未通过检查，请先核对。'}${checkText ? `<br><span class="small">${esc(checkText)}</span>` : ''}</p>
+      <details class="evidence" data-detail-key="evidence-${esc(preparation.id)}"><summary>查看依据 · ${(preparation.evidence ?? []).length} 条</summary>
+        <ol>${(preparation.evidence ?? []).map(evidenceHtml).join('') || '<li>没有可展示的来源。</li>'}</ol>
+      </details>
+      <p class="muted small">${deliveryText}${waiting && preparation.delivery.expiresAt ? ` 提醒有效至 ${esc(agencyTime(preparation.delivery.expiresAt))}。` : ''}</p>
+      <div class="outcome-actions" aria-label="这份结果是否有帮助">${['accepted', 'completed', 'wrong_time', 'irrelevant', 'incorrect'].map((signal) => `<button class="btn small ${signal === outcome || signal === 'wrong_time' && wrongTime ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === 'wrong_time' && wrongTime}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
+      <p class="muted small">${outcome ? `已反馈：${esc(OUTCOME_LABEL[outcome])}` : '效果未知 · 沉默不会被当作没用。'}${wrongTime ? ' 已反馈时机不合适。' : ''}</p>
+    </div>
+  </details>`
+}
+
+function commitmentHtml(goal, preparations) {
+  const finished = goal.status === 'done' || goal.status === 'cancelled'
+  const stopped = finished || goal.status === 'paused'
+  const progress = goal.status === 'done' ? '目标已完成，不再准备'
+    : goal.status === 'cancelled' ? '目标已取消，不再准备'
+    : goal.status === 'paused' ? '已暂停准备和提醒' : PREPARATION_STATUS[goal.preparation?.state] || '尚未准备'
+  return `<div class="goal-heading"><h4>${esc(goal.title)}</h4><span class="goal-status">${esc(GOAL_STATUS[goal.status] || goal.status)}</span></div>
+    <dl class="goal-facts"><dt>完成标准</dt><dd>${esc(goal.successCriteria || '尚未填写')}</dd><dt>下一步</dt><dd>${esc(goal.nextAction || '尚未填写')}</dd>${goal.blocker ? `<dt>待解决</dt><dd>${esc(goal.blocker)}</dd>` : ''}${goal.deadline ? `<dt>截止</dt><dd>${esc(goal.deadline)}</dd>` : ''}</dl>
+    <p class="goal-progress small" role="status">${esc(progress)}${!stopped && goal.preparation?.error ? ` · ${esc(goal.preparation.error)}` : ''}</p>
+    ${goal.watch?.lastError ? `<p class="small needs-check">来源检查失败：${esc(goal.watch.lastError)}</p>` : ''}
+    <p class="muted small">读取范围：${goal.scope?.memory ? '本地记忆' : '未授权记忆'}${goal.scope?.urls?.length ? ` · ${goal.scope.urls.length} 个指定网页` : ' · 未指定网页'} · ${stopped ? '当前不自动跟进' : goal.watch?.type === 'deadline' ? '临近截止时准备' : goal.watch?.type === 'source_change' ? '来源变化时准备' : '手动准备'}</p>
+    ${goal.completionEvidence ? `<p class="small">完成依据：${esc(typeof goal.completionEvidence === 'string' ? goal.completionEvidence : JSON.stringify(goal.completionEvidence))}</p>` : ''}
+    <div class="goal-actions">
+      ${!finished ? `<button class="btn small primary" data-action="goal-prepare" data-id="${esc(goal.id)}" ${goal.status !== 'active' || ['queued', 'running'].includes(goal.preparation?.state) ? 'disabled' : ''}>准备下一步</button>
+      <button class="btn small" data-action="goal-edit" data-id="${esc(goal.id)}">编辑</button>
+      <button class="btn small ghost" data-action="goal-status" data-status="${goal.status === 'paused' ? 'active' : 'paused'}" data-id="${esc(goal.id)}">${goal.status === 'paused' ? '恢复' : '暂停'}</button>
+      <button class="btn small ghost" data-action="goal-complete" data-id="${esc(goal.id)}">完成目标</button>
+      <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">取消目标</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">重新开启</button>`}
+    </div>
+    ${preparations.length ? `<div class="goal-results">${preparations.map((item) => preparationHtml({ ...item, goalStatus: goal.status, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision })).join('')}</div>` : ''}`
+}
+
+function syncCommitmentCards({ force = false } = {}) {
+  const list = $('#commitmentList')
+  if (!list) return
+  const ids = new Set(COMMITMENTS.items.map((goal) => goal.id))
+  for (const card of $$('[data-goal-id]', list)) if (!ids.has(card.dataset.goalId) && !card.contains(document.activeElement)) card.remove()
+  $('#commitmentEmpty').hidden = COMMITMENTS.items.length > 0
+  for (const goal of COMMITMENTS.items) {
+    const preparations = COMMITMENTS.preparations.filter((item) => item.commitmentId === goal.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    let card = $$('[data-goal-id]', list).find((node) => node.dataset.goalId === goal.id)
+    const signature = JSON.stringify([goal, preparations, COMMITMENTS.proactiveEnabled, preparations.map(preparationExpired)])
+    if (card?.dataset.signature === signature) continue
+    const focused = card?.contains(document.activeElement) ? document.activeElement : null
+    if (focused && !force) continue
+    const opened = new Set(card ? $$('details[open][data-detail-key]', card).map((node) => node.dataset.detailKey) : [])
+    const focusAction = focused?.dataset.action
+    const focusSignal = focused?.dataset.signal
+    const focusPreparation = focused?.dataset.preparationId
+    if (!card) {
+      card = document.createElement('article')
+      card.className = 'commitment-card'
+      card.dataset.goalId = goal.id
+      card.tabIndex = -1
+      list.append(card)
+    }
+    card.innerHTML = commitmentHtml(goal, preparations)
+    card.dataset.signature = signature
+    for (const detail of $$('details[data-detail-key]', card)) detail.open = opened.has(detail.dataset.detailKey)
+    if (focused) ($$('[data-action]', card).find((node) => node.dataset.action === focusAction && node.dataset.signal === focusSignal && node.dataset.preparationId === focusPreparation && !node.disabled) ?? card).focus()
+  }
+}
+
+function restoreGoalActionFocus(button) {
+  if ($('#drawer').hidden || S.panel !== 'proactive') return
+  const active = document.activeElement
+  // Disabling the initiating button can move focus to the page before the fetch returns.
+  if (active && active !== document.body && active !== document.documentElement && active !== button && active.isConnected) return
+  const card = $$('[data-goal-id]', $('#commitmentList')).find((node) => node.dataset.goalId === button.dataset.id)
+  if (!card) return
+  const controls = $$('button[data-action]', card).filter((node) => !node.disabled)
+  const match = controls.find((node) => node.dataset.action === button.dataset.action && node.dataset.signal === button.dataset.signal && node.dataset.preparationId === button.dataset.preparationId)
+  ;(match ?? controls[0] ?? card).focus()
+}
+
+async function renderProactivePanel({ poll = false, force = false } = {}) {
   const el = $('#panelProactive')
-  const [p, dream, agency] = await Promise.all([api('proactive'), api('dream'), api('agency')])
+  if (!$('#commitmentList', el)) {
+    el.innerHTML = `<section class="sect"><div class="row"><h3 class="agency-title">持续推进的目标</h3><button class="btn small primary right" data-action="goal-new">新增目标</button></div>
+      <p class="muted small">由你确认目标和读取范围。Echo 准备下一步，保留依据；只有你确认完成，目标才结束。</p>
+      <p class="muted small">准备上限：24 小时内每个目标 2 次，全部目标 5 次。只读取已授权的记忆与网页。</p>
+      <div id="commitmentEditor"></div><p id="commitmentLoadStatus" class="muted small" role="status"></p>
+      <p id="commitmentEmpty" class="muted small">还没有已确认目标。可以从一条自己的消息或下面的候选事项开始。</p>
+      <div id="commitmentList" class="list"></div></section>
+      <section class="sect"><h4>待你确认的事项</h4><p class="muted small">Dream 根据上下文推测的事项，尚未成为承诺。</p><div id="commitmentCandidates" class="list"></div></section>
+      <details class="agency-settings"><summary>打扰时机与反馈学习</summary><div id="proactiveOverview"></div></details>`
+  }
+  if (COMMITMENTS.loading) {
+    await COMMITMENTS.pending.catch(() => {})
+    if (force) return renderProactivePanel({ poll, force })
+    return
+  }
+  COMMITMENTS.loading = true
+  const version = COMMITMENTS.version
+  try {
+    COMMITMENTS.pending = Promise.all([api('proactive'), api('dream'), api('agency'), api('commitments')])
+    const [p, dream, agency, data] = await COMMITMENTS.pending
+    if (version !== COMMITMENTS.version || !$('#commitmentList', el)) return
+    COMMITMENTS.items = data.commitments ?? []
+    COMMITMENTS.preparations = data.preparations ?? []
+    COMMITMENTS.loops = dream.loops ?? []
+    COMMITMENTS.proactiveEnabled = p.enabled
+    syncCommitmentCards({ force })
+    const candidates = $('#commitmentCandidates')
+    if (!candidates.contains(document.activeElement)) {
+      const loops = COMMITMENTS.loops.filter((loop) => loop.status !== 'done' && !COMMITMENTS.items.some((goal) => goal.candidateLoopId === loop.id))
+      candidates.innerHTML = loops.map((loop) => `<div class="mem-item"><div class="txt"><b>${esc(loop.topic)}</b><p class="muted small">${esc(loop.why ?? '')}${loop.due ? ` · 截止 ${esc(loop.due)}` : ''}</p><button class="btn small" data-action="adopt-loop" data-id="${esc(loop.id)}">接下这件事</button></div></div>`).join('') || '<p class="muted small">暂无待确认事项。</p>'
+    }
+    const overview = $('#proactiveOverview')
+    const signature = JSON.stringify([p, dream.nudges, agency])
+    if (!overview.contains(document.activeElement) && overview.dataset.signature !== signature) {
+      renderProactiveOverview(p, dream, agency)
+      overview.dataset.signature = signature
+    }
+    $('#commitmentLoadStatus').textContent = ''
+  } catch (err) {
+    const status = $('#commitmentLoadStatus')
+    if (status) status.textContent = `目标刷新失败：${err.message}。现有草稿仍保留。`
+    if (!poll) throw err
+  } finally {
+    COMMITMENTS.loading = false
+  }
+}
+
+function showCommitmentEditor(goal = {}, { mode = 'edit', source, candidateLoopId, preparationId, quote } = {}) {
+  const el = $('#commitmentEditor')
+  if ($('#commitmentForm')) {
+    toast('请先保存或取消当前目标草稿')
+    $('input, textarea', el)?.focus()
+    return
+  }
+  COMMITMENTS.editor = { id: goal.id, source: source ?? goal.source, candidateLoopId: candidateLoopId ?? goal.candidateLoopId, preparationId, mode }
+  if (mode === 'complete') {
+    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>完成「${esc(goal.title)}」</h4>
+      <div class="field"><label for="goalCompletion">依据什么确认已经完成？</label><textarea id="goalCompletion" name="completionEvidence" rows="2" maxlength="2000" required placeholder="例如：最终稿已交付，或已核对的结果链接"></textarea></div>
+      <div class="row"><button class="btn small primary" type="submit">记录完成</button><button class="btn small" type="button" data-action="goal-editor-cancel">返回</button></div><p class="form-status small" role="status"></p></form>`
+  } else {
+    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>${goal.id ? '编辑目标' : '确认一个目标'}</h4>
+      ${quote ? `<blockquote class="goal-source">${esc(quote)}</blockquote>` : ''}
+      <div class="field"><label for="goalTitle">目标</label><input id="goalTitle" name="title" type="text" maxlength="160" required value="${esc(goal.title ?? '')}" placeholder="例如：周五交付项目周报" /></div>
+      <div class="field"><label for="goalCriteria">怎样算完成</label><textarea id="goalCriteria" name="successCriteria" rows="2" maxlength="2000" required placeholder="写清可以核对的结果">${esc(goal.successCriteria ?? '')}</textarea></div>
+      <div class="field"><label for="goalNext">先准备哪一步</label><input id="goalNext" name="nextAction" type="text" maxlength="1000" required value="${esc(goal.nextAction ?? '')}" placeholder="例如：整理本周进展与待解决问题" /></div>
+      <div class="field"><label for="goalDeadline">截止日期（可不填）</label><input id="goalDeadline" name="deadline" type="date" value="${esc(goal.deadline ?? '')}" /></div>
+      <fieldset class="goal-scope"><legend>允许读取的范围</legend>
+        <label class="goal-checkbox"><input name="memory" type="checkbox" ${goal.scope?.memory ? 'checked' : ''} /> 使用本地记忆中与目标相关的内容</label>
+        <div class="field"><label for="goalUrls">指定网页（最多 3 个，每行一个）</label><textarea id="goalUrls" name="urls" rows="3" placeholder="https://…">${esc((goal.scope?.urls ?? []).join('\n'))}</textarea></div>
+        <p class="muted small">准备内容只保存到 Echo。发送消息、发布或修改外部内容需要另行授权。</p>
+      </fieldset>
+      <p class="muted small">${goal.status === 'paused' ? '目标暂停期间不会准备，恢复时会准备一次。' : '确认、修改或恢复目标时会准备一次。'}后续按下面的方式跟进，所有准备共用次数预算。</p>
+      <div class="field"><label for="goalWatch">后续何时准备</label><select id="goalWatch" name="watch"><option value="manual" ${!goal.watch?.type || goal.watch.type === 'manual' ? 'selected' : ''}>之后由我点击「准备下一步」</option><option value="deadline" ${goal.watch?.type === 'deadline' ? 'selected' : ''}>临近截止日期</option><option value="source_change" ${goal.watch?.type === 'source_change' ? 'selected' : ''}>指定网页有变化时</option></select></div>
+      <div class="row"><button class="btn small primary" type="submit">${goal.id ? '保存修改' : '确认并加入目标'}</button><button class="btn small" type="button" data-action="goal-editor-cancel">取消</button></div><p class="form-status small" role="status"></p></form>`
+  }
+  el.scrollIntoView({ block: 'nearest' })
+  $('input, textarea', el)?.focus()
+}
+
+async function saveCommitmentForm(form) {
+  if (!form.reportValidity() || form.dataset.saving) return
+  const editor = { ...COMMITMENTS.editor }
+  const values = new FormData(form)
+  const status = $('.form-status', form)
+  const controls = $$('button', form)
+  form.dataset.saving = 'true'
+  controls.forEach((button) => { button.disabled = true })
+  try {
+    if (editor.mode === 'complete') {
+      const completionEvidence = String(values.get('completionEvidence') ?? '').trim()
+      if (!completionEvidence) throw new Error('请填写完成依据。')
+      await api(`commitments/${encodeURIComponent(editor.id)}`, { method: 'PATCH', body: { status: 'done', completionEvidence } })
+      if (editor.preparationId) {
+        try {
+          const feedback = await api('feedback', { method: 'POST', body: { commitmentId: editor.id, preparationId: editor.preparationId, signal: 'completed' } })
+          if (feedback.ignored) throw new Error('原准备结果已不可用')
+        } catch (err) { toast(`目标已完成，但结果反馈未保存：${err.message}`, true) }
+      }
+    } else {
+      const urls = [...new Set(String(values.get('urls') ?? '').split(/\r?\n/).map((url) => url.trim()).filter(Boolean))]
+      if (urls.length > 3) throw new Error('最多添加 3 个网页。')
+      for (const url of urls) {
+        let parsed
+        try { parsed = new URL(url) } catch {}
+        if (!parsed || !['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('网页地址需以 https:// 或 http:// 开头，且不能包含登录信息。')
+      }
+      const watch = String(values.get('watch'))
+      const deadline = String(values.get('deadline') ?? '') || null
+      if (watch === 'deadline' && !deadline) throw new Error('请填写截止日期，或选择手动准备。')
+      if (watch === 'source_change' && !urls.length) throw new Error('来源变化触发需要至少一个指定网页。')
+      const body = { title: String(values.get('title')).trim(), successCriteria: String(values.get('successCriteria')).trim(), nextAction: String(values.get('nextAction')).trim(), deadline, scope: { memory: values.get('memory') === 'on', urls }, watch: { type: watch } }
+      if (!body.title || !body.successCriteria || !body.nextAction) throw new Error('请填写目标、完成标准和下一步。')
+      if (!editor.id && editor.source) body.source = editor.source
+      if (!editor.id && editor.candidateLoopId) body.candidateLoopId = editor.candidateLoopId
+      await api(editor.id ? `commitments/${encodeURIComponent(editor.id)}` : 'commitments', { method: editor.id ? 'PATCH' : 'POST', body })
+    }
+    COMMITMENTS.editor = null
+    $('#commitmentEditor').innerHTML = ''
+    toast(editor.mode === 'complete' ? '已记录完成依据' : '目标已保存')
+    await renderProactivePanel({ force: true })
+    $('[data-action="goal-new"]')?.focus()
+  } catch (err) {
+    status.textContent = err.message
+  } finally {
+    delete form.dataset.saving
+    controls.forEach((button) => { button.disabled = false })
+  }
+}
+
+document.addEventListener('submit', (event) => {
+  if (event.target.id !== 'commitmentForm') return
+  event.preventDefault()
+  saveCommitmentForm(event.target).catch((err) => toast(err.message, true))
+})
+
+function renderProactiveOverview(p, dream, agency) {
+  const el = $('#proactiveOverview')
   const nudgeHtml = (dream.nudges ?? [])
     .map((n) => `<div class="mem-item"><div class="txt">${esc(n.topic)}<div class="muted small">${esc(n.angle ?? '')} · 急迫度 ${n.urgency}</div></div></div>`)
     .join('')
@@ -1249,20 +1922,22 @@ async function renderProactivePanel() {
     .map((k) => {
       const thr = (p.kindThresholds ?? {})[k.kind]
       return `<div class="mem-item"><div class="txt">${esc(KIND_LABEL[k.kind] ?? k.kind)}
-        <div class="muted small">被接住率 ${k.mean} · 样本 ${k.trials} 次 · 后验 Beta(${k.a}, ${k.b})${thr ? ` · 当前门槛 ${thr}` : ''}</div>
+        <div class="muted small">有用程度估计 ${(k.mean * 100).toFixed(0)}% · 明确反馈 ${k.trials} 次${thr ? ` · 当前门槛 ${thr}` : ''}</div>
       </div><div class="bar" style="width:56px"><i style="width:${Math.round(k.mean * 100)}%"></i></div></div>`
     })
     .join('')
   el.innerHTML = `
     <div class="stat-row">
       <div class="stat"><b>${p.todayCount}/${p.budget}</b><span>今日主动开口</span></div>
-      <div class="stat"><b>${(p.history ?? []).filter((h) => h.replied).length}</b><span>被你接住过</span></div>
-      <div class="stat"><b>${p.consecutiveIgnores}</b><span>连续未回应</span></div>
+      <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>采用或帮助完成</span></div>
+      <div class="stat"><b>${agency.outcomes?.unknown ?? 0}</b><span>尚无明确反馈</span></div>
     </div>
-    <div class="switch"><span>启用主动服务</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></div>
+    <p class="muted small">共同打扰预算：今天 ${p.attention?.todayCount ?? 0}/${p.attention?.budget ?? S.boot?.config?.attention?.dailyBudget ?? 20} 次 · 最少间隔 ${p.attention?.minGapSeconds ?? 75} 秒。主动消息、伴随气泡和准备结果一起计数。</p>
+    <p class="muted small">${p.queue?.length ? `${p.queue.length} 项等待合适时机提醒。` : '没有等待提醒的事项。'}${p.attention?.focus ? ` 当前状态：${esc(({ deep: '专注中', meeting: '会议中', normal: '工作中', idle: '空闲', entertainment: '休闲' })[p.attention.focus] || p.attention.focus)}。` : ''}${p.attention?.observedAt ? ` 状态依据：${esc(agencyTime(p.attention.observedAt))}。` : ''}</p>
+    <label class="switch"><span>启用主动服务</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
     <div class="row">
-      <button class="btn small primary" data-action="pro-run">现在就让它说一句</button>
-      <span class="muted small">下次检查：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
+      <button class="btn small" data-action="pro-run">现在检查一次</button>
+      <span class="muted small">上次检查：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
     </div>
     <div class="sect">
       <h4>最近一次判断</h4>
@@ -1276,7 +1951,7 @@ async function renderProactivePanel() {
     </div>
     <div class="sect">
       <h4>反馈学习（哪种开口方式你更受用）</h4>
-      <p class="muted small">每次开口都会被记一笔：你接住了就记为 1，6 小时没回应按 0 结算。表现好的类型更容易被选中，表现差的需要更高的把握才开口。</p>
+      <p class="muted small">采用、完成和有用等明确反馈帮助 Echo 学习。普通回复和沉默都不代表有用或没用。「时机不合适」只调整打扰时机，并暂停打扰 30 分钟。</p>
       <div class="list">${kindRows || '<div class="muted small">还没有样本。</div>'}</div>
       <div class="row" style="margin-top:8px">
         <button class="btn small" data-action="fb" data-signal="more" data-kind="global">多说一点</button>
@@ -1294,16 +1969,25 @@ async function renderProactivePanel() {
           ? [...p.history].reverse()
               .map(
                 (h) => `<div class="mem-item"><div class="txt">${esc(h.message)}
-                  <div class="muted small">${fmtTime(h.at)} · ${KIND_LABEL[h.kind] ?? h.kind} · ${h.replied ? '你回过' : '未回应'}</div></div></div>`,
+                  <div class="muted small">${fmtTime(h.at)} · ${esc(KIND_LABEL[h.kind] ?? h.kind)} · ${esc(OUTCOME_LABEL[h.outcome?.signal ?? h.outcome] || '效果未知')}</div></div></div>`,
               )
               .join('')
           : '<div class="muted small">还没有主动发过消息。</div>'
       }</div>
     </div>`
   $('#proEnabled').addEventListener('change', async (e) => {
-    await api('proactive', { method: 'PATCH', body: { enabled: e.target.checked } })
-    toast(e.target.checked ? '主动服务已开启' : '主动服务已暂停')
-    await boot({ keep: true })
+    const input = e.target
+    input.disabled = true
+    try {
+      await api('proactive', { method: 'PATCH', body: { enabled: input.checked } })
+      toast(input.checked ? '主动服务已开启' : '主动服务已暂停')
+      if (S.boot?.proactive) S.boot.proactive.enabled = input.checked
+      COMMITMENTS.proactiveEnabled = input.checked
+      syncCommitmentCards()
+    } catch (err) {
+      input.checked = !input.checked
+      toast(err.message, true)
+    } finally { input.disabled = false }
   })
 }
 
@@ -1365,7 +2049,7 @@ async function renderSettingsPanel() {
     </div>
     <div class="sect">
       <h4>隐私兜底</h4>
-      <p class="muted small">「全部忘掉」会清空事实清单、工作记忆、实体图与核心记忆，并在遗忘日志里留一条记录。会话记录默认保留。</p>
+      <p class="muted small">「全部忘掉」会清空事实清单、工作记忆、实体图、核心记忆、目标和准备结果，并在遗忘日志里留一条记录。会话记录默认保留。</p>
       <div class="row">
         <button class="btn small" data-action="wipe" data-scope="memory">清空全部记忆</button>
         <button class="btn small" data-action="wipe" data-scope="all">连会话一起清空</button>
@@ -1464,6 +2148,12 @@ async function renderSettingsPanel() {
       <div class="switch"><span>主动消息弹 macOS 通知</span><input type="checkbox" id="setNotify" ${c.proactive.notify ? 'checked' : ''} /></div>
     </div>
     <div class="sect">
+      <h4>共同打扰预算</h4>
+      <p class="muted small">主动消息、伴随气泡和准备结果共用此预算，也保留各自的频率上限。安静准备不占打扰次数。</p>
+      <div class="field"><label for="setAttentionBudget">每天合计最多打扰几次</label><input id="setAttentionBudget" type="number" min="0" max="100" step="1" required value="${c.attention?.dailyBudget ?? 20}" /></div>
+      <div class="field"><label for="setAttentionGap">不同渠道之间至少间隔（秒）</label><input id="setAttentionGap" type="number" min="0" max="3600" step="5" required value="${c.attention?.minGapSeconds ?? 75}" /></div>
+    </div>
+    <div class="sect">
       <h4>MCP 服务</h4>
       <div class="list">${
         mcp.servers.length
@@ -1492,6 +2182,7 @@ async function renderSettingsPanel() {
 }
 
 async function saveSettings() {
+  if (['#setAttentionBudget', '#setAttentionGap'].some((selector) => $(selector)?.reportValidity?.() === false)) return
   const body = {
     config: {
       upstream: { defaultModel: $('#setModel').value, defaultImageModel: $('#setImageModel').value },
@@ -1512,7 +2203,8 @@ async function saveSettings() {
         readPages: $('#setReadPages').checked,
         maxToolRounds: Number($('#setRounds').value),
       },
-      memory: { enabled: $('#setMemOn').checked, extract: $('#setExtract').checked, inject: $('#setInject').checked, profile: $('#setProfile')?.value ?? undefined },
+      memory: { enabled: $('#setMemOn').checked, extract: $('#setExtract').checked, inject: $('#setInject').checked,
+        profile: $('#setProfile')?.value !== S.boot?.config?.memory?.profile ? $('#setProfile')?.value : undefined },
       screen: {
         enabled: $('#setScreenOn').checked,
         intervalMinutes: Number($('#setScreenGap').value),
@@ -1531,6 +2223,7 @@ async function saveSettings() {
         scenarios: $$('#panelSettings [data-cscenario]').filter((cb) => cb.checked).map((cb) => cb.dataset.cscenario),
       },
       dream: { enabled: $('#setDreamOn').checked, intervalHours: Number($('#setDreamGap').value) },
+      attention: { dailyBudget: Number($('#setAttentionBudget').value), minGapSeconds: Number($('#setAttentionGap').value) },
       proactive: {
         dailyBudget: Number($('#setBudget').value),
         minGapMinutes: Number($('#setMinGap').value),
@@ -1544,7 +2237,7 @@ async function saveSettings() {
   $$('#panelSettings [data-pkey]').forEach((i) => {
     if (i.value.trim()) env[i.dataset.pkey] = i.value.trim()
   })
-  await api('settings', { method: 'PATCH', body: { config, env } })
+  await api('settings', { method: 'PATCH', body: { ...body, env } })
   $('#setSaved').textContent = '已保存，立即生效'
   toast('设置已保存')
   await boot({ keep: true })
@@ -1553,22 +2246,46 @@ async function saveSettings() {
 /* ------------------------------- conversations ------------------------------ */
 
 async function selectConv(id) {
-  if (S.stream) return toast('正在生成，先停止', true)
+  if (S.stream || S.preparing) return toast('正在生成，先停止', true)
+  const request = Symbol()
+  S.selecting = request
+  updateComposer()
+  let conv
+  try {
+    conv = await api(`conversations/${id}`)
+    if (S.selecting !== request) return
+    if (conv.unread) await api(`conversations/${id}`, { method: 'PATCH', body: { unread: 0 } })
+    if (S.selecting !== request) return
+  } finally {
+    if (S.selecting === request) {
+      S.selecting = null
+      updateComposer()
+    }
+  }
+  saveDraft()
   S.current = id
-  S.conv = await api(`conversations/${id}`)
-  if (S.conv.unread) await api(`conversations/${id}`, { method: 'PATCH', body: { unread: 0 } })
+  S.conv = conv
+  const meta = S.convs.find((c) => c.id === id)
+  if (meta) meta.unread = 0
   $('#convTitle').textContent = S.conv.title ?? '对话'
   $('#modelSelect').value = S.conv.model ?? prefs.model ?? S.boot.config.defaultModel
   $('#searchSelect').value = S.conv.searchMode ?? prefs.searchMode
   renderConvs()
   renderThread()
   $('#input').value = localStorage.getItem(`echo.draft.${id}`) ?? ''
+  S.att = (S.attachmentDrafts.get(id) ?? []).slice()
+  renderAttachments()
   POLISH.last = null
   renderPolishBox()
   autogrow()
+  const closeSidebar = !matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open'
+  if (closeSidebar) $('#app').dataset.sidebar = 'closed'
+  syncScrim()
+  if (closeSidebar) $('#convTitle').focus()
 }
 
 async function newChat() {
+  if (S.stream || S.selecting || S.preparing) return toast('请先等待当前操作完成', true)
   const conv = await api('conversations', { method: 'POST', body: { title: '新对话' } })
   await refreshList()
   await selectConv(conv.id)
@@ -1583,7 +2300,7 @@ async function boot({ keep = false } = {}) {
   S.convs = b.conversations
   $('#gate').hidden = true
   $('#app').hidden = false
-  $('#app').dataset.sidebar = matchMedia('(min-width: 860px)').matches ? 'open' : 'closed'
+  $('#app').dataset.sidebar = matchMedia('(min-width: 861px)').matches ? 'open' : 'closed'
   applyTheme()
   const sel = $('#modelSelect')
   const wantModel = prefs.model ?? b.config.defaultModel
@@ -1591,10 +2308,13 @@ async function boot({ keep = false } = {}) {
   sel.value = wantModel
   $('#searchSelect').value = prefs.searchMode
   $('#thinkingBtn').setAttribute('aria-pressed', String(prefs.thinking))
+  updateWorkspaceBadge()
   const logoutBtn = document.querySelector('[data-action="logout"]')
   if (logoutBtn) logoutBtn.hidden = !b.config.auth?.required
   renderConvs()
-  const target = keep && S.current ? S.current : b.main?.id ?? S.convs[0]?.id
+  const requested = new URLSearchParams(location.search).get('conv')
+  const target = keep && S.convs.some((c) => c.id === S.current) ? S.current
+    : S.convs.some((c) => c.id === requested) ? requested : b.main?.id ?? S.convs[0]?.id
   if (target) await selectConv(target)
   startPolling()
   // 没配置端点/密钥时，直接把引导推上来（可随时"以后再配"）
@@ -1606,17 +2326,28 @@ async function boot({ keep = false } = {}) {
 function startPolling() {
   clearInterval(S.poll)
   S.poll = setInterval(async () => {
-    if (S.stream || document.hidden) return
+    if (!document.hidden && !$('#drawer').hidden && S.panel === 'proactive') await renderProactivePanel({ poll: true })
+    if (!document.hidden && !$('#drawer').hidden && S.panel === 'workspace') await refreshRuns()
+    if (S.stream || S.selecting || S.preparing || $('.edit-box') || document.hidden) return
+    const conversationId = S.current
     try {
       const b = await api('bootstrap')
-      S.boot = b
+      if (S.stream || S.selecting || S.preparing || $('.edit-box') || S.current !== conversationId) return
       const before = S.convs.find((c) => c.id === S.current)?.messageCount ?? 0
+      const cur = b.conversations.find((c) => c.id === S.current)
+      let conv
+      if (cur && cur.messageCount > before) {
+        conv = await api(`conversations/${conversationId}`)
+        if (S.stream || S.selecting || S.preparing || $('.edit-box') || S.current !== conversationId) return
+      }
+      S.boot = b
+      updateWorkspaceBadge()
+      updateComposer()
       S.convs = b.conversations
       renderConvs()
-      const cur = S.convs.find((c) => c.id === S.current)
-      if (cur && cur.messageCount > before) {
-        S.conv = await api(`conversations/${S.current}`)
-        renderThread()
+      if (conv) {
+        S.conv = conv
+        renderThread({ resetScroll: false })
         if (S.current === 'main') toast('Echo 主动发了一条消息')
       }
     } catch {}
@@ -1630,44 +2361,182 @@ function autogrow() {
   const model = $('#modelSelect').selectedOptions[0]?.textContent ?? ''
   const mode = $('#searchSelect').value
   $('#ctxChip').textContent = `${model} · ${mode === 'off' ? '不联网' : mode === 'on' ? '强制搜索' : '按需搜索'}${prefs.thinking ? ' · 思考开' : ''}`
+  updateComposer()
 }
 
 /* --------------------------------- events ---------------------------------- */
 
-document.addEventListener('click', async (e) => {
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return
+    }
+  } catch {}
+  // HTTP LAN pages may not expose the Clipboard API.
+  const previous = document.activeElement
+  const area = document.createElement('textarea')
+  area.value = text
+  area.readOnly = true
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  document.body.append(area)
+  area.select()
+  try {
+    if (!document.execCommand('copy')) throw new Error('复制失败，请选中文字后复制')
+  } finally {
+    area.remove()
+    previous?.focus()
+  }
+}
+
+document.addEventListener('click', (e) => {
+  handleAction(e).catch((err) => toast(err.message, true))
+})
+
+async function handleAction(e) {
   const btn = e.target.closest('[data-action]')
   if (!btn) return
   const act = btn.dataset.action
   const id = btn.dataset.id
 
+  if (act === 'run-approval') return decideApproval(btn)
+  if (act === 'refresh-runs') return refreshRuns({ force: true })
+  if (act === 'view-run') {
+    if ($('#drawer').hidden || S.panel !== 'workspace') await openPanel('workspace')
+    await inspectRun(id)
+    $('#runInspector')?.focus()
+    return
+  }
+  if (act === 'goal-new') return showCommitmentEditor()
+  if (act === 'goal-editor-cancel') {
+    COMMITMENTS.editor = null
+    $('#commitmentEditor').innerHTML = ''
+    $('[data-action="goal-new"]')?.focus()
+    return
+  }
+  if (act === 'adopt-message') {
+    const messageId = btn.closest('.msg')?.dataset.id
+    const message = S.conv?.messages.find((item) => item.id === messageId && item.role === 'user')
+    if (!message) return
+    const source = { conversationId: S.current, messageId }
+    await openPanel('proactive')
+    return showCommitmentEditor({ title: String(message.content).slice(0, 160) }, { source, quote: String(message.content).slice(0, 500) })
+  }
+  if (act === 'adopt-loop') {
+    await openPanel('proactive')
+    const loop = COMMITMENTS.loops.find((item) => item.id === id)
+    if (!loop) return toast('这条候选事项已更新，请查看最新列表', true)
+    return showCommitmentEditor({ title: loop.topic, deadline: loop.due }, { candidateLoopId: loop.id, quote: loop.why })
+  }
+  if (act === 'goal-edit' || act === 'goal-complete') {
+    const goal = COMMITMENTS.items.find((item) => item.id === id)
+    if (goal) showCommitmentEditor(goal, { mode: act === 'goal-complete' ? 'complete' : 'edit' })
+    return
+  }
+  if (act === 'goal-prepare' || act === 'goal-status') {
+    btn.disabled = true
+    try {
+      if (act === 'goal-prepare') {
+        await api(`commitments/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: {} })
+        toast('已加入准备队列，结果会保留在这个目标下')
+      } else {
+        await api(`commitments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: btn.dataset.status } })
+        toast(`目标${GOAL_STATUS[btn.dataset.status] === '进行中' ? '已恢复' : GOAL_STATUS[btn.dataset.status]}`)
+      }
+      await renderProactivePanel({ force: true })
+    } finally { btn.disabled = false; restoreGoalActionFocus(btn) }
+    return
+  }
+  if (act === 'preparation-feedback') {
+    const goal = COMMITMENTS.items.find((item) => item.id === id)
+    if (btn.dataset.signal === 'completed' && goal?.status !== 'done') {
+      if (goal) showCommitmentEditor(goal, { mode: 'complete', preparationId: btn.dataset.preparationId })
+      return
+    }
+    btn.disabled = true
+    try {
+      const feedback = await api('feedback', { method: 'POST', body: { commitmentId: id, preparationId: btn.dataset.preparationId, signal: btn.dataset.signal } })
+      if (feedback.ignored) throw new Error('原准备结果已不可用，请刷新后重试')
+      toast(btn.dataset.signal === 'wrong_time' ? '收到，暂停打扰 30 分钟，结果仍保留' : `已记录：${OUTCOME_LABEL[btn.dataset.signal]}`)
+      await renderProactivePanel({ force: true })
+    } finally { btn.disabled = false; restoreGoalActionFocus(btn) }
+    return
+  }
+  if (act === 'view-preparation') {
+    const preparationId = btn.dataset.preparationId
+    const commitmentId = btn.dataset.commitmentId
+    await openPanel('proactive')
+    const result = $$('details[data-preparation-id]', $('#commitmentList')).find((node) => node.dataset.preparationId === preparationId)
+    const card = $$('[data-goal-id]', $('#commitmentList')).find((node) => node.dataset.goalId === commitmentId)
+    if (result) {
+      result.open = true
+      $('summary', result)?.focus()
+      result.scrollIntoView({ block: 'nearest' })
+    } else if (card) {
+      card.focus()
+      card.scrollIntoView({ block: 'nearest' })
+    } else toast('这份结果已不可用，请查看当前目标列表', true)
+    return
+  }
+  if (act === 'view-source-message') {
+    if (S.stream || S.preparing) return toast('请先等待当前回复完成', true)
+    closeDrawer()
+    await selectConv(btn.dataset.conversationId)
+    const message = $$('#threadInner .msg').find((node) => node.dataset.id === btn.dataset.messageId)
+    if (message) {
+      message.tabIndex = -1
+      message.focus()
+      message.scrollIntoView({ block: 'center' })
+    } else toast('原消息已不存在，准备结果仍保留了当时的摘录', true)
+    return
+  }
+  if (act === 'jump-latest') {
+    scrollBottom(true)
+    $('#thread').focus()
+    return
+  }
   if (act === 'copy-code') {
     const pre = btn.closest('pre')
-    navigator.clipboard.writeText($('code', pre).textContent).then(() => toast('代码已复制'))
+    await copyText($('code', pre).textContent)
+    toast('代码已复制')
     return
   }
   if (act === 'copy-msg') {
     const msg = btn.closest('.msg')
     const text = (msg.classList.contains('user') ? $('.body', msg) : $('.content', msg))?.innerText ?? msg.innerText
-    navigator.clipboard.writeText(text).then(() => toast('已复制'))
+    await copyText(text)
+    toast('已复制')
     return
   }
   if (act === 'edit-user') {
+    if (S.stream || S.preparing) return toast('正在生成，先停止', true)
     const node = btn.closest('.msg')
-    const current = node.querySelector('.body').innerText
-    node.querySelector('.body').outerHTML = `<div class="body edit-box"><textarea>${esc(current)}</textarea>
+    if ($('.gallery', node)) return toast('含图片的消息请重新发送，以保留原图', true)
+    const body = node.querySelector('.body')
+    const current = body.innerText
+    node.originalBody = body.outerHTML
+    const messages = $$('#threadInner .msg')
+    const following = Math.max(0, messages.length - messages.indexOf(node) - 1)
+    body.outerHTML = `<div class="body edit-box"><textarea aria-label="编辑消息">${esc(current)}</textarea>
+      <p class="edit-hint">保存后将从这里重新开始${following ? `，替换后面的 ${following} 条消息` : ''}。</p>
       <div class="row"><button class="btn small" data-action="edit-cancel">取消</button><button class="btn small primary" data-action="edit-save">保存并重发</button></div></div>`
+    $('textarea', node).focus()
     return
   }
-  if (act === 'edit-cancel') { await selectConv(S.current); return }
+  if (act === 'edit-cancel') {
+    const node = btn.closest('.msg')
+    if (node.originalBody) $('.body', node).outerHTML = node.originalBody
+    $('[data-action="edit-user"]', node)?.focus()
+    return
+  }
   if (act === 'edit-save') {
     const node = btn.closest('.msg')
     const text = $('textarea', node).value.trim()
     if (!text) return
     if (S.stream) return toast('正在生成', true)
     const editId = node.dataset.id
-    node.remove()
-    startStream({ userText: text, editId })
-    return
+    return startStream({ userText: text, editId })
   }
   if (act === 'regen') return startStream({ regenerate: true })
   if (act === 'stop') {
@@ -1678,25 +2547,43 @@ document.addEventListener('click', async (e) => {
   if (act === 'fb') {
     const signal = btn.dataset.signal
     const r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId: S.current, messageId: btn.dataset.id } })
+    if (r.ignored) return toast('这条反馈未能关联到原消息，请刷新后重试', true)
     btn.parentElement.querySelectorAll('button[data-action="fb"]').forEach((b) => (b.style.color = ''))
     btn.style.color = signal === 'good' ? 'var(--accent)' : 'var(--danger)'
-    toast(signal === 'good' ? '收到：这类消息会更多' : '收到：这类消息会更少')
+    toast(signal === 'more' ? '已增加主动服务频率' : signal === 'less' ? '已减少主动服务频率' : signal === 'good' ? '已记录：这条内容有用' : '已记录：这条内容没用')
     void r
     return
   }
-  if (act === 'sug') { $('#input').value = btn.textContent; autogrow(); $('#composer').requestSubmit(); return }
+  if (act === 'sug') {
+    const input = $('#input')
+    input.value = input.value.trim() ? `${input.value}\n${btn.textContent}` : btn.textContent
+    POLISH.last = null
+    renderPolishBox()
+    saveDraft()
+    autogrow()
+    input.focus()
+    return
+  }
   if (act === 'polish') {
     if (!POLISH.modes) POLISH.modes = (await api('polish/modes').catch(() => ({}))).modes ?? {}
     return runPolish()
   }
   if (act === 'attach') { $('#fileInput').click(); return }
-  if (act === 'rm-att') { S.att.splice(Number(btn.dataset.i), 1); renderAttachments(); autogrow(); return }
+  if (act === 'rm-att') { S.att.splice(Number(btn.dataset.i), 1); saveDraft(); renderAttachments(); autogrow(); return }
   if (act === 'draw') {
+    if (S.drawing || S.stream || S.selecting) return toast('请等待当前生成完成', true)
+    if (!S.boot?.config?.upstreamConfigured || !S.boot.config.defaultImageModel) return toast('请先在设置中配置出图模型', true)
     const prompt = $('#input').value.trim() || window.prompt('要画什么？可以带上风格、构图、光线')
     if (!prompt) return
-    toast('正在出图，大约 10–30 秒…')
+    const conversationId = S.current
+    S.drawing = conversationId
+    updateComposer()
     try {
-      const r = await api('images', { method: 'POST', body: { prompt, model: S.boot.config.defaultImageModel, conversationId: S.current } })
+      const r = await api('images', { method: 'POST', body: { prompt, model: S.boot.config.defaultImageModel, conversationId } })
+      if (S.current !== conversationId || S.selecting) {
+        await refreshList()
+        return toast('图片已保存到原会话')
+      }
       const inner = $('#threadInner')
       $('.hero', inner)?.remove()
       inner.append(
@@ -1715,13 +2602,14 @@ document.addEventListener('click', async (e) => {
       await refreshList()
     } catch (err) {
       toast(`出图失败：${err.message}`, true)
+    } finally {
+      S.drawing = null
+      updateComposer()
     }
     return
   }
   if (act === 'toggle-sidebar') {
-    const app = $('#app')
-    app.dataset.sidebar = app.dataset.sidebar === 'open' ? 'closed' : 'open'
-    return
+    return toggleSidebar()
   }
   if (act === 'new-chat') return newChat()
   if (act === 'select-conv') return selectConv(id)
@@ -1731,6 +2619,7 @@ document.addEventListener('click', async (e) => {
     return refreshList()
   }
   if (act === 'del-conv') {
+    if (id === S.current && (S.stream || S.preparing)) return toast('请先停止当前生成', true)
     if (!confirm('删除这个会话？')) return
     await api(`conversations/${id}`, { method: 'DELETE' })
     if (S.current === id) { const m = S.convs.find((c) => c.isMain); await refreshList(); return selectConv(m.id) }
@@ -1832,7 +2721,7 @@ document.addEventListener('click', async (e) => {
     return renderProactivePanel()
   }
   if (act === 'load-diag') {
-    const d = await api('diagnostics')
+    const [d, agency] = await Promise.all([api('diagnostics'), api('agency')])
     const m = d.metrics ?? {}
     const t = m.turns ?? {}
     const toolRows = Object.entries(m.tools ?? {})
@@ -1846,7 +2735,7 @@ document.addEventListener('click', async (e) => {
         <div class="stat"><b>${t.count ?? 0}</b><span>近 7 天生成</span></div>
         <div class="stat"><b>${((t.errorRate ?? 0) * 100).toFixed(0)}%</b><span>失败率</span></div>
         <div class="stat"><b>${t.p95Ms ?? 0}</b><span>P95 延迟(ms)</span></div>
-        <div class="stat"><b>${m.proactive?.replyRate != null ? `${(m.proactive.replyRate * 100).toFixed(0)}%` : '—'}</b><span>主动被接住</span></div>
+        <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>累计采用或帮助完成</span></div>
       </div>
       <div class="muted small">用量：入 ${t.tokensIn ?? 0} / 出 ${t.tokensOut ?? 0} tokens · 平均 ${t.avgRounds ?? 0} 轮工具调用 · 模型 ${JSON.stringify(t.models ?? {})}</div>
       ${m.polish?.count ? `<div class="muted small">润色：${m.polish.count} 次 · 平均 ${m.polish.avgMs}ms · 改动率 ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}% · 模式 ${JSON.stringify(m.polish.byMode ?? {})}</div>` : ''}
@@ -1861,9 +2750,14 @@ document.addEventListener('click', async (e) => {
   }
   if (act === 'wipe') {
     const scope = btn.dataset.scope
-    const word = prompt(`这会清空${scope === 'all' ? '全部记忆和会话' : '全部记忆'}，不可撤销。输入 WIPE 确认：`)
+    const word = prompt(`这会清空${scope === 'all' ? '全部记忆和会话' : '全部记忆'}，以及目标、准备结果和相关记录，不可撤销。输入 WIPE 确认：`)
     if (word !== 'WIPE') return
     const r = await api('memory/wipe', { method: 'POST', body: { confirm: 'WIPE', scope } })
+    COMMITMENTS.editor = null
+    COMMITMENTS.items = []
+    COMMITMENTS.preparations = []
+    COMMITMENTS.version++
+    $('#panelProactive').innerHTML = ''
     toast(`已清空：${r.before.observations} 条事实${scope === 'all' ? `、${r.wiped.conversations} 个会话` : ''}`)
     await boot({ keep: true })
     return renderSettingsPanel()
@@ -1892,12 +2786,6 @@ document.addEventListener('click', async (e) => {
     toast(`${r.engine} · ${r.ms}ms · ${r.results.length} 条`)
     return
   }
-  $('#setAuthRequired')?.addEventListener('change', async (e) => {
-    const r = await api('auth', { method: 'PATCH', body: { required: e.target.checked } })
-    toast(r.required ? '已开启口令验证（下次打开需要登录）' : '已关闭口令验证，本机自用')
-    await boot({ keep: true })
-    return renderSettingsPanel()
-  })
   if (act === 'set-passwd') {
     const next = prompt('设置访问口令（≥6 位）')
     if (!next) return
@@ -1916,9 +2804,33 @@ document.addEventListener('click', async (e) => {
     location.reload()
     return
   }
+}
+
+document.addEventListener('change', async (e) => {
+  if (e.target.id !== 'setAuthRequired') return
+  const input = e.target
+  const required = input.checked
+  let saved = false
+  input.disabled = true
+  try {
+    const r = await api('auth', { method: 'PATCH', body: { required } })
+    saved = true
+    input.checked = r.required
+    toast(r.required ? '已开启口令验证（下次打开需要登录）' : '已关闭口令验证，本机自用')
+    await boot({ keep: true })
+    await renderSettingsPanel()
+  } catch (err) {
+    if (!saved) input.checked = !required
+    toast(err.message, true)
+  } finally {
+    input.disabled = false
+  }
 })
 
 $('#convTitle').addEventListener('click', renameNow)
+$('#convTitle').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); renameNow() }
+})
 function renameNow() {
   const t = prompt('会话标题', $('#convTitle').textContent)
   if (t) {
@@ -1932,11 +2844,12 @@ function renameNow() {
 $('#composer').addEventListener('submit', (e) => {
   e.preventDefault()
   const text = $('#input').value.trim()
-  if ((!text && !S.att.length) || S.stream) return
+  if ((!text && !S.att.length) || S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return
+  if (!S.boot?.config?.upstreamConfigured) return toast('先连接模型，草稿会保留在这里', true)
   $('#input').value = ''
   localStorage.removeItem(`echo.draft.${S.current}`)
   autogrow()
-  startStream({ userText: text })
+  startStream({ userText: text }).catch((err) => toast(err.message, true))
 })
 
 $('#fileInput').addEventListener('change', async (e) => {
@@ -1963,15 +2876,15 @@ composerEl.addEventListener('drop', async (e) => {
 })
 
 $('#input').addEventListener('input', () => {
+  saveDraft()
   autogrow()
-  localStorage.setItem(`echo.draft.${S.current}`, $('#input').value)
   if (POLISH.last && $('#input').value.trim() !== POLISH.last.original) {
     POLISH.last = null
     renderPolishBox()
   }
 })
 $('#input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && (!matchMedia('(pointer: coarse)').matches || e.metaKey || e.ctrlKey)) {
     e.preventDefault()
     $('#composer').requestSubmit()
   }
@@ -1990,21 +2903,74 @@ $('#convFilter').addEventListener('input', (e) => {
   S.filter = e.target.value
   renderConvs()
 })
+$('#thread').addEventListener('scroll', updateScrollState, { passive: true })
+$('#thread').addEventListener('load', () => scrollBottom(false), true)
+$('#thread').addEventListener('toggle', () => scrollBottom(false), true)
 $('#scrim').addEventListener('click', () => {
-  closeDrawer()
-  if (!matchMedia('(min-width: 860px)').matches) $('#app').dataset.sidebar = 'closed'
+  if (!$('#drawer').hidden) closeDrawer()
+  else if (!matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open') toggleSidebar()
 })
 document.addEventListener('keydown', (e) => {
+  const overlay = W.open ? $('#wizard') : !$('#drawer').hidden ? $('#drawer')
+    : !matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open' ? $('#sidebar') : null
+  if (overlay) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      if (W.open) closeWizard()
+      else if (overlay === $('#drawer')) closeDrawer()
+      else toggleSidebar()
+      return
+    }
+    if (e.key === 'Tab') {
+      const items = $$('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]', overlay)
+        .filter((el) => !el.hidden && el.tabIndex >= 0 && el.getClientRects().length)
+      const first = items[0]
+      const last = items.at(-1)
+      if (!first) { e.preventDefault(); overlay.focus(); return }
+      if (e.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {
+        e.preventDefault(); last.focus()
+      } else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {
+        e.preventDefault(); first.focus()
+      }
+    }
+    if (overlay === $('#drawer') && e.target.matches('.tab') && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault()
+      const tabs = $$('.tab')
+      const index = tabs.indexOf(e.target)
+      const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+        : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+      openPanel(tabs[next].dataset.panel).catch((err) => toast(err.message, true))
+    }
+    if (overlay === $('#sidebar') && (e.key === 'Enter' || e.key === ' ') && e.target.matches('.conv[data-action="select-conv"]')) {
+      e.preventDefault()
+      selectConv(e.target.dataset.id).catch((err) => toast(err.message, true))
+    }
+    return
+  }
+  if (e.key === 'Escape' && e.target.closest('.edit-box')) {
+    e.preventDefault()
+    $('[data-action="edit-cancel"]', e.target.closest('.edit-box')).click()
+    return
+  }
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.conv[data-action="select-conv"]')) {
+    e.preventDefault()
+    selectConv(e.target.dataset.id).catch((err) => toast(err.message, true))
+    return
+  }
   const meta = e.metaKey || e.ctrlKey
   if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat() }
-  if (meta && e.key === '/') { e.preventDefault(); $('#app').dataset.sidebar = $('#app').dataset.sidebar === 'open' ? 'closed' : 'open' }
-  if (e.key === 'Escape') { if (!$('#drawer').hidden) closeDrawer(); else if (S.stream) { api('chat/stop', { method: 'POST', body: { conversationId: S.current } }); S.stream.ctrl.abort() } }
+  if (meta && e.key === '/') { e.preventDefault(); toggleSidebar() }
+  if (e.key === 'Escape') { if (!$('#drawer').hidden) closeDrawer(); else if (!matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open') toggleSidebar(); else if (S.stream) { api('chat/stop', { method: 'POST', body: { conversationId: S.current } }); S.stream.ctrl.abort() } }
   if (meta && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); document.querySelector('[data-action="dream-now"]')?.click() }
   if (meta && e.key.toLowerCase() === 'm') { e.preventDefault(); openPanel('memory') }
   if (meta && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); document.querySelector('[data-action="polish"]')?.click() }
 })
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme)
-addEventListener('resize', () => { if (matchMedia('(min-width: 860px)').matches) $('#app').dataset.sidebar = 'open' })
+addEventListener('resize', () => {
+  syncScrim()
+  autogrow()
+  scrollBottom(false)
+})
 
 /* --------------------------------- start ----------------------------------- */
 ;(async () => {

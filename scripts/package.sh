@@ -29,6 +29,10 @@ rm -f "$OUT" "$DIST/$NAME.tar.gz.sha256"
 
 # git archive：只打跟踪文件，且带前缀目录，解包即得 $NAME/
 git archive --format=tar.gz --prefix="$NAME/" -o "$OUT" HEAD
+if ! tar -tzf "$OUT" | grep -Fx "$NAME/package-lock.json" >/dev/null; then
+  printf '\033[31m✗ 发布件缺少 package-lock.json，请先提交依赖锁文件\033[0m\n'
+  exit 1
+fi
 rm -f "$DIST/SHA256SUMS"
 ( cd "$DIST" && shasum -a 256 "$NAME.tar.gz" | awk '{print $1"  "$2}' > SHA256SUMS )
 
@@ -50,6 +54,11 @@ if [ "$VERIFY" = "1" ]; then
   tar -xzf "$OUT" -C "$TMP"
   printf '· 在临时目录验证发布件…\n'
   ( cd "$TMP/$NAME" && node --check server.mjs && for f in lib/*.mjs; do node --check "$f"; done )
+  if ! ( cd "$TMP/$NAME" && npm ci --omit=dev --ignore-scripts ); then
+    printf '\033[31m✗ 发布件运行依赖安装失败，先别发\033[0m\n'
+    rm -rf "$TMP"
+    exit 1
+  fi
   if ( cd "$TMP/$NAME" && node tests/selftest.mjs --json >/dev/null 2>&1 ); then
     printf '\033[32m✓\033[0m 发布件自测通过（隔离沙箱，未触碰真实数据）\n'
   else

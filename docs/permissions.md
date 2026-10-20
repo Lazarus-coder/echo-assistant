@@ -91,6 +91,16 @@ xcode-select --install      # only if you want the menu-bar app and lack swiftc
 
 Everything Echo knows lives under `data/` — `echo.env` (keys, `600`), conversations, memory (`MEMORY.md`, `observations.jsonl`, `working.jsonl`, `graph.json`, `forgetting.md`), uploads, `metrics.jsonl`, logs. You can read, back up, or delete any of it. Disk budgets for screenshots/images are enforced (`config.json → storage`), and *Settings → 隐私兜底* has a one-click “forget everything”.
 
+## 7. Workspace tools and MCP
+
+Workspace tools start disabled. On the host Mac, open **工作区**, select an existing directory, and enable reading, editing, and Shell separately. File tools stay inside this directory, reject symlinks and Echo private data, and check the current file hash before replacement. Enabling editing authorizes direct edits; before/after snapshots are saved for review.
+
+Every Shell and MCP tool call requires approval of its exact inputs. Shell runs with your operating-system account privileges: **this is not an OS sandbox**, and a working directory is not a file or network access boundary. MCP servers also run with their own configured privileges; connecting a stdio server launches its configured program. Only configure trusted servers. The official MCP SDK handles protocol negotiation, transport, and cancellation. Required subprocess credentials must be explicitly supplied in the server's `env`; Echo's provider keys are not automatically inherited.
+
+Stop terminates the local Shell process group and requests cancellation from MCP. It cannot undo completed actions or guarantee that a remote MCP server stops its work. Approval expires after five minutes, denial ends the turn, and interrupted runs are never replayed on restart. Disabling capabilities cancels active runs.
+
+Configuration, local execution, approvals, and output downloads are restricted to loopback connections; phone/LAN chat has no workspace or MCP tools. Run records, command logs, and edit snapshots are stored under `data/runs/` and may contain project data. They persist until “forget everything” clears them; back up this directory separately from conversation JSON exports. File contents and tool results used by the model are sent to your chosen model endpoint. Goal preparation remains read-only and receives no unattended command authority.
+
 ---
 
 ## 中文速览
@@ -100,4 +110,5 @@ Everything Echo knows lives under `data/` — `echo.env` (keys, `600`), conversa
 - **通知**：主动消息走 osascript，必要时在系统设置里允许。
 - **常驻**：`./install.sh` 注册 `com.echo.chat` + `com.echo.menubar` 两个 launchd 任务（登录自启、崩溃自动拉起）。
 - **网络**：默认监听 `0.0.0.0:8787` 且免登录；公共网络下用 `./bin/echo auth on` 开启口令。
+- **工作区与 MCP**：本机显式开启；文件编辑检查哈希并保存前后快照；Shell/MCP 每次确认。Shell 以本机账号权限运行，并非操作系统沙箱。局域网对话不能调用本机工具。停止不等于撤销，重启不会重放；`data/runs/` 保存输出，“全部忘掉”会清除。
 - **数据**：全在 `data/`，明文可读可删；磁盘预算自动执行；设置里有"全部忘掉"。

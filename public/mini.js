@@ -4,16 +4,26 @@ const $ = (s, r = document) => r.querySelector(s)
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
 const params = new URLSearchParams(location.search)
 const bubbleId = params.get('b') ?? location.pathname.split('/').filter(Boolean)[1] ?? ''
+const localHeaders = typeof globalThis.__echoLocalToken === 'string' ? { 'x-echo-local': globalThis.__echoLocalToken } : {}
+delete globalThis.__echoLocalToken
 
 let conversationId = null
 let streaming = null
 
+function updateComposer() {
+  $('#send').disabled = !conversationId || Boolean(streaming) || !$('#input').value.trim()
+  $('[data-act="open-main"]').disabled = !conversationId
+  $('#send').textContent = streaming ? '回复中…' : '发送'
+  $('#thread').setAttribute('aria-busy', String(Boolean(streaming)))
+}
+
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(`/api/${path}`, {
     method,
-    headers: method === 'GET' ? {} : { 'content-type': 'application/json', 'x-echo-request': 'echo' },
+    headers: { ...localHeaders, ...(method === 'GET' ? {} : { 'content-type': 'application/json', 'x-echo-request': 'echo' }) },
     body: body === undefined ? undefined : JSON.stringify(body),
     credentials: 'same-origin',
+    redirect: 'error',
   })
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? `HTTP ${res.status}`)
   return res.json()
@@ -41,8 +51,8 @@ function mdLite(text) {
   return s.replace(/\n/g, '<br />')
 }
 
-async function loadThread() {
-  const conv = await api(`conversations/${conversationId}`)
+async function loadThread(id) {
+  const conv = await api(`conversations/${id}`)
   $('#topic').textContent = conv.title ?? '伴随'
   $('#model').textContent = conv.model ?? ''
   const thread = $('#thread')
@@ -67,15 +77,17 @@ async function send(text) {
   thread.scrollTop = thread.scrollHeight
 
   streaming = new AbortController()
+  updateComposer()
   let buffer = ''
   let rendered = ''
-  let pending = false
+  let paintFrame = null
+  let completed = false
+  let error = ''
   const sources = []
   const paint = () => {
-    if (pending) return
-    pending = true
-    requestAnimationFrame(() => {
-      pending = false
+    if (paintFrame !== null) return
+    paintFrame = requestAnimationFrame(() => {
+      paintFrame = null
       if (rendered === buffer) return
       rendered = buffer
       contentEl.innerHTML = `${mdLite(buffer)}<span class="cursor"></span>`
@@ -85,11 +97,16 @@ async function send(text) {
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
+      headers: { ...localHeaders, 'content-type': 'application/json', 'x-echo-request': 'echo' },
       body: JSON.stringify({ conversationId, userText: text, searchMode: 'auto' }),
       credentials: 'same-origin',
+      redirect: 'error',
       signal: streaming.signal,
     })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail.message ?? `HTTP ${res.status}`)
+    }
     const reader = res.body.getReader()
     const dec = new TextDecoder()
     let buf = ''
@@ -109,16 +126,22 @@ async function send(text) {
           buffer += d.text
           paint()
         } else if (name === 'error') {
-          contentEl.innerHTML = `<div class="err">${esc(d.message)}</div>`
+          throw new Error(d.message ?? '回复失败，请重试。')
         } else if (name === 'tool_call') {
           $('.tail', node).innerHTML = `<div class="notice">正在调用 ${esc(d.label ?? d.name)}…</div>`
         } else if (name === 'sources') {
           for (const s of d.items ?? []) if (!sources.some((x) => x.url === s.url)) sources.push(s)
         } else if (name === 'done') {
           buffer = d.message?.content ?? buffer
+          completed = true
         }
       }
     }
+    if (!completed) throw new Error('连接已中断，回复可能不完整。请重试。')
+  } catch (err) {
+    if (err.name !== 'AbortError') error = err.message
+  } finally {
+    if (paintFrame !== null) cancelAnimationFrame(paintFrame)
     contentEl.innerHTML = mdLite(buffer)
     $('.tail', node).innerHTML = sources.length
       ? `<div class="sources">${sources
@@ -126,10 +149,9 @@ async function send(text) {
           .map((s) => `<a class="src" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || s.url)}</a>`)
           .join('')}</div>`
       : ''
-  } catch (err) {
-    if (err.name !== 'AbortError') contentEl.innerHTML = `<div class="err">${esc(err.message)}</div>`
-  } finally {
+    if (error) $('.tail', node).innerHTML += `<div class="err" role="alert">${esc(error)}</div>`
     streaming = null
+    updateComposer()
   }
 }
 
@@ -140,8 +162,9 @@ async function init() {
   }
   try {
     const r = await api(`companion/${bubbleId}/open`, { method: 'POST', body: {} })
+    await loadThread(r.conversationId)
     conversationId = r.conversationId
-    await loadThread()
+    updateComposer()
     $('#input').focus()
   } catch (err) {
     $('#thread').innerHTML = `<div class="mini-empty">打不开这个气泡：${esc(err.message)}</div>`
@@ -159,6 +182,7 @@ $('#composer').addEventListener('submit', (e) => {
 $('#input').addEventListener('input', (e) => {
   e.target.style.height = 'auto'
   e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`
+  updateComposer()
 })
 $('#input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -167,9 +191,10 @@ $('#input').addEventListener('keydown', (e) => {
   }
 })
 document.addEventListener('click', (e) => {
-  if (e.target.closest('[data-act="open-main"]')) {
+  if (conversationId && e.target.closest('[data-act="open-main"]')) {
     window.open(`/?conv=${conversationId}`, '_blank')
   }
 })
 
+updateComposer()
 init()

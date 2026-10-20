@@ -6,7 +6,8 @@
  *  - 断言的是"设计不变量"，不是"我的实现长什么样"：强度单调性、容量上限、SSRF 拦截、
  *    XSS 不得存活、CSRF/口令、预算淘汰、摘要覆盖——任何合理实现都该满足。
  *  - 全程在隔离沙箱里跑（ECHO_DATA_DIR 指向临时目录），不碰真实数据。
- *  - 评分口径固定：每项 1 分，只统计本文件列出的检查；迭代中不得改动。
+ *  - 每项 1 分，只统计本文件列出的检查。2026-10-20 按新的主动能动性需求，
+ *    将类型级奖励、沉默负奖励两项迁移为明确干预反馈、沉默未知；分数不与旧口径直接比较。
  *
  * 用法：node tests/selftest.mjs [--live] [--json] [--keep] [--port 8899]
  *  --live 会真的调用模型（搜索/对话/视觉/出图），没有 key 时自动跳过并标注。
@@ -87,10 +88,10 @@ async function bootSandbox() {
   // 关键：单元检查也必须在沙箱里跑，否则会污染真实数据目录
   process.env.ECHO_DATA_DIR = sandbox
   process.env.ECHO_CONFIG = path.join(sandbox, 'config.json')
-  // 沙箱配置：以真实 config.json 为基线（若有），再叠加测试覆盖值
-  // —— 这样沙箱就像"用户真实安装的一份隔离副本"，实时轨才有意义
+  // 只有显式 --live 才读取用户配置与凭据；离线检查完全自足。
   let baselineRaw = null
   try {
+    if (!LIVE) throw new Error('offline sandbox')
     baselineRaw = await fs.readFile(path.join(ROOT, 'config.json'), 'utf8')
     await fs.writeFile(process.env.ECHO_CONFIG, baselineRaw)
   } catch {
@@ -101,6 +102,7 @@ async function bootSandbox() {
   await fs.mkdir(path.join(sandbox, 'logs'), { recursive: true })
   let env = {}
   try {
+    if (!LIVE) throw new Error('offline sandbox')
     const raw = await fs.readFile(path.join(ROOT, 'data', 'echo.env'), 'utf8')
     for (const line of raw.split('\n')) {
       const m = /^([A-Z_]+)=(.*)$/.exec(line.trim())
@@ -113,7 +115,7 @@ async function bootSandbox() {
   child = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], {
     cwd: ROOT,
     env: {
-      ...process.env,
+      ...(LIVE ? process.env : { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, ECHO_CONFIG: process.env.ECHO_CONFIG }),
       ...env,
       ECHO_DATA_DIR: sandbox,
       ECHO_PORT: String(PORT),
@@ -541,10 +543,14 @@ async function trackAgency() {
   check('G', '能挑出最该跟进的一件事', picked?.id === 'L1', `pick=${picked?.id}`)
 
   // 5. 反馈 API 打通（含全局节流调整）
-  const fb = await req('/api/feedback', { method: 'POST', body: { signal: 'good', kind: 'ask' } })
+  const store = await import('../lib/store.mjs')
+  const feedbackConv = await store.createConversation({ title: 'explicit outcome probe' })
+  const feedbackMessage = { id: 'm_selftest_feedback', role: 'assistant', content: '需要这份准备吗？', proactive: true, kind: 'ask', createdAt: new Date().toISOString() }
+  await store.appendMessage(feedbackConv.id, feedbackMessage)
+  const fb = await req('/api/feedback', { method: 'POST', body: { signal: 'good', conversationId: feedbackConv.id, messageId: feedbackMessage.id } })
   const after = await req('/api/agency')
   const askMean = after.json?.kinds?.find((k) => k.kind === 'ask')?.mean
-  check('G', '反馈接口能把奖励写进后验', fb.status === 200 && (askMean ?? 0) > 0.5, `ask=${askMean}`)
+  check('G', '明确干预反馈能把奖励写进后验', fb.status === 200 && (askMean ?? 0) > 0.5, `ask=${askMean}`)
 
   const before = (await req('/api/bootstrap')).json.config.proactive
   const less = await req('/api/feedback', { method: 'POST', body: { signal: 'less' } })
@@ -557,7 +563,7 @@ async function trackAgency() {
   )
   await req('/api/settings', { method: 'PATCH', body: { config: { proactive: { minGapMinutes: 45, dailyBudget: 5, confidenceThreshold: 0.62 } } } })
 
-  // 6. 未被接住的主动消息会按 0 奖励结算
+  // 6. 未回应不代表无用，结算为未知且不影响效用后验。
   await agency.updateKind('suggest', 1)
   const stateFile = path.join(sandbox, 'state.json')
   const st = JSON.parse(await fs.readFile(stateFile, 'utf8').catch(() => '{}'))
@@ -566,7 +572,8 @@ async function trackAgency() {
   const beforeSettle = (await agency.posteriors()).kinds.suggest
   await agency.settlePending({})
   const afterSettle = (await agency.posteriors()).kinds.suggest
-  check('G', '久未回应的主动消息按 0 奖励结算（闭环）', afterSettle.b > beforeSettle.b, `b ${beforeSettle.b} → ${afterSettle.b}`)
+  const settledState = await store.readState()
+  check('G', '久未回应保持未知，不奖惩效用', afterSettle.a === beforeSettle.a && afterSettle.b === beforeSettle.b && settledState.proactive.history[0]?.outcome?.signal === 'unknown', `a=${afterSettle.a} b=${afterSettle.b}`)
 
   // 7. 模拟回放：bandit 策略 vs 固定策略（用真实采样代码）
   const sim = await simulatePolicy()
@@ -862,7 +869,12 @@ async function trackCompanion() {
   await req('/api/settings', {
     method: 'PATCH',
     body: {
-      config: { upstream: { baseUrl: mock.baseUrl, models: [{ id: 'mock-model-1', label: 'mock', group: '桩' }], defaultModel: 'mock-model-1', utilityModel: 'mock-model-1' } },
+      config: {
+        upstream: { baseUrl: mock.baseUrl, models: [{ id: 'mock-model-1', label: 'mock', group: '桩' }], defaultModel: 'mock-model-1', utilityModel: 'mock-model-1' },
+        // This track isolates companion limits; agency-regressions covers the shared policy.
+        attention: { dailyBudget: 100, minGapSeconds: 0 },
+        proactive: { enabled: false, quietHours: { start: '00:00', end: '00:00' } },
+      },
       env: { OPENAI_BASE_URL: mock.baseUrl, OPENAI_API_KEY: 'sk-mock-selftest' },
     },
   })

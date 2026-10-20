@@ -19,8 +19,16 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ -n "$NODE" ] || die "没找到 node。先装 Node（brew install node）再跑这个脚本。"
+[ "$("$NODE" -p 'Number(process.versions.node.split(".")[0])')" -ge 20 ] || die "需要 Node 20 或更高版本。"
 info "node: $NODE"
 info "项目目录: $ROOT"
+
+NPM="$(dirname "$NODE")/npm"
+[ -x "$NPM" ] || NPM="$(command -v npm || true)"
+[ -n "$NPM" ] || die "没找到 npm。请安装带 npm 的 Node.js。"
+[ -f "$ROOT/package-lock.json" ] || die "缺少 package-lock.json，请使用完整源码。"
+info "安装锁定版本的运行依赖（官方 MCP SDK）…"
+( cd "$ROOT" && PATH="$(dirname "$NODE"):$PATH" "$NPM" ci --omit=dev --ignore-scripts ) || die "依赖安装失败，尚未修改服务。"
 
 mkdir -p "$ROOT/data/logs" "$ROOT/data/conversations" "$ROOT/data/memory" "$ROOT/data/uploads" "$ROOT/build"
 

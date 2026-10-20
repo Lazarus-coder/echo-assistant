@@ -27,15 +27,15 @@
         <span class="chip" id="scenario">—</span>
         <span class="muted small right" id="model"></span>
       </div>
-      <div class="mini-thread" id="thread"><div class="mini-empty">正在连接…</div></div>
+      <div class="mini-thread" id="thread" aria-label="对话消息"><div class="mini-empty">正在连接…</div></div>
       <div class="mini-foot">
         <form id="composer" class="composer">
-          <textarea id="input" rows="1" placeholder="就这个话题问下去…（Enter 发送）"></textarea>
+          <textarea id="input" rows="1" aria-label="消息" placeholder="就这个话题问下去…（Enter 发送）"></textarea>
           <div class="composer-bar">
             <div class="composer-meta"><span class="muted" id="hint"></span></div>
             <div class="composer-actions">
-              <button type="button" class="btn ghost small" data-act="open-main">在主窗口打开</button>
-              <button type="submit" class="btn primary" id="send">发送</button>
+              <button type="button" class="btn ghost small" data-act="open-main" disabled>在主窗口打开</button>
+              <button type="submit" class="btn primary" id="send" disabled>发送</button>
             </div>
           </div>
         </form>

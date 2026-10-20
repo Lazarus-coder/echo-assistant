@@ -20,7 +20,7 @@
         <img src="/logo.svg" alt="" class="gate-logo" width="44" height="44" />
         <h1 id="gateTitle">Echo</h1>
         <p id="gateHint" class="gate-hint">输入访问口令</p>
-        <input id="gateInput" type="password" inputmode="text" placeholder="访问口令" minlength="6" required />
+        <input id="gateInput" type="password" inputmode="text" aria-labelledby="gateHint" placeholder="访问口令" minlength="6" required />
         <button type="submit" class="btn primary block" id="gateSubmit">进入</button>
         <p id="gateError" class="gate-error" hidden></p>
       </form>
@@ -41,7 +41,7 @@
         </button>
         <label class="filter">
           <svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
-          <input id="convFilter" type="search" placeholder="搜索会话" />
+          <input id="convFilter" type="search" aria-label="搜索会话" placeholder="搜索会话" />
         </label>
 
         <ul id="convList" class="conv-list"></ul>
@@ -73,15 +73,16 @@
             <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </button>
           <div class="title-wrap">
-            <h2 id="convTitle" class="title" tabindex="0" title="点击重命名">主对话</h2>
+            <h2 id="convTitle" class="title" tabindex="0" title="点击或按 Enter 重命名">主对话</h2>
             <span id="badges" class="badges"></span>
+            <button type="button" id="workspaceBadge" class="badge workspace-badge" data-action="open-panel" data-panel="workspace" title="配置工作区与查看执行记录">工作区 · 未启用</button>
           </div>
           <div class="topbar-right">
             <label class="pill">
-              <select id="modelSelect" class="bare"></select>
+              <select id="modelSelect" class="bare" aria-label="对话模型"></select>
             </label>
             <label class="pill" title="联网搜索">
-              <select id="searchSelect" class="bare">
+              <select id="searchSelect" class="bare" aria-label="联网搜索">
                 <option value="off">搜索关</option>
                 <option value="auto">搜索自动</option>
                 <option value="on">搜索强制</option>
@@ -91,14 +92,22 @@
           </div>
         </header>
 
-        <div id="thread" class="thread" tabindex="-1"></div>
+        <div class="thread-wrap">
+          <div id="connectionNotice" class="connection-notice" role="status" hidden>
+            <span id="connectionText"></span>
+            <button type="button" class="btn small" data-action="rerun-wizard">配置模型</button>
+          </div>
+          <div id="thread" class="thread" tabindex="-1" role="region" aria-label="对话消息"></div>
+          <button id="jumpLatest" type="button" class="jump-latest" data-action="jump-latest" hidden>↓ 回到最新</button>
+        </div>
 
         <div class="composer-wrap">
+          <div id="replyStatus" class="reply-status" role="status" aria-live="polite" hidden></div>
           <div id="pending" class="pending" hidden></div>
           <form id="composer" class="composer">
             <div id="attachStrip" class="attach-strip" hidden></div>
             <div id="polishBox" class="polish-box" hidden></div>
-            <textarea id="input" rows="1" placeholder="随时问点什么…（Enter 发送，Shift+Enter 换行，可贴图）"></textarea>
+            <textarea id="input" rows="1" aria-label="消息" aria-describedby="composerHint" placeholder="说说你想做什么…"></textarea>
             <div class="composer-bar">
               <div class="composer-meta">
                 <span id="ctxChip" class="muted"></span>
@@ -113,23 +122,29 @@
             </div>
             <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
           </form>
+          <div class="composer-help">
+            <span id="composerHint">Enter 发送 · Shift+Enter 换行</span>
+            <span id="composerState" role="status" aria-live="polite"></span>
+          </div>
         </div>
       </main>
 
-      <section id="drawer" class="drawer" hidden>
+      <section id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="Echo 面板" tabindex="-1" hidden>
         <div class="drawer-head">
-          <div class="tabs" role="tablist">
-            <button class="tab" data-action="tab" data-panel="memory">记忆</button>
-            <button class="tab" data-action="tab" data-panel="proactive">主动服务</button>
-            <button class="tab" data-action="tab" data-panel="settings">设置</button>
+          <div class="tabs" role="tablist" aria-label="面板">
+            <button id="tab-memory" class="tab" role="tab" aria-controls="panelMemory" aria-selected="false" tabindex="-1" data-action="tab" data-panel="memory">记忆</button>
+            <button id="tab-proactive" class="tab" role="tab" aria-controls="panelProactive" aria-selected="false" tabindex="-1" data-action="tab" data-panel="proactive">主动服务</button>
+            <button id="tab-workspace" class="tab" role="tab" aria-controls="panelWorkspace" aria-selected="false" tabindex="-1" data-action="tab" data-panel="workspace">工作区</button>
+            <button id="tab-settings" class="tab" role="tab" aria-controls="panelSettings" aria-selected="false" tabindex="-1" data-action="tab" data-panel="settings">设置</button>
           </div>
           <button class="icon-btn" data-action="close-drawer" aria-label="关闭">
             <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>
-        <div id="panelMemory" class="panel" hidden></div>
-        <div id="panelProactive" class="panel" hidden></div>
-        <div id="panelSettings" class="panel" hidden></div>
+        <div id="panelMemory" class="panel" role="tabpanel" aria-labelledby="tab-memory" tabindex="0" hidden></div>
+        <div id="panelProactive" class="panel" role="tabpanel" aria-labelledby="tab-proactive" tabindex="0" hidden></div>
+        <div id="panelWorkspace" class="panel" role="tabpanel" aria-labelledby="tab-workspace" tabindex="0" hidden></div>
+        <div id="panelSettings" class="panel" role="tabpanel" aria-labelledby="tab-settings" tabindex="0" hidden></div>
       </section>
       <div id="scrim" class="scrim" hidden></div>
     </div>

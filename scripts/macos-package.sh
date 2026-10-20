@@ -27,8 +27,10 @@ fi
 
 command -v swiftc >/dev/null || die "需要 swiftc（xcode-select --install）"
 command -v hdiutil >/dev/null || die "需要 hdiutil（macOS 自带）"
+command -v npm >/dev/null || die "需要 npm 来打包锁定版本的运行依赖"
+[ -f "$ROOT/package-lock.json" ] || die "缺少 package-lock.json"
 
-rm -rf "$STAGE" && mkdir -p "$STAGE" "$OUT"
+rm -rf "$STAGE" && mkdir -p "$STAGE" "$OUT" "$ROOT/build"
 
 # 1) 编译状态栏 App（通用二进制：Apple Silicon + Intel）+ 图标
 info "编译状态栏 App（arm64 + x86_64）…"
@@ -79,9 +81,12 @@ codesign -dv "$APP" 2>&1 | grep -q 'adhoc' && ok "已 ad-hoc 签名（Identifier
 ok "Echo.app 组装完成（$(du -sh "$APP" | awk '{print $1}')）"
 
 # 3) 程序文件 + 安装器
-for item in server.mjs package.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
+for item in server.mjs package.json package-lock.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
   [ -e "$ROOT/$item" ] && cp -R "$ROOT/$item" "$STAGE/$item"
 done
+info "打包锁定版本的运行依赖（安装 DMG 时无需联网下载）…"
+( cd "$STAGE" && npm ci --omit=dev --ignore-scripts ) || die "运行依赖安装失败"
+( cd "$STAGE" && node --input-type=module -e "await import('./lib/mcp.mjs')" ) || die "MCP 运行依赖校验失败"
 rm -rf "$STAGE/tests/last-report.json"
 cp "scripts/macos/Install Echo.command" "$STAGE/"
 cp "scripts/macos/Uninstall Echo.command" "$STAGE/"
@@ -119,8 +124,8 @@ if [ "$VERIFY" = "1" ]; then
     die "安装器在临时 HOME 下失败（见上面输出）"
   fi
   INST="$FAKE_HOME/Apps/Echo"
-  [ -f "$INST/server.mjs" ] && [ -f "$INST/Echo.app/Contents/MacOS/EchoBar" ] && [ -x "$INST/bin/echo" ] || die "安装结果缺少关键文件"
-  ok "装出的内容完整（server.mjs / Echo.app / bin/echo）"
+  [ -f "$INST/server.mjs" ] && [ -f "$INST/package-lock.json" ] && [ -d "$INST/node_modules/@modelcontextprotocol/sdk" ] && [ -f "$INST/Echo.app/Contents/MacOS/EchoBar" ] && [ -x "$INST/bin/echo" ] || die "安装结果缺少关键文件"
+  ok "装出的内容完整（server.mjs / MCP 依赖 / Echo.app / bin/echo）"
 
   info "用装出来的副本跑离线自测…"
   if ( cd "$INST" && node tests/selftest.mjs --json >/tmp/echo-installed-test.json 2>&1 ); then

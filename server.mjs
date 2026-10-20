@@ -14,7 +14,8 @@ import {
   createConversation,
   deleteConversation,
   patchConversation,
-  saveConversation,
+  appendMessage,
+  mutateConversation,
   exportMarkdown,
   truncateFrom,
   mutateState,
@@ -46,6 +47,8 @@ import {
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { proactiveTick, proactiveStatus, recordUserEngagement } from './lib/proactive.mjs'
 import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
+import { listCommitments, createCommitment, updateCommitment, requestPreparation, prepareDueCommitments } from './lib/commitments.mjs'
+import { validateHarnessConfig, listRuns, getRun, decideApproval, artifactFile, recoverRuns, cancelHarnessRuns, clearRuns } from './lib/harness.mjs'
 import { webSearch, searchWithFallback, engineStatus } from './lib/search.mjs'
 import { nativeSearch } from './lib/native.mjs'
 import { generateImage, saveImage, parseDataUrl } from './lib/media.mjs'
@@ -141,6 +144,17 @@ async function ensureLocalToken() {
 function isLoopback(req) {
   const ip = req.socket?.remoteAddress ?? ''
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1'
+}
+
+function isLocalToolsRequest(req) {
+  if (!isLoopback(req)) return false
+  try {
+    const target = new URL(`http://${req.headers.host}`)
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(target.hostname)) return false
+    return !req.headers.origin || new URL(req.headers.origin).origin === target.origin
+  } catch {
+    return false
+  }
 }
 
 function parseCookies(str) {
@@ -276,7 +290,7 @@ async function refreshConfig() {
 
 async function connectMcp() {
   try {
-    mcp.close()
+    await mcp.close()
   } catch {}
   mcp = new McpHub(cfg.mcpServers ?? {})
   if (Object.keys(cfg.mcpServers ?? {}).length) await mcp.connectAll()
@@ -573,17 +587,59 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'settings') {
     const body = await readBody(req)
     let patch = body.config ?? {}
+    if ((patch.harness !== undefined || patch.mcpServers !== undefined || body.restartMcp) && !isLocalToolsRequest(req)) {
+      return send(res, 403, { error: 'local_tools_only', message: '工作区与 MCP 能力只能在本机浏览器配置' })
+    }
+    if (patch.harness !== undefined) patch.harness = await validateHarnessConfig(patch.harness, cfg.harness)
     // 记忆档位是预设：选档就把具体旋钮一次性写实，避免"档位与数值打架"
     if (patch.memory?.profile) patch = applyProfilePatch(patch, patch.memory.profile)
     cfg = await saveConfig(patch)
+    if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns('工具权限已更改，请重新发起')
     if (body.env && typeof body.env === 'object') {
       const written = await writeEnvValues(body.env)
       if (written.length) log.info(`设置页写入密钥：${written.join(',')}`)
     }
-    if (body.restartMcp) await connectMcp()
+    if (patch.mcpServers !== undefined || body.restartMcp) await connectMcp()
     return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
   }
   if (method === 'GET' && p === 'settings') return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
+
+  if (method === 'GET' && p === 'harness') {
+    return send(res, 200, {
+      config: isLocalToolsRequest(req) ? cfg.harness : { ...cfg.harness, workspaceRoot: '' },
+      local: isLocalToolsRequest(req),
+    })
+  }
+  if (method === 'PATCH' && p === 'harness') {
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '请在本机用 localhost 或 127.0.0.1 打开 Echo 来设置工作区' })
+    const body = await readBody(req)
+    const harness = await validateHarnessConfig(body.config ?? body, cfg.harness)
+    if (JSON.stringify(harness) !== JSON.stringify(cfg.harness)) cancelHarnessRuns('工作区权限已更改，请重新发起')
+    cfg = await saveConfig({ harness })
+    return send(res, 200, { config: cfg.harness, local: true })
+  }
+  if (seg[1] === 'runs') {
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '运行记录与工具确认仅在本机提供' })
+    if (method === 'GET' && !seg[2]) return send(res, 200, { runs: await listRuns({ conversationId: url.searchParams.get('conversationId') || undefined }) })
+    if (seg[2]) {
+      const runId = assertId(seg[2])
+      if (method === 'GET' && !seg[3]) return send(res, 200, { run: await getRun(runId) })
+      if (method === 'POST' && seg[3] === 'approvals' && seg[4] && !seg[5]) {
+        const body = await readBody(req)
+        return send(res, 200, await decideApproval(runId, seg[4], body.decision))
+      }
+      if (method === 'GET' && seg[3] === 'artifacts' && seg[4] && seg[5] && !seg[6]) {
+        const artifact = await artifactFile(runId, seg[4], decodeURIComponent(seg[5]))
+        const buffer = await fs.readFile(artifact.file)
+        return send(res, 200, buffer, {
+          'content-type': artifact.mime,
+          'content-disposition': `attachment; filename="${artifact.name}"`,
+          'cache-control': 'no-store',
+        })
+      }
+    }
+    return send(res, 404, { error: 'unknown_run_route' })
+  }
 
   if (method === 'POST' && p === 'conversations') {
     const body = await readBody(req)
@@ -650,21 +706,17 @@ async function api(req, res, url) {
       conversationId: body.conversationId,
     })
     if (body.conversationId) {
-      const conv = await getConversation(assertId(String(body.conversationId)))
-      if (conv) {
-        const msg = {
-          id: newId('m'),
-          role: 'assistant',
-          content: `画好了：${result.prompt}`,
-          images: [{ url: result.path, prompt: result.prompt, model: result.model }],
-          model: result.model,
-          createdAt: nowIso(),
-          usage: result.usage ?? null,
-        }
-        conv.messages.push(msg)
-        await saveConversation(conv)
-        result.message = msg
+      const conversationId = assertId(String(body.conversationId))
+      const msg = {
+        id: newId('m'),
+        role: 'assistant',
+        content: `画好了：${result.prompt}`,
+        images: [{ url: result.path, prompt: result.prompt, model: result.model }],
+        model: result.model,
+        createdAt: nowIso(),
+        usage: result.usage ?? null,
       }
+      if (await appendMessage(conversationId, msg)) result.message = msg
     }
     return send(res, 200, result)
   }
@@ -716,6 +768,7 @@ async function api(req, res, url) {
       const c = await getConversation(m.id)
       if (c) convs.push(c)
     }
+    const state = await readState()
     const bundle = {
       product: 'Echo',
       version: VERSION,
@@ -729,6 +782,10 @@ async function api(req, res, url) {
         forgettingLog: await readForgettingLog({ limit: 200 }),
       },
       agency: await agencyStats(),
+      commitments: state.commitments ?? [],
+      preparations: state.preparations ?? [],
+      commitmentWork: state.commitmentWork ?? { runs: [] },
+      agencyOutcomes: state.agency?.outcomes ?? {},
       note: '凭据（API key / 口令哈希 / 会话 cookie）不在此备份里',
     }
     res.writeHead(200, {
@@ -967,20 +1024,51 @@ async function api(req, res, url) {
   }
 
   if (method === 'GET' && p === 'agency') return send(res, 200, await agencyStats())
+  if (method === 'GET' && p === 'commitments') return send(res, 200, await listCommitments())
+  if (method === 'POST' && p === 'commitments') {
+    const commitment = await createCommitment(await readBody(req))
+    send(res, 201, { commitment })
+    kickPreparation()
+    return
+  }
+  if (seg[1] === 'commitments' && seg[2]) {
+    const id = assertId(seg[2])
+    if (method === 'PATCH' && !seg[3]) {
+      const patch = await readBody(req)
+      const commitment = await updateCommitment(id, patch)
+      if (!commitment) return send(res, 404, { error: '目标不存在' })
+      if (patch.status === 'done') record({ kind: 'commitment_completed', commitmentId: id })
+      send(res, 200, { commitment })
+      if (commitment.status === 'active') kickPreparation()
+      return
+    }
+    if (method === 'POST' && seg[3] === 'prepare' && !seg[4]) {
+      const commitment = await requestPreparation(id)
+      if (!commitment) return send(res, 404, { error: '目标不存在' })
+      send(res, 202, { queued: true, commitment })
+      kickPreparation()
+      return
+    }
+  }
   if (method === 'POST' && p === 'feedback') {
     const body = await readBody(req)
     const conv = body.conversationId ? await getConversation(String(body.conversationId)) : null
     const msg = conv?.messages?.find((m) => m.id === body.messageId)
-    const kind = body.kind ?? msg?.kind ?? null
-    const r = await applyFeedback({ kind, signal: String(body.signal ?? '') })
-    if (msg) msg.feedback = String(body.signal ?? '')
-    if (conv) await saveConversation(conv)
+    const kind = msg?.kind ?? body.kind ?? null
+    const r = await applyFeedback({
+      kind, signal: String(body.signal ?? ''), conversationId: body.conversationId,
+      messageId: body.messageId, commitmentId: body.commitmentId, preparationId: body.preparationId,
+    })
+    if (msg && !r.ignored) await mutateConversation(conv.id, (current) => {
+      const target = current.messages.find((m) => m.id === msg.id)
+      if (target) target.feedback = String(body.signal ?? '')
+    })
     return send(res, 200, { ok: true, ...r, agency: await agencyStats() })
   }
 
   if (method === 'GET' && p === 'proactive') return send(res, 200, await proactiveStatus())
   if (method === 'POST' && p === 'proactive/run') {
-    const result = await proactiveTick({ busyConversations: new Set() })
+    const result = await proactiveTick({ busyConversations: () => new Set(inflight.keys()) })
     return send(res, 200, { result, status: await proactiveStatus() })
   }
   if (method === 'PATCH' && p === 'proactive') {
@@ -1004,6 +1092,8 @@ async function api(req, res, url) {
 
   if (method === 'GET' && p === 'mcp') return send(res, 200, { servers: mcp.status(), tools: mcp.tools() })
   if (method === 'POST' && p === 'mcp/reload') {
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
+    cancelHarnessRuns('MCP 连接正在重新加载')
     await refreshConfig()
     return send(res, 200, { servers: await connectMcp() })
   }
@@ -1018,6 +1108,15 @@ function upstreamReady() {
 
 /** 隐私兜底：把记忆（可选连同会话）清空，但在遗忘日志里留一条可解释的记录。 */
 async function wipeEverything({ includeConversations = false } = {}) {
+  await clearRuns()
+  // Revoke background work before any file I/O so an in-flight run cannot restore it.
+  await mutateState((s) => {
+    s.commitments = []
+    s.preparations = []
+    s.commitmentWork = { runs: [] }
+    return s
+  })
+  if (includeConversations) for (const ctrl of inflight.values()) ctrl.abort()
   const memDir = path.join(DATA, 'memory')
   const before = await memoryStats()
   const counts = { observations: before.observations, conversations: 0 }
@@ -1033,13 +1132,11 @@ async function wipeEverything({ includeConversations = false } = {}) {
   if (includeConversations) {
     for (const m of await listConversations()) {
       if (m.id === MAIN_ID) {
-        const conv = await getConversation(MAIN_ID)
-        if (conv) {
+        await mutateConversation(MAIN_ID, (conv) => {
           conv.messages = []
           conv.digest = null
           conv.title = '主对话'
-          await saveConversation(conv)
-        }
+        })
         continue
       }
       await deleteConversation(m.id)
@@ -1050,6 +1147,10 @@ async function wipeEverything({ includeConversations = false } = {}) {
     s.dream = { loops: [], nudges: [], at: null }
     s.proactive = { history: [], daily: { date: null, count: 0 }, consecutiveIgnores: 0 }
     s.agency = {}
+    s.attention = {}
+    s.commitments = []
+    s.preparations = []
+    s.commitmentWork = { runs: [] }
     return s
   })
   return counts
@@ -1116,6 +1217,8 @@ function publicConfig(c) {
     storage: c.storage,
     dream: c.dream,
     proactive: c.proactive,
+    attention: c.attention,
+    harness: c.harness,
     mcpServers: Object.fromEntries(Object.entries(c.mcpServers ?? {}).map(([k, v]) => [k, { type: v.type, enabled: v.enabled !== false, url: v.url, command: v.command, args: v.args }])),
   }
 }
@@ -1227,6 +1330,10 @@ async function streamChatHandler(req, res) {
       signal: ctrl.signal,
       mcp,
       images: attachments.map((a) => a.url),
+      allowLocalTools: isLocalToolsRequest(req),
+      onToolEvent: (event) => {
+        if (!res.writableEnded && !res.destroyed) sseWrite(res, event.type, event)
+      },
     })) {
       if (ev.type === 'tool_result') {
         toolCount++
@@ -1342,6 +1449,10 @@ async function readDreamState() {
 
 let proactiveBusy = false
 let lastProactiveAttempt = 0
+function kickPreparation() {
+  prepareDueCommitments().catch((err) => log.warn('目标准备失败', err.message))
+}
+const preparationTimer = setInterval(kickPreparation, 60000)
 const proactiveTimer = setInterval(async () => {
   try {
     if (!cfg.proactive.enabled || proactiveBusy) return
@@ -1350,7 +1461,7 @@ const proactiveTimer = setInterval(async () => {
     if (Date.now() - lastProactiveAttempt < tickMs) return
     lastProactiveAttempt = Date.now()
     proactiveBusy = true
-    const result = await proactiveTick({ busyConversations: new Set(inflight.keys()) })
+    const result = await proactiveTick({ busyConversations: () => new Set(inflight.keys()) })
     if (!result.acted && result.skipped !== 'quiet_hours' && result.skipped !== 'disabled') log.debug('主动服务跳过:', result.skipped)
   } catch (err) {
     log.error('主动服务调度异常', err.message)
@@ -1365,6 +1476,7 @@ async function boot() {
   await fs.mkdir(path.join(P.convDir), { recursive: true })
   await fs.mkdir(P.logs, { recursive: true })
   await ensureStorageDirs()
+  await recoverRuns()
   await ensureLocalToken()
   const envResult = await loadEnvFile(P.env)
   await ensureCore()
@@ -1394,6 +1506,7 @@ async function boot() {
   for (const ip of bind === '0.0.0.0' ? ips : []) log.info(`  局域网 http://${ip}:${port}`)
   log.info(`  上游   ${upstreamCreds().baseUrl} · key=${upstreamCreds().apiKey ? '已配置' : '缺失'} · 模型=${cfg.upstream.defaultModel}`)
   log.info(`  记忆   ${JSON.stringify(await memoryStats())}`)
+  kickPreparation()
 }
 
 function lanAddresses() {
@@ -1413,9 +1526,11 @@ async function shutdown(signal) {
   log.info(`收到 ${signal}，正在退出`)
   clearInterval(tick)
   clearInterval(proactiveTimer)
+  clearInterval(preparationTimer)
   for (const [, ctrl] of inflight) ctrl.abort()
+  cancelHarnessRuns('服务正在停止')
   try {
-    mcp.close()
+    await mcp.close()
   } catch {}
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 4000)

@@ -52,9 +52,20 @@ ok "Node: $NODE ($("$NODE" -v))"
 
 # ── 2. 复制文件 ─────────────────────────────────────────────────────
 mkdir -p "$TARGET"
-for item in server.mjs package.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
-  [ -e "$SRC/$item" ] && rm -rf "$TARGET/$item" && cp -R "$SRC/$item" "$TARGET/$item"
+for item in server.mjs package.json package-lock.json node_modules bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md; do
+  if [ -e "$SRC/$item" ]; then
+    rm -rf "$TARGET/$item" && cp -R "$SRC/$item" "$TARGET/$item" || die "复制失败：$item"
+  fi
 done
+[ -f "$TARGET/package-lock.json" ] || die "缺少依赖锁文件，请重新下载完整发行包"
+if [ ! -d "$SRC/node_modules/@modelcontextprotocol/sdk" ]; then
+  NPM="$(dirname "$NODE")/npm"
+  [ -x "$NPM" ] || NPM="$(command -v npm || true)"
+  [ -n "$NPM" ] || die "此发行包未包含运行依赖，需要 npm（随 Node.js 安装）"
+  info "安装锁定版本的运行依赖…"
+  ( cd "$TARGET" && PATH="$(dirname "$NODE"):$PATH" "$NPM" ci --omit=dev --ignore-scripts ) || die "运行依赖安装失败"
+fi
+( cd "$TARGET" && "$NODE" --input-type=module -e "await import('./lib/mcp.mjs')" ) || die "MCP 运行依赖不完整，请重新下载安装包"
 chmod +x "$TARGET/bin/echo" "$TARGET/bin/echo" 2>/dev/null
 [ -e "$SRC/docs" ] && true
 mkdir -p "$TARGET/data/logs"
