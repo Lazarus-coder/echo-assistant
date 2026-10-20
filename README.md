@@ -25,7 +25,7 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 |---|---|
 | **Work through a question** | Discuss ideas, refine a prompt, search for sources, and revisit a conversation. Image input and generation are available when supported by your selected models. |
 | **Prepare for a goal** | Define the outcome and next step. With background research enabled, use public sources, attached documents, and selected folders to prepare findings and follow relevant dates or source changes. |
-| **Work on a project** | Connect a local workspace to read files and, with the relevant permissions enabled, edit them or run commands. Review tool activity and saved execution records as you go. |
+| **Work on a project** | Connect a local workspace to read files and, with the relevant permissions enabled, edit them or run commands. Follow the current step and outcome, then return to saved steps and outputs. |
 
 ## Context that stays useful
 

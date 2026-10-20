@@ -1414,7 +1414,7 @@ async function streamChatHandler(req, res) {
       model: doneEvt?.message?.model ?? body.model ?? cfg.upstream.defaultModel,
       rounds: doneEvt?.rounds ?? 1,
       ms: Date.now() - startedAt,
-      ok: Boolean(doneEvt) && !failedTools,
+      ok: doneEvt?.message?.runStatus === 'completed' && !failedTools,
       aborted: Boolean(doneEvt?.aborted),
       tools: toolCount,
       failedTools,
@@ -1425,7 +1425,8 @@ async function streamChatHandler(req, res) {
     })
     const conv = await getConversation(conversationId)
     const assistant = conv?.messages?.at(-1)
-    if (assistant?.role === 'assistant' && !body.regenerate) {
+    const emptyStoppedReply = !assistant?.content?.trim() && ['failed', 'cancelled'].includes(assistant?.runStatus)
+    if (assistant?.role === 'assistant' && !body.regenerate && !emptyStoppedReply) {
       const user = [...(conv?.messages ?? [])].reverse().find((m) => m.role === 'user')
       if (conv && conv.messages.filter((m) => m.role === 'user').length === 1 && conv.title === '新对话') {
         generateTitle(conversationId, user?.content ?? '', assistant.content).catch(() => {})

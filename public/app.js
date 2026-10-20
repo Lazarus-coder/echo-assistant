@@ -323,7 +323,7 @@ function messageNode(m) {
       </div>
       ${m.reasoning ? `<details class="fold reasoning"><summary>思考过程 · ${m.reasoning.length} 字</summary><div class="fold-body">${esc(m.reasoning)}</div></details>` : ''}
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
-      ${m.runId ? `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
+      ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
       <div class="content"></div>
       ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
       ${imageGallery(m.images)}
@@ -348,6 +348,65 @@ function renderSteps(tools) {
 }
 
 const RUN_STATUS = { pending: '待执行', awaiting_approval: '等待确认', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已停止', interrupted: '已中断', limit_reached: '已达执行上限', denied: '已拒绝', timed_out: '已超时' }
+function messageRun(message) {
+  let status = message.runStatus
+  if (!status) {
+    if (message.aborted) status = 'cancelled'
+    else if (message.finishReason === 'tool_limit') status = 'limit_reached'
+    else if (message.toolsFinished) status = (message.tools ?? []).some((tool) => tool.ok === false) ? 'failed' : 'completed'
+    else status = 'unknown'
+  }
+  return {
+    id: message.runId, steps: message.tools ?? [], error: message.runError,
+    status,
+  }
+}
+function runFeedbackHtml(run) {
+  const steps = run.steps ?? []
+  const state = (step) => step.status ?? (step.ok === false ? 'failed' : step.ok === true || step.ms != null ? 'completed' : 'pending')
+  const waiting = steps.find((step) => state(step) === 'awaiting_approval')
+  const active = waiting ?? steps.find((step) => state(step) === 'running')
+  const status = run.status === 'running' && waiting ? 'awaiting_approval' : run.status
+  const labels = { running: '正在执行', awaiting_approval: '等待你的确认', completed: '本轮执行已完成', failed: '本轮执行有失败', cancelled: '本轮执行已停止', stop_requested: '已请求停止', interrupted: '执行状态待核实', limit_reached: '已达到执行上限' }
+  const counts = [
+    [steps.filter((step) => state(step) === 'completed').length, '完成'],
+    [steps.filter((step) => ['failed', 'timed_out'].includes(state(step))).length, '失败'],
+    [steps.filter((step) => state(step) === 'denied').length, '拒绝'],
+    [steps.filter((step) => state(step) === 'cancelled').length, '停止'],
+  ].filter(([count]) => count).map(([count, label]) => `${label} ${count} 步`)
+  const notes = {
+    completed: '结果已保留，可查看每一步的输入、输出与文件。',
+    failed: '已完成的步骤与输出仍会保留。请先查看失败原因，再决定是否继续。',
+    cancelled: '后续执行已停止；已完成的操作不会自动撤销。',
+    stop_requested: '服务已收到停止请求，最终状态请查看执行记录；已完成的操作不会自动撤销。',
+    interrupted: '连接已中断，最终状态尚未确认。查看执行记录后再继续。',
+    limit_reached: '剩余步骤尚未执行。已生成的输出可在执行记录中查看。',
+    unknown: '这是历史执行记录，最终状态请以执行详情为准。',
+  }
+  const current = ['running', 'awaiting_approval'].includes(status)
+    ? active ? `${status === 'awaiting_approval' ? '待确认' : '当前步骤'}：${active.label || active.name || '工具调用'}` : run.phase || '正在准备下一步'
+    : notes[status] ?? '查看执行记录了解详情。'
+  return `<div class="run-feedback-heading"><span class="run-feedback-dot" aria-hidden="true"></span><strong>${esc(labels[status] ?? RUN_STATUS[status] ?? '执行记录')}</strong></div>
+    <p class="run-feedback-count">${steps.length ? `已记录 ${steps.length} 步${counts.length ? ` · ${counts.join(' · ')}` : ''}` : '尚未调用工具'}</p>
+    <p class="run-feedback-detail">${esc(current)}</p>
+    ${run.error && status !== 'cancelled' ? `<p class="err">${esc(toolText(run.error))}</p>` : ''}`
+}
+function runCardHtml(run) {
+  return `<section class="run-feedback" data-state="${esc(run.status ?? 'unknown')}" aria-label="任务执行状态">
+    <div class="run-feedback-body" role="status" aria-live="polite" aria-atomic="true">${runFeedbackHtml(run)}</div>
+    <button class="btn small run-link" data-action="view-run" data-id="${esc(run.id)}">查看步骤与结果</button></section>`
+}
+function updateRunFeedback(node, run) {
+  let card = $('.run-feedback', node)
+  if (!card) {
+    $('.run-link', node)?.remove()
+    $('.content', node).insertAdjacentHTML('beforebegin', runCardHtml(run))
+    return
+  }
+  card.dataset.state = run.status ?? 'unknown'
+  const body = $('.run-feedback-body', card), html = runFeedbackHtml(run)
+  if (body.innerHTML !== html) body.innerHTML = html
+}
 function toolText(value) { return value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
 function toolOutputText(value) {
   let parsed = value
@@ -1030,7 +1089,7 @@ async function startStream({ userText, regenerate = false, editId }) {
   updateRegenerateButtons()
   const contentEl = $('.content', node)
   const stepsHost = { tools: [] }
-  const st = { buffer: '', reasoning: '', ctrl: new AbortController(), node, contentEl, sources: [], notices: [], searchMode: $('#searchSelect').value }
+  const st = { conversationId, buffer: '', reasoning: '', ctrl: new AbortController(), node, contentEl, sources: [], notices: [], searchMode: $('#searchSelect').value }
   S.stream = st
   setBusy(true)
   contentEl.innerHTML = '<span class="cursor"></span>'
@@ -1114,12 +1173,14 @@ async function startStream({ userText, regenerate = false, editId }) {
         }
         break
       case 'reasoning':
+        st.phase = '正在思考下一步'
         st.status = 'Echo 正在思考…'
         updateComposer()
         st.reasoning += d.text
         openReasoning()
         break
       case 'delta':
+        st.phase = '正在整理回复'
         if (st.status !== 'Echo 正在回复…') {
           st.status = 'Echo 正在回复…'
           updateComposer()
@@ -1177,6 +1238,7 @@ async function startStream({ userText, regenerate = false, editId }) {
         break
       }
       case 'tool_result': {
+        st.phase = '正在整理结果，准备下一步'
         const t = stepsHost.tools.find((x) => x.id === d.id)
         if (t) {
           t.ok = d.ok
@@ -1214,11 +1276,16 @@ async function startStream({ userText, regenerate = false, editId }) {
         break
       case 'done':
         st.done = d
+        st.runStatus = d.message?.runStatus ?? st.runStatus
         break
       case 'error':
         st.error = d.message
+        st.failedMessage = d.assistant
+        if (d.assistant?.runId) st.runId = d.assistant.runId
+        st.runStatus = d.assistant?.runStatus ?? 'failed'
         break
     }
+    if (st.runId && (stepsHost.tools.length || st.runStatus && st.runStatus !== 'completed')) updateRunFeedback(node, { id: st.runId, status: st.runStatus ?? 'running', steps: stepsHost.tools, phase: st.phase, error: st.error })
   }
 
   function openReasoning() {
@@ -1246,10 +1313,12 @@ async function startStream({ userText, regenerate = false, editId }) {
   async function finishStream(st) {
     st.finished = true
     const d = st.done
-    const finalText = d?.message?.content ?? st.buffer
+    const message = d?.message ?? st.failedMessage
+    const finalText = message?.content ?? st.buffer
+    const confirmedCancelled = message?.runStatus === 'cancelled' || st.runStatus === 'cancelled' || d?.aborted === true
     if (!d && !st.error && !st.ctrl.signal.aborted) st.error = '连接中断，回复可能不完整，请重试'
     st.contentEl.innerHTML = md(finalText) + (st.error ? `<div class="err" role="alert">${esc(st.error)}</div>` : '')
-    if (!finalText.trim() && !st.error) st.contentEl.innerHTML = `<p class="muted">${d?.aborted || st.ctrl.signal.aborted ? '已停止生成' : '（没有内容）'}</p>`
+    if (!finalText.trim() && !st.error) st.contentEl.innerHTML = `<p class="muted">${confirmedCancelled ? '已停止生成' : st.ctrl.signal.aborted ? '回复连接已断开，执行结果请查看记录' : '（没有内容）'}</p>`
     if (st.reasoning) {
       const el = $('details.reasoning', node)
       if (el) {
@@ -1259,10 +1328,14 @@ async function startStream({ userText, regenerate = false, editId }) {
       }
     }
     const sources = d?.sources?.length ? d.sources : st.sources
-    renderTail(node, { ...(d?.message ?? {}), usage: d?.usage, sources, searchMode: st.searchMode, aborted: d?.aborted || st.ctrl.signal.aborted })
+    renderTail(node, { ...(message ?? {}), usage: d?.usage ?? message?.usage, sources, searchMode: st.searchMode, aborted: confirmedCancelled })
+    if (st.runId && (stepsHost.tools.length || st.error || d?.aborted || st.ctrl.signal.aborted)) {
+      // A closed connection is not proof that a tool stopped on the server.
+      const status = message?.runStatus ?? st.runStatus ?? (d?.aborted ? 'cancelled' : d ? messageRun(message ?? {}).status : st.stopRequested ? 'stop_requested' : 'interrupted')
+      updateRunFeedback(node, { id: st.runId, status, steps: message?.tools ?? stepsHost.tools, error: message?.runError ?? st.error })
+    }
     S.stream = null
-    $$('[data-approval-id]', node).forEach((card) => settleApproval(card.dataset.approvalId, st.ctrl.signal.aborted ? 'cancelled' : 'interrupted'))
-    if (st.runStatus && st.runStatus !== 'completed') $('.tail', node).insertAdjacentHTML('beforeend', `<p class="muted small">执行状态：${esc(RUN_STATUS[st.runStatus] ?? st.runStatus)}。已保存的输出可在执行记录中查看。</p>`)
+    $$('[data-approval-id]', node).forEach((card) => settleApproval(card.dataset.approvalId, confirmedCancelled ? 'cancelled' : 'interrupted'))
     setBusy(false)
     try { await refreshList() } catch (err) { toast(`会话列表更新失败：${err.message}`, true) }
     if (S.boot) {
@@ -1279,6 +1352,25 @@ function setBusy(busy) {
   $('#sendBtn').textContent = busy ? '生成中' : '发送'
   document.body.classList.toggle('busy', busy)
   updateComposer()
+}
+
+async function stopReply() {
+  const stream = S.stream
+  if (!stream || stream.stopping) return
+  stream.stopping = true
+  const previousStatus = stream.status
+  stream.status = '正在请求停止…'
+  updateComposer()
+  try {
+    const result = await api('chat/stop', { method: 'POST', body: { conversationId: stream.conversationId } })
+    stream.stopRequested = result.stopped === true
+    stream.ctrl.abort()
+  } catch (err) {
+    stream.stopping = false
+    stream.status = previousStatus
+    if (S.stream === stream) updateComposer()
+    toast(`停止请求失败：${err.message}，可以重试`, true)
+  }
 }
 
 /* --------------------------------- panels ---------------------------------- */
@@ -1431,15 +1523,15 @@ async function saveWorkspaceForm(form) {
 }
 
 function runStepHtml(runId, step, workspaceRoot) {
-  const output = step.approval?.status === 'denied' ? '已拒绝本次操作，未执行。' : toolOutputText(step.result ?? step.error ?? step.output)
-  return `<details class="run-step" data-step-id="${esc(step.id)}" ${step.status === 'awaiting_approval' ? 'open' : ''}><summary>${esc(step.name || '工具')} <span class="muted small">${esc(toolStatus(step))}${step.exitCode != null ? ` · 退出码 ${esc(step.exitCode)}` : ''}</span></summary>
+  const output = step.approval?.status === 'denied' ? '已拒绝本次操作，未执行。' : toolOutputText(step.result === '' ? step.output : step.result ?? step.output)
+  return `<details class="run-step" data-step-id="${esc(step.id)}" ${step.status === 'awaiting_approval' ? 'open' : ''}><summary>${esc(step.name || '工具')} <span class="muted small">${esc(toolStatus(step))}${step.ms != null ? ` · ${esc(step.ms)} ms` : ''}${step.exitCode != null ? ` · 退出码 ${esc(step.exitCode)}` : ''}</span></summary>
     <h4>完整输入</h4><pre class="run-code">${esc(toolText(step.args))}</pre>
     ${approvalHtml(runId, { ...step, workspaceRoot })}
     ${output ? `<h4>输出${output.length > 12000 ? '（显示末尾 12,000 字符）' : ''}</h4><pre class="run-code">${esc(output.slice(-12000))}</pre>` : ''}
     ${step.truncated ? '<p class="muted small">输出达到记录上限，记录可能不完整。</p>' : ''}
     ${artifactLinks(step.artifacts)}
     ${(step.changes ?? []).length ? `<p class="small">已修改：${step.changes.map((change) => esc(change.path)).join('、')}。上方可下载修改前后的快照。</p>` : ''}
-    ${step.error && step.result ? `<p class="err">${esc(toolText(step.error))}</p>` : ''}</details>`
+    ${step.error ? `<p class="err">${esc(toolText(step.error))}</p>` : ''}</details>`
 }
 
 async function refreshRuns({ force = false } = {}) {
@@ -1477,11 +1569,24 @@ async function inspectRun(id, { poll = false } = {}) {
   const inspector = $('#runInspector')
   if (!inspector) return
   const key = JSON.stringify(run)
-  if (poll && (inspector.dataset.key === key || inspector.contains(document.activeElement))) return
+  if (poll && inspector.dataset.key === key) return
+  const selection = document.getSelection?.()
+  const hasSelection = selection && !selection.isCollapsed
+  const selectingOutput = hasSelection && (inspector.contains(selection.anchorNode) || inspector.contains(selection.focusNode))
+  if (poll && (selectingOutput || document.activeElement !== inspector && inspector.contains(document.activeElement))) {
+    // Keep selected output and focused controls mounted while still reporting progress.
+    const feedback = $('.run-feedback-body', inspector)
+    const html = runFeedbackHtml(run)
+    const selectingFeedback = feedback && hasSelection && (feedback.contains(selection.anchorNode) || feedback.contains(selection.focusNode))
+    if (feedback && !selectingFeedback && feedback.innerHTML !== html) feedback.innerHTML = html
+    const card = $('.run-feedback', inspector)
+    if (card) card.dataset.state = run.status
+    return
+  }
   const openSteps = new Set($$('details[open]', inspector).map((details) => details.dataset.stepId))
-  inspector.innerHTML = `<h3>执行详情 · ${esc(RUN_STATUS[run.status] ?? run.status)}</h3>
+  inspector.innerHTML = `<h3>执行详情</h3>
+    <div class="run-feedback" data-state="${esc(run.status)}"><div class="run-feedback-body" role="status" aria-live="polite" aria-atomic="true">${runFeedbackHtml(run)}</div></div>
     <p class="muted small">${esc(run.workspaceRoot ?? '')}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
-    ${run.error ? `<p class="err" role="status">${esc(toolText(run.error))}</p>` : ''}
     ${(run.steps ?? []).map((step) => runStepHtml(id, step, run.workspaceRoot)).join('') || '<p class="muted small">尚未调用工具。</p>'}
     ${artifactLinks(run.artifacts)}`
   inspector.dataset.key = key
@@ -2909,11 +3014,7 @@ async function handleAction(e) {
     return startStream({ userText: text, editId })
   }
   if (act === 'regen') return startStream({ regenerate: true })
-  if (act === 'stop') {
-    await api('chat/stop', { method: 'POST', body: { conversationId: S.current } })
-    S.stream?.ctrl.abort()
-    return
-  }
+  if (act === 'stop') return stopReply()
   if (act === 'fb') {
     const signal = btn.dataset.signal
     const r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId: S.current, messageId: btn.dataset.id } })
@@ -3339,7 +3440,7 @@ document.addEventListener('keydown', (e) => {
   const meta = e.metaKey || e.ctrlKey
   if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat() }
   if (meta && e.key === '/') { e.preventDefault(); toggleSidebar() }
-  if (e.key === 'Escape') { if (!$('#drawer').hidden) closeDrawer(); else if (!matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open') toggleSidebar(); else if (S.stream) { api('chat/stop', { method: 'POST', body: { conversationId: S.current } }); S.stream.ctrl.abort() } }
+  if (e.key === 'Escape') { if (!$('#drawer').hidden) closeDrawer(); else if (!matchMedia('(min-width: 861px)').matches && $('#app').dataset.sidebar === 'open') toggleSidebar(); else if (S.stream) stopReply() }
   if (meta && e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); document.querySelector('[data-action="dream-now"]')?.click() }
   if (meta && e.key.toLowerCase() === 'm') { e.preventDefault(); openPanel('memory') }
   if (meta && e.shiftKey && e.key.toLowerCase() === 'p') { e.preventDefault(); document.querySelector('[data-action="polish"]')?.click() }

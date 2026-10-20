@@ -71,6 +71,67 @@ test('tool history shows structured output, failed status, exit code and before/
   assert.doesNotMatch(html, /\[object Object\]|<script>/)
 })
 
+test('failed tool history preserves the error when its recorded output is empty', () => {
+  const h = harness()
+  const step = { id: 'step_1', name: 'workspace_read', args: { path: 'notes.md' }, status: 'failed', result: '', error: 'Permission denied: <script>notes.md</script>' }
+  const html = h.run(`runStepHtml('run_1', ${JSON.stringify(step)})`)
+  assert.match(html, /失败/)
+  assert.match(html, /Permission denied: &lt;script&gt;notes\.md&lt;\/script&gt;/)
+  assert.equal((html.match(/Permission denied/g) ?? []).length, 1, 'The error should be visible once even without tool output')
+  assert.doesNotMatch(html, /<script>/)
+})
+
+test('run feedback distinguishes waiting, running and terminal outcomes without invented percentages', () => {
+  const h = harness()
+  for (const [status, label, explanation] of [
+    ['awaiting_approval', '等待你的确认'],
+    ['running', '正在执行'],
+    ['completed', '本轮执行已完成', '结果已保留'],
+    ['failed', '本轮执行有失败', '查看失败原因'],
+    ['cancelled', '本轮执行已停止', '已完成的操作不会自动撤销'],
+    ['limit_reached', '已达到执行上限', '剩余步骤尚未执行'],
+    ['interrupted', '执行状态待核实', '最终状态尚未确认'],
+  ]) {
+    const html = h.run(`runFeedbackHtml(${JSON.stringify({ id: 'run_1', status, steps: [] })})`)
+    assert.ok(html.includes(label), `${status} should have a readable, distinct outcome`)
+    if (explanation) assert.ok(html.includes(explanation), `${status} should explain what the user can expect next`)
+    assert.doesNotMatch(html, /\d+(?:\.\d+)?\s*%/, 'Tool counts do not establish a task completion percentage')
+    if (status !== 'completed') assert.doesNotMatch(html, /本轮执行已完成/, 'An unsuccessful or unfinished run must not be presented as complete')
+  }
+})
+
+test('run feedback reports observed step counts and the pending approval with escaped tool text', () => {
+  const h = harness()
+  const run = {
+    id: 'run_1', status: 'running',
+    steps: [
+      { id: 'step_1', name: 'workspace_read', status: 'completed' },
+      { id: 'step_2', name: 'workspace_edit', status: 'failed' },
+      { id: 'step_3', name: '<img src=x onerror=alert(1)>', status: 'awaiting_approval' },
+    ],
+  }
+  const html = h.run(`runFeedbackHtml(${JSON.stringify(run)})`)
+  assert.match(html, /已记录 3 步/)
+  assert.match(html, /完成 1 步/)
+  assert.match(html, /失败 1 步/)
+  assert.match(html, /等待你的确认/)
+  assert.match(html, /待确认：&lt;img src=x onerror=alert\(1\)&gt;/)
+  assert.doesNotMatch(html, /<img|正在执行|\d+(?:\.\d+)?\s*%/)
+  run.steps[2].status = 'running'
+  const running = h.run(`runFeedbackHtml(${JSON.stringify(run)})`)
+  assert.match(running, /正在执行/)
+  assert.match(running, /当前步骤：&lt;img src=x onerror=alert\(1\)&gt;/)
+  assert.doesNotMatch(running, /<img|等待你的确认|\d+(?:\.\d+)?\s*%/)
+})
+
+test('run feedback escapes the failure explanation', () => {
+  const h = harness()
+  const run = { id: 'run_1', status: 'failed', steps: [], error: 'Cannot read <img src=x onerror=alert(1)> & retry' }
+  const html = h.run(`runFeedbackHtml(${JSON.stringify(run)})`)
+  assert.match(html, /Cannot read &lt;img src=x onerror=alert\(1\)&gt; &amp; retry/)
+  assert.doesNotMatch(html, /<img/)
+})
+
 test('shell and file output use readable lines without losing stderr or termination reason', () => {
   const h = harness()
   const shell = h.run(`toolOutputText(${JSON.stringify(JSON.stringify({ stdout: 'first\nsecond', stderr: 'failure\n', reason: 'timeout' }))})`)
@@ -180,14 +241,55 @@ test('run detail responses cannot replace a newer selected run', async () => {
   assert.doesNotMatch(h.get('#runInspector').innerHTML, /\/tmp\/old/)
 })
 
-test('focused run inspector stays mounted during background polling', async () => {
+test('focusing the run inspector itself does not freeze its completion state', async () => {
   const h = harness()
   const inspector = h.get('#runInspector')
+  inspector.innerHTML = '执行中'
+  h.document.activeElement = inspector
+  inspector.contains = (node) => node === inspector
+  h.run('WORKSPACE.local = true; S.panel = "workspace"; api = async () => ({run:{id:"run1",status:"completed",steps:[]}})')
+  await h.run('inspectRun("run1", {poll:true})')
+  assert.match(inspector.innerHTML, /已完成/)
+  assert.equal(h.document.activeElement, inspector)
+})
+
+test('focused run output stays mounted while background polling updates its feedback', async () => {
+  const h = harness()
+  const inspector = h.get('#runInspector')
+  const focusedOutput = element()
+  const feedback = element()
   inspector.innerHTML = 'selected output'
-  inspector.contains = () => true
+  feedback.innerHTML = '执行中'
+  h.document.activeElement = focusedOutput
+  inspector.contains = (node) => node === inspector || node === focusedOutput
+  inspector.querySelector = (selector) => selector === '.run-feedback-body' ? feedback : null
   h.run('WORKSPACE.local = true; S.panel = "workspace"; api = async () => ({run:{id:"run1",status:"completed",steps:[]}})')
   await h.run('inspectRun("run1", {poll:true})')
   assert.equal(inspector.innerHTML, 'selected output')
+  assert.match(feedback.innerHTML, /已完成/)
+  assert.equal(h.document.activeElement, focusedOutput)
+})
+
+test('a mouse selection in run output survives polling while the feedback still completes', async () => {
+  const h = harness()
+  const inspector = h.get('#runInspector'), output = element(), feedback = element(), card = element()
+  const text = { nodeType: 3, textContent: 'selected command output', parentNode: output }
+  const selection = { isCollapsed: false, anchorNode: text, focusNode: text, anchorOffset: 0, focusOffset: 8 }
+  inspector.innerHTML = '<pre>selected command output</pre>'
+  feedback.innerHTML = '正在执行'
+  card.dataset.state = 'running'
+  h.document.activeElement = h.document.body
+  h.document.getSelection = () => selection
+  inspector.contains = (node) => node === inspector || node === output || node === text
+  inspector.querySelector = (selector) => selector === '.run-feedback-body' ? feedback : selector === '.run-feedback' ? card : null
+  h.run('WORKSPACE.local = true; S.panel = "workspace"; api = async () => ({run:{id:"run1",status:"completed",steps:[]}})')
+  await h.run('inspectRun("run1", {poll:true})')
+  assert.equal(inspector.innerHTML, '<pre>selected command output</pre>', 'Polling must not replace the selected output')
+  assert.match(feedback.innerHTML, /本轮执行已完成/)
+  assert.equal(card.dataset.state, 'completed')
+  assert.equal(h.document.activeElement, h.document.body, 'Updating feedback must not steal focus')
+  assert.equal(h.document.getSelection().anchorNode, text)
+  assert.equal(h.document.getSelection().focusOffset, 8)
 })
 
 let failures = 0

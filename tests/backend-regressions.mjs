@@ -22,6 +22,7 @@ const { loadConfig, saveConfig } = await import('../lib/config.mjs')
 const store = await import('../lib/store.mjs')
 const { updateDigest } = await import('../lib/context.mjs')
 const { runTurn } = await import('../lib/chat.mjs')
+const { getRun } = await import('../lib/harness.mjs')
 const { webFetch } = await import('../lib/search.mjs')
 const cfg = await loadConfig()
 const originalFetch = globalThis.fetch
@@ -194,7 +195,12 @@ try {
     }
     assert.equal(done?.aborted, true)
     assert.equal(done?.message.content, 'Keep this partial answer')
-    assert.equal((await store.getConversation(conv.id)).messages.at(-1).content, 'Keep this partial answer')
+    const saved = (await store.getConversation(conv.id)).messages.at(-1)
+    assert.deepEqual(saved, JSON.parse(JSON.stringify(done.message)))
+    assert.equal(saved.runStatus, 'cancelled')
+    const run = await getRun(saved.runId)
+    assert.equal(run.status, saved.runStatus)
+    assert.equal(run.error, saved.runError)
   })
 
   await test('successful replies persist each streamed fragment exactly once', async () => {
@@ -205,10 +211,70 @@ try {
     ])
     const conv = await store.createConversation()
     const { events } = await collect(runTurn({ conversationId: conv.id, userText: 'Question' }))
-    assert.equal(events.find((e) => e.type === 'done')?.message.content, 'Hello world')
+    const done = events.find((e) => e.type === 'done')
+    assert.equal(done?.message.content, 'Hello world')
     const saved = await store.getConversation(conv.id)
-    assert.equal(saved.messages.at(-1).content, 'Hello world')
+    assert.deepEqual(saved.messages.at(-1), JSON.parse(JSON.stringify(done.message)))
+    assert.equal(done.message.runStatus, 'completed')
+    assert.equal(done.message.runError, undefined)
+    assert.equal((await getRun(done.message.runId)).status, 'completed')
     assert.equal(events.find((e) => e.type === 'meta')?.userMessageId, saved.messages[0].id)
+  })
+
+  for (const partial of ['', 'Keep the partial result.']) {
+    await test(`upstream failure persists its outcome ${partial ? 'after partial text' : 'before any text'}`, async () => {
+      globalThis.fetch = async () => streamingResponse([
+        ...(partial ? [`data: ${delta(partial)}\n\n`] : []),
+        'data: {"error":{"message":"Model request rejected"}}\n\n',
+      ])
+      const conv = await seededConversation()
+      const completed = []
+      const snapshots = []
+      const { events } = await collect(runTurn({
+        conversationId: conv.id, userText: 'Continue',
+        onToolEvent: (event) => {
+          if (event.type === 'run_complete') {
+            completed.push(event)
+            snapshots.push(store.getConversation(conv.id))
+          }
+        },
+      }))
+      const failure = events.find((event) => event.type === 'error')
+      const saved = (await store.getConversation(conv.id)).messages.at(-1)
+      assert.equal(events.some((event) => event.type === 'done'), false)
+      assert.equal(failure.message, 'Model request rejected')
+      assert.equal(saved.role, 'assistant')
+      assert.equal(saved.runStatus, 'failed')
+      assert.equal(saved.runError, failure.message)
+      assert.equal(saved.content, partial)
+      assert.equal(saved.finalContent, partial)
+      assert.equal(saved.toolsFinished, true)
+      assert.deepEqual(saved, JSON.parse(JSON.stringify(failure.assistant)))
+      const run = await getRun(saved.runId)
+      assert.equal(run.status, saved.runStatus)
+      assert.equal(run.error, saved.runError)
+      assert.equal(completed.at(-1).status, saved.runStatus)
+      assert.equal((await snapshots.at(-1)).messages.at(-1).runStatus, 'failed')
+      assert.deepEqual((await store.getConversation(conv.id)).messages.slice(0, 2), conv.messages, 'legacy messages remain unchanged')
+    })
+  }
+
+  await test('cancelling before the first model request persists a cancelled outcome', async () => {
+    const controller = new AbortController()
+    let requests = 0
+    globalThis.fetch = async () => { requests++; throw new Error('Unexpected model request') }
+    const conv = await store.createConversation()
+    let done
+    for await (const event of runTurn({ conversationId: conv.id, userText: 'Stop before generation', signal: controller.signal })) {
+      if (event.type === 'meta') controller.abort()
+      if (event.type === 'done') done = event
+    }
+    assert.equal(requests, 0)
+    assert.equal(done.aborted, true)
+    const saved = (await store.getConversation(conv.id)).messages.at(-1)
+    assert.deepEqual(saved, JSON.parse(JSON.stringify(done.message)))
+    assert.equal(saved.runStatus, 'cancelled')
+    assert.equal((await getRun(saved.runId)).status, saved.runStatus)
   })
 
   await test('a late reply cannot restore a conversation cleared while it was generating', async () => {

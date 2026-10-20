@@ -395,6 +395,111 @@ test('stream metadata reconciles the user and assistant message IDs', async () =
   assert.equal(h.messages[1].node.dataset.id, 'saved-assistant')
 })
 
+test('task feedback follows real tool events and preserves the final failed outcome', async () => {
+  const tools = [{ id: 'step1', name: 'workspace_read', ok: false, status: 'failed', result: 'File missing' }]
+  const h = streamHarness([
+    ['meta', { messageId: 'assistant1', runId: 'run1' }],
+    ['tool_call', { id: 'step1', name: 'workspace_read', label: '读取文件' }],
+    ['tool_result', { id: 'step1', ok: false, status: 'failed', error: 'File missing' }],
+    ['run_complete', { status: 'failed' }],
+    ['done', { message: { runId: 'run1', runStatus: 'failed', tools, content: 'Could not read the file.' } }],
+  ])
+  const feedback = []
+  h.context.capture = (_node, run) => feedback.push(JSON.parse(JSON.stringify(run)))
+  h.run('updateRunFeedback = capture')
+  await h.run('startStream({ userText: "Check the file" })')
+  assert.ok(feedback.some((run) => run.status === 'running' && run.steps[0]?.label === '读取文件'))
+  assert.equal(feedback.at(-1).status, 'failed')
+  assert.equal(feedback.at(-1).steps[0].result, 'File missing')
+})
+
+test('a disconnected task keeps completed steps without inventing success or user cancellation', async () => {
+  const h = streamHarness([
+    ['meta', { runId: 'run1' }],
+    ['tool_call', { id: 'step1', name: 'workspace_list' }],
+    ['tool_result', { id: 'step1', ok: true, ms: 12, result: 'README.md' }],
+  ])
+  const feedback = []
+  h.context.capture = (_node, run) => feedback.push(JSON.parse(JSON.stringify(run)))
+  h.run('updateRunFeedback = capture')
+  await h.run('startStream({ userText: "Check the project" })')
+  assert.equal(feedback.at(-1).status, 'interrupted')
+  assert.equal(feedback.at(-1).steps[0].status, 'completed')
+  assert.match(feedback.at(-1).error, /连接中断/)
+})
+
+test('an error event uses the saved terminal snapshot for task counts and partial results', async () => {
+  const message = { runId: 'run1', runStatus: 'failed', runError: 'Model failed after reading', content: 'Saved partial result', tools: [{ id: 'step1', name: 'workspace_read', ok: true, ms: 8 }] }
+  const h = streamHarness([
+    ['meta', { runId: 'run1' }],
+    ['tool_call', { id: 'step1', name: 'workspace_read' }],
+    ['error', { message: 'Model failed after reading', assistant: message }],
+  ])
+  const feedback = []
+  h.context.capture = (_node, run) => feedback.push(JSON.parse(JSON.stringify(run)))
+  h.run('updateRunFeedback = capture')
+  await h.run('startStream({ userText: "Read the file" })')
+  assert.equal(feedback.at(-1).steps[0].ok, true)
+  assert.equal(feedback.at(-1).error, message.runError)
+  assert.match(h.messages.at(-1).content.innerHTML, /Saved partial result/)
+})
+
+test('stop requests are single-flight and a late response cannot abort a newer browser stream', async () => {
+  const h = harness(), old = new AbortController(), next = new AbortController()
+  let finish, calls = 0
+  h.context.old = old
+  h.context.next = next
+  h.context.stop = (path, options) => {
+    calls++
+    assert.equal(path, 'chat/stop')
+    assert.equal(options.body.conversationId, 'old-conversation')
+    return new Promise((resolve) => { finish = resolve })
+  }
+  h.run('api = stop; updateComposer = () => {}; S.stream = {conversationId:"old-conversation",ctrl:old}')
+  const first = h.run('stopReply()')
+  await h.run('stopReply()')
+  assert.equal(calls, 1)
+  h.run('S.stream = {conversationId:"new-conversation",ctrl:next}')
+  finish({ stopped: true })
+  await first
+  assert.equal(old.signal.aborted, true)
+  assert.equal(next.signal.aborted, false)
+})
+
+test('failed stop requests leave the task connected and allow an explicit retry', async () => {
+  const h = harness(), ctrl = new AbortController()
+  h.context.ctrl = ctrl
+  h.run('updateComposer = () => {}; toast = () => {}; S.stream = {conversationId:"c",ctrl,status:"正在读取"}; api = async () => { throw new Error("Network offline") }')
+  await h.run('stopReply()')
+  assert.equal(ctrl.signal.aborted, false)
+  assert.equal(h.run('S.stream.stopping'), false)
+  assert.equal(h.run('S.stream.status'), '正在读取')
+  h.run('api = async () => ({stopped:true})')
+  await h.run('stopReply()')
+  assert.equal(ctrl.signal.aborted, true)
+  assert.equal(h.run('S.stream.stopRequested'), true)
+})
+
+test('a browser abort never turns a completed or unconfirmed task into a cancelled outcome', async () => {
+  for (const completed of [false, true]) {
+    const h = streamHarness([
+      ['meta', { runId: 'run1' }],
+      ['tool_call', { id: 'step1', name: 'workspace_list' }],
+      ...(completed ? [['done', { message: { runStatus: 'completed', content: 'Done', tools: [{ id: 'step1', ok: true }] } }]] : []),
+    ])
+    const feedback = [], tails = []
+    h.context.capture = (_node, run) => {
+      feedback.push(JSON.parse(JSON.stringify(run)))
+      h.run('S.stream?.ctrl.abort()')
+    }
+    h.context.captureTail = (_node, message) => tails.push(message)
+    h.run('updateRunFeedback = capture; renderTail = captureTail')
+    await h.run('startStream({ userText: "Check files" })')
+    assert.equal(feedback.at(-1).status, completed ? 'completed' : 'interrupted')
+    assert.equal(tails.at(-1).aborted, false)
+  }
+})
+
 test('editing removes downstream messages only after successful truncation', async () => {
   for (const success of [true, false]) {
     const h = streamHarness([['done', { message: { content: 'Replacement reply' } }]])

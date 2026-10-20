@@ -347,6 +347,9 @@ try {
     const done = events.findLast((event) => event.type === 'done')
     assert.equal(done.message.tools.length, 1)
     assert.equal(done.message.finalContent, 'Verified the time; no further tools executed.')
+    assert.equal(done.message.runStatus, 'completed')
+    assert.equal(done.message.runError, undefined)
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(done.message)))
     assert.equal((await harness.getRun(done.message.runId)).status, 'completed')
   })
 
@@ -362,6 +365,11 @@ try {
     const done = events.findLast((event) => event.type === 'done')
     assert.equal(done.message.tools.length, 1)
     assert.equal(done.message.finishReason, 'tool_limit')
+    assert.equal(done.message.runStatus, 'limit_reached')
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(done.message)))
+    assert.equal((await harness.getRun(done.message.runId)).status, 'limit_reached')
+    await harness.recoverRuns()
+    assert.equal((await harness.getRun(done.message.runId)).status, 'limit_reached', 'restart recovery preserves a terminal budget outcome')
     await assert.rejects(fs.stat(path.join(workspaceRoot, 'past-budget.txt')), { code: 'ENOENT' })
   })
 
@@ -380,7 +388,31 @@ try {
     assert.equal(done.message.tools.length, 32)
     assert.equal(requests.length, 2)
     assert.equal(requests[1].tools, undefined)
+    assert.equal(done.message.finishReason, 'tool_limit', 'a successful summary cannot hide the eight unexecuted requests')
+    assert.equal(done.message.runStatus, 'limit_reached')
+    assert.match(done.message.finalContent, /剩余工作尚未执行/)
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(done.message)))
+    assert.equal((await harness.getRun(done.message.runId)).status, 'limit_reached')
     assertToolProtocol(requests[1].messages)
+  })
+
+  await test('a failed workspace operation stays failed after the model summarizes it', async () => {
+    await resetConfig({ maxToolRounds: 2 })
+    const conv = await store.createConversation()
+    let requests = 0
+    globalThis.fetch = async () => ++requests === 1
+      ? response({ calls: [{ id: 'missing_file', name: 'workspace_read', args: { path: 'missing-file.txt' } }] })
+      : response({ content: 'The file could not be read.' })
+    const events = await collect(runTurn({ conversationId: conv.id, userText: 'Read the file', allowLocalTools: true }))
+    const done = events.findLast((event) => event.type === 'done')
+    assert.equal(done.message.tools[0].ok, false)
+    assert.equal(done.message.runStatus, 'failed')
+    assert.match(done.message.runError, /工具失败/)
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(done.message)))
+    const run = await harness.getRun(done.message.runId)
+    assert.equal(run.status, 'failed')
+    assert.equal(run.error, done.message.runError)
+    assert.equal(run.steps[0].status, 'failed')
   })
 
   await test('context budgeting counts large tool request contents before retaining older history', async () => {
@@ -417,6 +449,8 @@ try {
     const stopped = interrupted.findLast((event) => event.type === 'done')
     assert.equal(stopped.aborted, true)
     assert.equal(stopped.message.tools.length, 1)
+    assert.equal(stopped.message.runStatus, 'cancelled')
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(stopped.message)))
     assert.equal((await harness.getRun(stopped.message.runId)).status, 'cancelled')
     let replay
     globalThis.fetch = async (_, options) => { replay = JSON.parse(options.body); return response({ content: 'Continuing after Stop.' }) }
@@ -441,6 +475,9 @@ try {
     const done = events.findLast((event) => event.type === 'done')
     assert.equal(done.aborted, true)
     assert.equal(done.message.tools.length, 1)
+    assert.equal(done.message.runStatus, 'cancelled')
+    assert.deepEqual((await store.getConversation(conv.id)).messages.at(-1), JSON.parse(JSON.stringify(done.message)))
+    assert.equal((await harness.getRun(done.message.runId)).error, done.message.runError)
     await assert.rejects(fs.stat(path.join(workspaceRoot, 'denied-sibling.txt')), { code: 'ENOENT' })
     let replay
     globalThis.fetch = async (_, options) => { replay = JSON.parse(options.body); return response({ content: 'The operation was declined.' }) }
