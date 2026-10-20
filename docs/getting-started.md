@@ -27,6 +27,12 @@ The installer places Echo and its data under `~/Library/Application Support/Echo
 
 The app does not automatically import your browser, email, or calendar. Screen context is optional; on-device OCR is the default, while image mode can send screenshots to your chosen model.
 
+### Confirm setup or find help
+
+Open the chat window from the Echo menu-bar icon. Complete the model connection check in the setup wizard, then send a short message. An open window confirms that the interface is available; a successful reply also checks your configured model connection.
+
+If the window does not open or replies fail, open Terminal in `~/Library/Application Support/Echo` and run `./bin/echo status` for service information or `./bin/echo logs` to follow the logs. Stop following logs with Ctrl+C. When [reporting an issue](https://github.com/Lazarus-coder/echo-assistant/issues), include the Echo version, macOS version, steps to reproduce, and a relevant error with credentials and personal content removed.
+
 ### Upgrade or remove
 
 Back up the installation's `data/` directory before upgrading. Conversation exports do not include separate command outputs and file snapshots in `data/runs/`; include that directory when those records matter. Alpha interfaces and data formats can change.
@@ -57,6 +63,12 @@ Echo 目前是 alpha 产品，面向 macOS 13 或更高版本，安装包支持 
 - **工具：**工作区文件访问需先开启。Shell 与 MCP 调用需要确认，并按本机账号或所配置服务的权限执行；停止不能撤销已完成的动作。
 
 应用不会自动导入浏览器、邮箱或日历。屏幕上下文按需开启，默认在本机进行 OCR；图片模式可能把截图发给所选模型。
+
+### 确认安装成功与排错
+
+从 Echo 状态栏图标打开对话窗口，在设置引导中完成模型连接检查，再发送一条简短消息。窗口能打开说明界面已可访问；收到正常回复也验证了你配置的模型连接。
+
+若窗口无法打开或回复失败，在终端进入 `~/Library/Application Support/Echo`，运行 `./bin/echo status` 查看服务信息，或用 `./bin/echo logs` 跟踪日志；按 Ctrl+C 停止查看日志。[反馈问题](https://github.com/Lazarus-coder/echo-assistant/issues)时，请附 Echo 版本、macOS 版本、复现步骤，以及去除凭据和个人内容后的相关错误信息。
 
 ### 升级与卸载
 
