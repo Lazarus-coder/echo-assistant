@@ -1449,13 +1449,18 @@ async function streamChatHandler(req, res) {
 /* --------------------------------- server ---------------------------------- */
 
 const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
   res.setHeader('x-content-type-options', 'nosniff')
   res.setHeader('referrer-policy', 'no-referrer')
   res.setHeader(
     'content-security-policy',
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
   )
+  let url
+  try {
+    url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
+  } catch {
+    return send(res, 400, { error: 'invalid request URL' })
+  }
   try {
     if (url.pathname.startsWith('/api/')) return await api(req, res, url)
     if (req.method === 'GET' || req.method === 'HEAD') return await serveStatic(req, res, url.pathname)

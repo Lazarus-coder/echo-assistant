@@ -190,6 +190,17 @@ Phone access: open `http://<mac-lan-ip>:8787` on the same Wi-Fi → “Add to Ho
 
 For development, run `npm ci --omit=dev --ignore-scripts`, then `npm start`. Source installs require Node 22.13+ and npm for the current PDF.js parser. `npm run test:harness` exercises files, Shell, MCP, approvals, persistence, APIs, and UI with temporary data and local mock servers; `npm run test:regressions` also covers proactive research and the existing product.
 
+The HTTP and storage regression checks can also run separately:
+
+```bash
+node tests/server-regressions.mjs
+node tests/storage-regressions.mjs
+```
+
+The server check verifies that Host or request-target values that fail URL parsing receive HTTP 400, then confirms the same process still serves health checks and normal routes. The storage check covers failed deletions, retries between age and budget cleanup, and protection of recently referenced uploads. Both use temporary data and configuration, with no live model calls.
+
+**Test isolation:** the server check mocks the shared `/tmp/echo-capture` directory. Existing API suites in the full regression command still invoke startup cleanup there; `ECHO_DATA_DIR` and `ECHO_CONFIG` do not redirect it. To preserve an installed instance's temporary captures, use a test-only preload that mocks this directory in the spawned test servers as well.
+
 <a id="permissions"></a>
 ## Permissions & residency
 
@@ -209,6 +220,8 @@ data/
 ```
 
 Budgets are enforced (`config.json → storage`): screenshots 200 MB / 3 days, generated images 300 MB / 60 days, pruning oldest-first past 80 %, never deleting images referenced by recent conversations. Maintenance runs every six hours and at boot; *Settings → 隐私兜底* has a one-click “forget everything”.
+
+Cleanup reports count only successful deletions as freed space. Files that cannot be deleted remain in the remaining-size totals, and cleanup continues with other eligible files.
 
 ## Self-improvement
 

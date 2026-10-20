@@ -11,7 +11,7 @@
     "start": "node server.mjs",
     "selftest": "node tests/selftest.mjs",
     "selftest:live": "node tests/selftest.mjs --live",
-    "test:regressions": "node tests/frontend-regressions.mjs && node tests/backend-regressions.mjs && node tests/companion-regressions.mjs && node tests/commitments-regressions.mjs && node tests/agency-regressions.mjs && node tests/commitments-api-regressions.mjs && npm run test:harness && npm run test:relationships && npm run test:proactive",
+    "test:regressions": "node tests/frontend-regressions.mjs && node tests/backend-regressions.mjs && node tests/server-regressions.mjs && node tests/storage-regressions.mjs && node tests/companion-regressions.mjs && node tests/commitments-regressions.mjs && node tests/agency-regressions.mjs && node tests/commitments-api-regressions.mjs && npm run test:harness && npm run test:relationships && npm run test:proactive",
     "test:harness": "node tests/workspace-regressions.mjs && node tests/mcp-regressions.mjs && node tests/harness-regressions.mjs && node tests/harness-api-regressions.mjs && node tests/harness-ui-regressions.mjs && node tests/tool-cancellation-regressions.mjs",
     "test:relationships": "node tests/relationship-regressions.mjs && node tests/relationship-api-regressions.mjs && node tests/relationship-background-regressions.mjs && node tests/relationship-ui-regressions.mjs",
     "test:proactive": "node tests/discovery-regressions.mjs && node tests/commitment-research-regressions.mjs && node tests/research-regressions.mjs && node tests/research-api-regressions.mjs && node tests/proactive-ui-regressions.mjs",

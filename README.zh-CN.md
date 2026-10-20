@@ -190,6 +190,17 @@ git clone https://github.com/Lazarus-coder/echo-assistant.git && cd echo-assista
 
 开发时先运行 `npm ci --omit=dev --ignore-scripts`，再运行 `npm start`。当前 PDF.js 解析器要求 Node 22.13+ 和 npm。`npm run test:harness` 使用临时数据与本地模拟服务检查文件、Shell、MCP、确认、持久化、API 和界面；`npm run test:regressions` 同时覆盖主动研究与既有功能。
 
+HTTP 与存储回归也可单独运行：
+
+```bash
+node tests/server-regressions.mjs
+node tests/storage-regressions.mjs
+```
+
+服务测试检查导致 URL 解析失败的 Host 或请求目标会收到 HTTP 400，并确认同一进程仍能响应健康检查与正常路由。存储测试覆盖删除失败、过期清理与容量清理之间的重试，以及近期会话引用保护。两项测试均使用临时数据和配置，不调用真实模型。
+
+**测试隔离：**服务测试已 mock 共享目录 `/tmp/echo-capture`。全量回归中的既有 API 测试仍会在启动时清理该目录，`ECHO_DATA_DIR` 和 `ECHO_CONFIG` 不会重定向它。若需保留已安装实例的临时截图，运行全量回归时也应通过测试专用预加载，在测试服务子进程中 mock 此目录。
+
 ## 权限与常驻
 
 完整说明：[docs/permissions.md](docs/permissions.md)。要点：**默认全部关**（不要口令、不采集屏幕、不发通知）；安装器注册两个 launchd 任务（`com.echo.chat` / `com.echo.menubar`）；屏幕感知（主动决策的输入之一）需要一次系统授权，入口在状态栏图标菜单里。
@@ -208,6 +219,8 @@ data/
 ```
 
 磁盘预算自动执行（`config.json → storage`）：截图 200MB / 3 天、生成图 300MB / 60 天，超 80% 从最旧删，被最近对话引用的图永不删；每 6 小时与开机各维护一次；设置里有"全部忘掉"。
+
+清理报告仅将成功删除的文件计入释放空间。删除失败的文件仍计入剩余占用，清理会继续尝试其他符合条件的文件。
 
 ## 自我改进
 
