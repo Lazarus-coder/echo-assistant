@@ -32,6 +32,7 @@ const S = {
   attachmentDrafts: new Map(),
   uploading: 0,
   drawing: null,
+  brief: null,
 }
 
 /* ---------------------------------- api ----------------------------------- */
@@ -436,6 +437,48 @@ function artifactLinks(artifacts) {
     .map((item) => `<a class="run-artifact" href="${esc(item.url)}" download>${esc(item.name || '输出文件')}${Number.isFinite(item.bytes) ? ` · ${Math.ceil(item.bytes / 1024)} KB` : ''}</a>`).join('')
 }
 
+/* -------------------------------- 回来简报 -------------------------------- */
+
+const BRIEF_GAP_MS = 6 * 3600000
+
+/** 离开足够久后回来，用一次只读请求把"期间发生了什么"拼成一张卡；离开不足时不打扰。 */
+async function maybeShowReturnBrief() {
+  const last = localStorage.getItem('echo.lastVisit')
+  localStorage.setItem('echo.lastVisit', new Date().toISOString())
+  if (!last || !Number.isFinite(Date.parse(last))) return
+  if (Date.now() - Date.parse(last) < BRIEF_GAP_MS) return
+  try {
+    const brief = await api(`brief?since=${encodeURIComponent(last)}`)
+    if (!brief?.items?.length) return
+    S.brief = brief
+    const inner = $('#threadInner')
+    if (inner && S.current === 'main') inner.prepend(briefCard(brief))
+  } catch {}
+}
+
+function briefCard(brief) {
+  const card = document.createElement('div')
+  card.className = 'brief-card'
+  card.id = 'briefCard'
+  card.innerHTML = briefCardHtml(brief)
+  return card
+}
+
+function briefCardHtml(brief) {
+  const rows = []
+  for (const item of brief.items) {
+    if (item.kind === 'proactive') rows.push(`Echo 主动发了 <b>${item.count}</b> 条消息${item.latest?.preview ? ` · 最新：${esc(item.latest.preview)}` : ''}`)
+    else if (item.kind === 'due') rows.push(item.goals.map((g) => `<b>${esc(g.title)}</b> ${g.stage === 'overdue' ? '已过截止' : g.stage === 'today' ? '今天截止' : '临近截止'}（${esc(g.deadline)}）`).join('；'))
+    else if (item.kind === 'drafts') rows.push(`<b>${item.count}</b> 份准备草稿待查看${item.drafts?.length ? `（${item.drafts.map((d) => esc(d.title)).join('、')}）` : ''}`)
+    else if (item.kind === 'failed') rows.push(`<b>${item.count}</b> 个目标准备失败，稍后自动重试`)
+    else if (item.kind === 'loops') rows.push(`还有 <b>${item.count}</b> 条 Dream 待跟进线索可一键接管`)
+    else if (item.kind === 'facts') rows.push(`记下了 <b>${item.count}</b> 条新事实`)
+  }
+  return `<div class="brief-head"><span>你不在的这段时间</span><button class="icon-btn" data-action="dismiss-brief" aria-label="关闭简报"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
+    <ul class="brief-list">${rows.map((row) => `<li>${row}</li>`).join('')}</ul>
+    <button class="btn small" data-action="open-panel" data-panel="proactive">去主动服务看看</button>`
+}
+
 /** 主动消息里的一键接管：用户确认后才创建跟进，失败时不猜测结果。 */
 async function adoptFollowUp(btn) {
   if (btn.disabled) return
@@ -533,6 +576,7 @@ function renderThread({ resetScroll = true } = {}) {
     for (const m of msgs) inner.append(messageNode(m))
   }
   updateRegenerateButtons()
+  if (S.brief && S.current === 'main') inner.prepend(briefCard(S.brief))
   if (!S.followOutput) thread.scrollTop = scrollTop
   scrollBottom(false)
 }
@@ -2804,6 +2848,7 @@ async function boot({ keep = false } = {}) {
   const target = keep && S.convs.some((c) => c.id === S.current) ? S.current
     : S.convs.some((c) => c.id === requested) ? requested : b.main?.id ?? S.convs[0]?.id
   if (target) await selectConv(target)
+  await maybeShowReturnBrief()
   startPolling()
   // 没配置端点/密钥时，直接把引导推上来（可随时"以后再配"）
   if (b.config.onboarding?.needed && !localStorage.getItem('echo.onboardSkipped')) {
@@ -2932,6 +2977,11 @@ async function handleAction(e) {
     return showCommitmentEditor({ title: String(message.content).slice(0, 160) }, { source, quote: String(message.content).slice(0, 500) })
   }
   if (act === 'adopt-follow-up') return adoptFollowUp(btn)
+  if (act === 'dismiss-brief') {
+    S.brief = null
+    $('#briefCard')?.remove()
+    return
+  }
   if (act === 'adopt-loop') {
     await openPanel('proactive')
     const loop = COMMITMENTS.loops.find((item) => item.id === id)

@@ -26,6 +26,7 @@ const { getRun } = await import('../lib/harness.mjs')
 const { webFetch } = await import('../lib/search.mjs')
 const { appendObservation, retrieve, readObservations } = await import('../lib/memory.mjs')
 const { ingestScreenEvent, setScreenConfig } = await import('../lib/screen.mjs')
+const { returnBrief } = await import('../lib/brief.mjs')
 const cfg = await loadConfig()
 const originalFetch = globalThis.fetch
 const encoder = new TextEncoder()
@@ -365,6 +366,34 @@ try {
     assert.deepEqual(normalized.blocklist, [])
     assert.deepEqual(normalized.excludeTitlePatterns, [])
     await saveConfig({ screen: { enabled: false } })
+  })
+
+  await test('return brief aggregates what happened while the user was away', async () => {
+    const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+    const since = new Date(Date.now() - 24 * 3600000).toISOString()
+    const now = new Date().toISOString()
+    await store.createConversation({ isMain: true })
+    await store.appendMessage('main', { id: 'm_brief_proactive', role: 'assistant', proactive: true, content: '你不在时准备好的主动消息', createdAt: now })
+    await store.writeState({
+      commitments: [
+        { id: 'goal_brief_due', title: '签证预约', status: 'active', deadline: localToday, revision: 1, preparation: { state: 'ready' }, scope: {}, watch: {} },
+        { id: 'goal_brief_failed', title: '准备失败的目标', status: 'active', revision: 1, deadline: null, preparation: { state: 'failed', retryAt: now }, scope: {}, watch: {} },
+        { id: 'goal_brief_tracked', title: '已接管的线索', status: 'active', revision: 1, preparation: { state: 'idle' }, candidateLoopId: 'loop_brief', scope: {}, watch: {} },
+      ],
+      preparations: [{ id: 'prep_brief', commitmentId: 'goal_brief_due', revision: 1, title: '草稿标题', delivery: { status: 'pending', expiresAt: new Date(Date.now() + 3600000).toISOString() }, createdAt: now }],
+      dream: { loops: [{ id: 'loop_brief', topic: '已接管的线索', status: 'open' }, { id: 'loop_open', topic: '待接管的线索', status: 'open' }] },
+    })
+    globalThis.fetch = originalFetch
+    const brief = await returnBrief({ since })
+    const kinds = brief.items.map((item) => item.kind)
+    for (const kind of ['proactive', 'due', 'drafts', 'failed', 'loops']) assert.ok(kinds.includes(kind), `missing ${kind} in ${kinds}`)
+    assert.equal(brief.items.find((item) => item.kind === 'due').goals[0].stage, 'today')
+    assert.equal(brief.items.find((item) => item.kind === 'loops').count, 1, 'tracked loops must not be listed as open')
+    assert.equal(brief.items.find((item) => item.kind === 'proactive').count, 1)
+    assert.equal(brief.since, since)
+    assert.equal((await returnBrief({ since })).items.length, brief.items.length, 'the brief is read-only and repeatable')
+    const clean = await returnBrief({ since: new Date(Date.now() + 3600000).toISOString() })
+    assert.ok(!clean.items.some((item) => item.kind === 'proactive'), 'messages newer than the visit are not counted')
   })
 } finally {
   globalThis.fetch = originalFetch

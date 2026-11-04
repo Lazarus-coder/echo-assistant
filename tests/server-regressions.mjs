@@ -175,6 +175,17 @@ try {
     await healthy()
   })
 
+  await test('the return brief is read-only and never calls the model', async () => {
+    const before = (await jsonLines(requestsFile)).length
+    const response = await fetch(`${base}/api/brief?since=2000-01-01T00:00:00Z`, { signal: AbortSignal.timeout(5000) })
+    assert.equal(response.status, 200)
+    const brief = await response.json()
+    assert.ok(Array.isArray(brief.items))
+    assert.ok(brief.since)
+    assert.equal((await jsonLines(requestsFile)).length, before, 'the brief must not trigger model requests')
+    await healthy()
+  })
+
   await test('valid session survives malformed foreign cookies on authed routes (issue #1 lockout)', async () => {
     const current = JSON.parse(await fs.readFile(config, 'utf8'))
     await fs.writeFile(config, JSON.stringify({ ...current, requirePassword: true }))

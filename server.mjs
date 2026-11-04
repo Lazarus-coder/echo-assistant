@@ -45,6 +45,7 @@ import {
   logForgetting,
 } from './lib/memory.mjs'
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
+import { returnBrief } from './lib/brief.mjs'
 import { proactiveTick, proactiveStatus, recordUserEngagement } from './lib/proactive.mjs'
 import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
 import { listCommitments, createCommitment, updateCommitment, requestPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
@@ -560,6 +561,10 @@ async function api(req, res, url) {
       mcp: mcp.status(),
       upstream: upstreamReady(),
     })
+  }
+
+  if (method === 'GET' && p === 'brief') {
+    return send(res, 200, await returnBrief({ since: url.searchParams.get('since') ?? undefined }))
   }
 
   if (method === 'GET' && p === 'summary') {
