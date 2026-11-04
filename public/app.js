@@ -331,6 +331,7 @@ function messageNode(m) {
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
       ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
       <div class="content"></div>
+      ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">加入跟进</button><span class="muted small">让 Echo 接手准备与跟进</span></div>` : ''}
       ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
       ${imageGallery(m.images)}
       <div class="tail"></div>
@@ -433,6 +434,35 @@ function toolStatus(tool) {
 function artifactLinks(artifacts) {
   return (artifacts ?? []).filter((item) => /^\/api\/runs\/[^\\\s?#]+\/artifacts\/[^\\\s?#]+$/.test(item.url ?? ''))
     .map((item) => `<a class="run-artifact" href="${esc(item.url)}" download>${esc(item.name || '输出文件')}${Number.isFinite(item.bytes) ? ` · ${Math.ceil(item.bytes / 1024)} KB` : ''}</a>`).join('')
+}
+
+/** 主动消息里的一键接管：用户确认后才创建跟进，失败时不猜测结果。 */
+async function adoptFollowUp(btn) {
+  if (btn.disabled) return
+  const message = (S.conv?.messages ?? []).find((entry) => entry.id === btn.dataset.message)
+  const proposal = message?.followUp
+  if (!proposal) return
+  btn.disabled = true
+  try {
+    const body = { title: proposal.title, successCriteria: proposal.successCriteria }
+    if (proposal.deadline) body.deadline = proposal.deadline
+    if (proposal.candidateLoopId) body.candidateLoopId = proposal.candidateLoopId
+    const r = await api('commitments', { method: 'POST', body })
+    btn.textContent = '已加入跟进'
+    btn.classList.add('done')
+    toast(`已加入跟进：${r.commitment?.title ?? proposal.title}`)
+    const b = await api('bootstrap')
+    S.boot = b
+    renderConvs()
+  } catch (err) {
+    if (/已经在跟进中/.test(err.message)) {
+      btn.textContent = '已在跟进中'
+      btn.classList.add('done')
+      return
+    }
+    btn.disabled = false
+    toast(`加入失败：${err.message}`, true)
+  }
 }
 
 function renderTail(node, m) {
@@ -2901,6 +2931,7 @@ async function handleAction(e) {
     await openPanel('proactive')
     return showCommitmentEditor({ title: String(message.content).slice(0, 160) }, { source, quote: String(message.content).slice(0, 500) })
   }
+  if (act === 'adopt-follow-up') return adoptFollowUp(btn)
   if (act === 'adopt-loop') {
     await openPanel('proactive')
     const loop = COMMITMENTS.loops.find((item) => item.id === id)

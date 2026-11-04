@@ -25,6 +25,7 @@ try {
   const { inQuietHours, checkAttention, reserveAttention, finishAttention, interventionKeys } = await import('../lib/attention.mjs')
   const { applyFeedback, posteriors, settlePending, agencyStats } = await import('../lib/agency.mjs')
   const { proactiveTick, recordUserEngagement } = await import('../lib/proactive.mjs')
+  const { createCommitment } = await import('../lib/commitments.mjs')
   const { ingestFrame } = await import('../lib/companion.mjs')
   const { workingContext } = await import('../lib/screen.mjs')
   const now = () => new Date().toISOString()
@@ -228,7 +229,32 @@ try {
   answer = async () => ({ speak: true, scenario: 'work', topic: 'Project', bubble: 'A concrete useful companion suggestion', why: 'Visible project data' })
   assert.ok((await ingestFrame(frame)).bubble, 'deferred frame can be retried after focus changes')
   assert.equal((await checkAttention({ channel: 'proactive' })).reason, 'shared_min_gap')
-  console.log('Agency regressions passed: explicit outcome attribution; shared atomic attention; fresh evidence; deferred and once-only delivery; no live requests.')
+
+  // Dream 线索 → 主动消息携带一键接管提案；用户确认后才创建跟进
+  await reset({ dream: { at: now(), loops: [{ id: 'loop_visa', topic: '签证预约', why: '注册受阻，等待确认', due: '2026-12-01', status: 'open', confidence: 0.8 }] } })
+  answer = async () => ({
+    act: true, confidence: 0.9, kind: 'follow_up', anchor_id: 'loop_visa', evidence_ids: ['loop_visa'],
+    message: '你提过签证预约还在等确认，要不要我接着盯？', reason: 'Dream 发现的待跟进线索',
+  })
+  const suggestion = await proactiveTick()
+  assert.equal(suggestion.acted, true)
+  assert.equal(suggestion.message.followUp.title, '签证预约')
+  assert.equal(suggestion.message.followUp.deadline, '2026-12-01')
+  assert.equal(suggestion.message.followUp.candidateLoopId, 'loop_visa')
+  assert.match(suggestion.message.followUp.successCriteria, /签证预约/)
+  assert.match(suggestion.message.content, /加入跟进/)
+  const adopted = await createCommitment({
+    title: suggestion.message.followUp.title,
+    successCriteria: suggestion.message.followUp.successCriteria,
+    deadline: suggestion.message.followUp.deadline,
+    candidateLoopId: suggestion.message.followUp.candidateLoopId,
+  })
+  assert.equal(adopted.candidateLoopId, 'loop_visa')
+  await assert.rejects(createCommitment({ title: 'duplicate', successCriteria: 'x', candidateLoopId: 'loop_visa' }), { status: 409 })
+  const persisted = (await getConversation('main')).messages.find((message) => message.id === suggestion.message.id)
+  assert.equal(persisted.followUp.candidateLoopId, 'loop_visa')
+
+  console.log('Agency regressions passed: explicit outcome attribution; shared atomic attention; fresh evidence; deferred and once-only delivery; loop suggestions adopt on confirm; no live requests.')
 } finally {
   globalThis.fetch = originalFetch
   await fs.rm(sandbox, { recursive: true, force: true })
