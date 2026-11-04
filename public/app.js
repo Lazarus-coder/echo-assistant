@@ -287,6 +287,12 @@ function renderConvs() {
     : '<li class="muted small" style="padding:10px">没有匹配的会话</li>'
   $('#memCount').textContent = S.boot?.memory?.observations ?? 0
   $('#proCount').textContent = S.boot?.proactive?.todayCount ?? 0
+  const followBadge = $('#followBadge')
+  if (followBadge) {
+    const count = S.boot?.followUps ?? 0
+    followBadge.hidden = count === 0
+    followBadge.textContent = `跟进 · ${count}`
+  }
 }
 
 async function refreshList() {

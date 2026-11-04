@@ -554,6 +554,7 @@ async function api(req, res, url) {
       conversations,
       main: conversations.find((c) => c.id === MAIN_ID) ?? null,
       memory: await memoryStats(),
+      followUps: (await listCommitments()).commitments.filter((c) => c.status === 'active').length,
       dream: await dreamStatus(),
       proactive: await proactiveStatus(),
       mcp: mcp.status(),
