@@ -161,11 +161,20 @@ function isLocalToolsRequest(req) {
   }
 }
 
+function safeDecode(s) {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
+}
+
 function parseCookies(str) {
   const out = {}
   for (const part of String(str).split(';')) {
     const i = part.indexOf('=')
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim())
+    // 邻居应用写进浏览器的 cookie 可能带畸形编码，解码失败要保留原值而不是抛 URIError（issue #1）
+    if (i > 0) out[part.slice(0, i).trim()] = safeDecode(part.slice(i + 1).trim())
   }
   return out
 }
@@ -384,6 +393,11 @@ async function writeEnvValues(values) {
   let removed = 0
   for (const [k, v] of Object.entries(values ?? {})) {
     if (v === undefined || v === null) continue
+    // 键名不合法或值里带换行的条目直接拒收：写进文件会注入出别的环境变量
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || /[\r\n]/.test(String(v))) {
+      log.warn(`已忽略可疑的 env 条目：${clip(k, 40)}`)
+      continue
+    }
     if (String(v) === '') {
       // 显式清空 = 删除该密钥（界面不会发空值，只有明确的"清除"才会走到这）
       if (keep.delete(k)) removed++
@@ -645,7 +659,7 @@ async function api(req, res, url) {
         return send(res, 200, await decideApproval(runId, seg[4], body.decision))
       }
       if (method === 'GET' && seg[3] === 'artifacts' && seg[4] && seg[5] && !seg[6]) {
-        const artifact = await artifactFile(runId, seg[4], decodeURIComponent(seg[5]))
+        const artifact = await artifactFile(runId, seg[4], safeDecode(seg[5]))
         const buffer = await fs.readFile(artifact.file)
         return send(res, 200, buffer, {
           'content-type': artifact.mime,
@@ -946,7 +960,7 @@ async function api(req, res, url) {
     return send(res, 200, { result: r, stats: await graphStats(), entities: await entitySummary() })
   }
   if (method === 'GET' && seg[1] === 'graph' && seg[2]) {
-    const r = await queryGraph(decodeURIComponent(seg[2]))
+    const r = await queryGraph(safeDecode(seg[2]))
     return send(res, r ? 200 : 404, r ?? { error: 'not found' })
   }
 
@@ -1156,7 +1170,10 @@ function upstreamReady() {
 }
 
 /** 隐私兜底：把记忆（可选连同会话）清空，但在遗忘日志里留一条可解释的记录。 */
+let wiping = false
 async function wipeEverything({ includeConversations = false } = {}) {
+  if (wiping) throw Object.assign(new Error('wipe 已在进行'), { status: 409 })
+  wiping = true
   backgroundSuspended = true
   try {
   await cancelDiscovery('隐私重置')
@@ -1216,6 +1233,7 @@ async function wipeEverything({ includeConversations = false } = {}) {
   if (cfg.proactive?.research?.enabled) cfg = await saveConfig({ proactive: { research: { enabledAt: nowIso() } } })
   return counts
   } finally {
+    wiping = false
     backgroundSuspended = false
   }
 }
@@ -1331,6 +1349,11 @@ async function changePassword(req, res, who) {
   const next = String(body.next ?? body.password ?? '')
   if (next.length < 6) return send(res, 400, { error: 'weak' })
   await setPassword(next)
+  // 改口令意味着旧口令可能泄露：作废全部旧会话，只保留当前这一个
+  const fresh = await readJSON(P.auth, {})
+  const keep = crypto.createHash('sha256').update(parseCookies(req.headers.cookie ?? '')[COOKIE] ?? '').digest('hex')
+  fresh.sessions = fresh.sessions?.[keep] ? { [keep]: fresh.sessions[keep] } : {}
+  await writeJSON(P.auth, fresh)
   return send(res, 200, { ok: true })
 }
 
@@ -1481,6 +1504,7 @@ let lastMaintenance = 0
 let lastScreenDigest = 0
 const tick = setInterval(async () => {
   try {
+    for (const [ip, rec] of loginAttempts) if (Date.now() - rec.first > 5 * 60000) loginAttempts.delete(ip)
     if (Date.now() - lastMaintenance > 6 * 3600000) {
       lastMaintenance = Date.now()
       await pruneStorage().catch((err) => log.warn('存储清理失败', err.message))

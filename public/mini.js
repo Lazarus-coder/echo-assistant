@@ -145,6 +145,7 @@ async function send(text) {
     contentEl.innerHTML = mdLite(buffer)
     $('.tail', node).innerHTML = sources.length
       ? `<div class="sources">${sources
+          .filter((s) => /^https?:\/\//i.test(s.url ?? ''))
           .slice(0, 6)
           .map((s) => `<a class="src" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || s.url)}</a>`)
           .join('')}</div>`
@@ -161,7 +162,7 @@ async function init() {
     return
   }
   try {
-    const r = await api(`companion/${bubbleId}/open`, { method: 'POST', body: {} })
+    const r = await api(`companion/${encodeURIComponent(bubbleId)}/open`, { method: 'POST', body: {} })
     await loadThread(r.conversationId)
     conversationId = r.conversationId
     updateComposer()

@@ -158,6 +158,45 @@ try {
       }
     })
   }
+  await test('malformed foreign cookie values never 500 the API (issue #1)', async () => {
+    const response = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-echo-request': 'echo', cookie: 'echo_s=abc; x=%; y=%zz' },
+      body: '{}',
+      signal: AbortSignal.timeout(5000),
+    })
+    assert.equal(response.status, 200)
+    await healthy()
+  })
+
+  await test('malformed percent-encoding in URL paths never 500s (issue #1 family)', async () => {
+    const response = await fetch(`${base}/api/graph/%zz`, { signal: AbortSignal.timeout(5000) })
+    assert.equal(response.status, 404)
+    await healthy()
+  })
+
+  await test('valid session survives malformed foreign cookies on authed routes (issue #1 lockout)', async () => {
+    const current = JSON.parse(await fs.readFile(config, 'utf8'))
+    await fs.writeFile(config, JSON.stringify({ ...current, requirePassword: true }))
+    await healthy()
+    const setup = await post('password', { password: 'correct horse battery' })
+    assert.equal(setup.status, 200)
+    const session = /echo_s=([^;]+)/.exec(setup.headers.get('set-cookie') ?? '')?.[1]
+    assert.ok(session, 'password setup must return a session cookie')
+    const authed = await fetch(`${base}/api/bootstrap`, {
+      headers: { cookie: `echo_s=${session}; x=%` },
+      signal: AbortSignal.timeout(5000),
+    })
+    assert.equal(authed.status, 200)
+    assert.ok((await authed.json()).version)
+    const noSession = await fetch(`${base}/api/bootstrap`, {
+      headers: { cookie: 'x=%' },
+      signal: AbortSignal.timeout(5000),
+    })
+    assert.equal(noSession.status, 401, 'malformed cookies must not bypass auth')
+    await fs.writeFile(config, JSON.stringify({ ...JSON.parse(await fs.readFile(config, 'utf8')), requirePassword: false }))
+    await healthy()
+  })
 } finally {
   if (app && app.exitCode === null && !app.signalCode) {
     const exited = new Promise((resolve) => app.once('exit', resolve))

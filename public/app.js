@@ -449,7 +449,7 @@ function renderTail(node, m) {
 }
 
 function sourceHtml(sources) {
-  const list = (sources ?? []).filter((s) => s?.url).slice(0, 8)
+  const list = (sources ?? []).filter((s) => /^https?:\/\//i.test(s?.url ?? '')).slice(0, 8)
   if (!list.length) return ''
   return `<div class="sources">${list
     .map((s) => `<a class="src" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer nofollow">${esc(s.title || host(s.url))}</a>`)
@@ -471,12 +471,12 @@ function modelOptionsHtml(models, selected) {
 }
 
 function imageGallery(images) {
-  const list = (images ?? []).filter((i) => i?.url)
+  const list = (images ?? []).filter((i) => /^(\/api\/uploads\/|data:image\/)/.test(i?.url ?? ''))
   if (!list.length) return ''
   return `<div class="gallery">${list
     .map(
       (i) =>
-        `<a href="${esc(i.url)}" target="_blank" rel="noopener"><img src="${esc(i.url)}" alt="${esc(i.prompt ?? '图片')}" loading="lazy" /></a>`,
+        `<a href="${esc(i.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(i.url)}" alt="${esc(i.prompt ?? '图片')}" loading="lazy" /></a>`,
     )
     .join('')}</div>`
 }
@@ -585,7 +585,7 @@ function renderAttachments() {
   strip.innerHTML = S.att
     .map(
       (a, i) =>
-        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${a.dataUrl}" alt="${esc(a.name || '待发送图片')}" /><button type="button" data-action="rm-att" data-i="${i}" aria-label="移除${esc(a.name || '图片')}" title="移除">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
+        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${esc(a.dataUrl)}" alt="${esc(a.name || '待发送图片')}" /><button type="button" data-action="rm-att" data-i="${i}" aria-label="移除${esc(a.name || '图片')}" title="移除">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
     )
     .join('')
 }
@@ -1889,7 +1889,7 @@ function screenBlock(screen) {
     <div class="list" style="margin-top:8px">${ev
       .map(
         (e) => `<div class="mem-item"><div class="txt">${esc(e.activity || '(未识别)')}
-          <div class="muted small">${String(e.ts).slice(11, 16)} · ${esc(e.app || '?')} · ${e.focus}${e.sensitive ? ' · 敏感已隐去' : ''}</div></div></div>`,
+          <div class="muted small">${String(e.ts).slice(11, 16)} · ${esc(e.app || '?')} · ${esc(e.focus)}${e.sensitive ? ' · 敏感已隐去' : ''}</div></div></div>`,
       )
       .join('')}</div>
     <div class="row" style="margin-top:8px">
@@ -3208,10 +3208,10 @@ async function handleAction(e) {
         <div class="stat"><b>${t.p95Ms ?? 0}</b><span>P95 延迟(ms)</span></div>
         <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>累计采用或帮助完成</span></div>
       </div>
-      <div class="muted small">用量：入 ${t.tokensIn ?? 0} / 出 ${t.tokensOut ?? 0} tokens · 平均 ${t.avgRounds ?? 0} 轮工具调用 · 模型 ${JSON.stringify(t.models ?? {})}</div>
-      ${m.polish?.count ? `<div class="muted small">润色：${m.polish.count} 次 · 平均 ${m.polish.avgMs}ms · 改动率 ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}% · 模式 ${JSON.stringify(m.polish.byMode ?? {})}</div>` : ''}
+      <div class="muted small">用量：入 ${t.tokensIn ?? 0} / 出 ${t.tokensOut ?? 0} tokens · 平均 ${t.avgRounds ?? 0} 轮工具调用 · 模型 ${esc(JSON.stringify(t.models ?? {}))}</div>
+      ${m.polish?.count ? `<div class="muted small">润色：${m.polish.count} 次 · 平均 ${m.polish.avgMs}ms · 改动率 ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}% · 模式 ${esc(JSON.stringify(m.polish.byMode ?? {}))}</div>` : ''}
       ${toolRows}${searchRows}
-      ${m.errors?.top?.length ? `<div class="muted small">错误 Top：${m.errors.top.map(([k, v]) => `${k}×${v}`).join('，')}</div>` : ''}
+      ${m.errors?.top?.length ? `<div class="muted small">错误 Top：${m.errors.top.map(([k, v]) => `${esc(String(k))}×${v}`).join('，')}</div>` : ''}
       <div class="muted small">存储：截图 ${d.storage?.screenshots?.mb}MB / 图片 ${d.storage?.uploads?.mb}MB · 记忆 ${d.memory?.observations} 条（淡出 ${d.memory?.forgetting?.faded}）· 图谱 ${d.graph?.nodes} 节点</div>`
     return
   }

@@ -24,6 +24,8 @@ const { updateDigest } = await import('../lib/context.mjs')
 const { runTurn } = await import('../lib/chat.mjs')
 const { getRun } = await import('../lib/harness.mjs')
 const { webFetch } = await import('../lib/search.mjs')
+const { appendObservation, retrieve, readObservations } = await import('../lib/memory.mjs')
+const { ingestScreenEvent, setScreenConfig } = await import('../lib/screen.mjs')
 const cfg = await loadConfig()
 const originalFetch = globalThis.fetch
 const encoder = new TextEncoder()
@@ -335,6 +337,34 @@ try {
     }
     assert.equal((await updateDigest({ conv, cfg, force: true })).updated, false)
     assert.equal(await store.getConversation(conv.id), null)
+  })
+
+  await test('malformed observation tags and lines cannot poison retrieval', async () => {
+    const obsFile = path.join(sandbox, 'memory', 'observations.jsonl')
+    await fs.mkdir(path.dirname(obsFile), { recursive: true })
+    await fs.writeFile(obsFile, [
+      JSON.stringify({ id: 'o_poison_tags', text: '标签被写成数字的旧数据', tags: 5, status: 'active', importance: 2, last_seen: new Date().toISOString() }),
+      JSON.stringify({ id: 'o_poison_text', text: 5, tags: [], status: 'active', importance: 2 }),
+      JSON.stringify({ id: 'o_good', text: '正常的一条记忆', tags: ['ok'], status: 'active', importance: 2, last_seen: new Date().toISOString() }),
+    ].join('\n') + '\n')
+    const list = await readObservations()
+    assert.deepEqual(list.map((o) => o.id), ['o_poison_tags', 'o_good'])
+    assert.deepEqual(list[0].tags, [])
+    assert.ok(Array.isArray(await retrieve('正常记忆')))
+    const added = await appendObservation({ text: '写入时也要归一化标签', tags: 'not-an-array' })
+    assert.deepEqual(added.tags, [])
+    assert.ok((await retrieve('标签')).length >= 1)
+  })
+
+  await test('malformed screen blocklist config cannot break screen ingestion', async () => {
+    await saveConfig({ screen: { enabled: true, blocklist: 5, excludeTitlePatterns: 'nope' } })
+    globalThis.fetch = async () => Response.json({ choices: [{ message: { content: '{"activity":"回归测试","signals":[]}' } }] })
+    const result = await ingestScreenEvent({ text: '正在写的回归测试屏幕文本', app: 'Test', title: 'Window' })
+    assert.ok(result.event)
+    const normalized = await setScreenConfig({ blocklist: 5, excludeTitlePatterns: 'nope' })
+    assert.deepEqual(normalized.blocklist, [])
+    assert.deepEqual(normalized.excludeTitlePatterns, [])
+    await saveConfig({ screen: { enabled: false } })
   })
 } finally {
   globalThis.fetch = originalFetch

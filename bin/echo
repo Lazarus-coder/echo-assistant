@@ -33,10 +33,13 @@ local_token() {
   [ -f "$ROOT/data/local.token" ] && cat "$ROOT/data/local.token" || echo ""
 }
 
-api() { # api METHOD PATH [JSON]
+api() { # api METHOD PATH [JSON|-]，"-" 表示请求体从 stdin 读（口令这类内容不落 argv）
   local method="$1" path="$2" body="${3:-}"
   local tok; tok="$(local_token)"
-  if [ -n "$body" ]; then
+  if [ "$body" = "-" ]; then
+    curl -sS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
+      -H 'content-type: application/json' -H 'x-echo-request: echo' -H "x-echo-local: $tok" --data-binary @-
+  elif [ -n "$body" ]; then
     curl -sS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
       -H 'content-type: application/json' -H 'x-echo-request: echo' -H "x-echo-local: $tok" -d "$body"
   else
@@ -108,7 +111,8 @@ else: print('  这次没说：',r.get('skipped'),r.get('reason') or '')" 2>/dev/
     ;;
   search)
     shift
-    api POST search/test "{\"query\":\"${1:-今天美元汇率}\"}" | python3 -c "
+    printf '%s' "${1:-今天美元汇率}" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"query": sys.stdin.read()}))' \
+      | api POST search/test - | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 print(f\"  引擎 {d.get('engine')} · {d.get('ms')}ms · {len(d.get('results',[]))} 条\")
@@ -123,7 +127,8 @@ print('  （没有输出表示还没配置 MCP）')" 2>/dev/null
     ;;
   passwd)
     printf '新口令（≥6 位）: '; read -rs NEW; echo
-    api POST password "{\"next\":\"$NEW\"}" >/dev/null && c_ok "口令已更新"
+    printf '%s' "$NEW" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"next": sys.stdin.read()}))' \
+      | api POST password - >/dev/null && c_ok "口令已更新"
     ;;
   auth)
     case "${2:-status}" in
@@ -169,7 +174,8 @@ for b in (d.get('log') or [])[:8]: print('   ',b.split(chr(10))[0])" 2>/dev/null
     ;;
   remember)
     shift
-    api POST memory/observation "{\"text\":\"$*\",\"kind\":\"fact\",\"importance\":3}" >/dev/null && c_ok "已记住：$*"
+    printf '%s' "$*" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"text": sys.stdin.read(), "kind": "fact", "importance": 3}))' \
+      | api POST memory/observation - >/dev/null && c_ok "已记住：$*"
     ;;
   diag)
     api GET diagnostics | python3 -c "
