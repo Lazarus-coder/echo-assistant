@@ -44,6 +44,8 @@ Without the grant, Echo degrades quietly: captures are skipped, the log says so,
 
 Companion mode (off by default, enabled from the menu bar or *Settings → 伴随模式*) reuses the same Screen Recording grant but captures far more often (default every 20 s instead of every 5 minutes). Everything above still applies: on-device OCR, text only, screenshots deleted after analysis, block-list respected, and nothing is sent to the model when the screen hasn't changed. It can be paused instantly from the menu bar, and it silences itself after three dismissals in a row.
 
+**Published alpha.6 users.** Companion OCR in that package can send text from an excluded window to your model. Keep companion mode off in alpha.6 if you rely on exclusions. The current source applies the same app, title and text filters to companion OCR and ordinary screen awareness.
+
 ## 2c. Why macOS sometimes asks again (and how to stop it)
 
 Screen Recording permission is managed by macOS and tied to **app identity**. The packaging and installation scripts attempt ad-hoc signing; Echo is not Developer ID signed or notarized. Moving or rebuilding the app may require granting access again.

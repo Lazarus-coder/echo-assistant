@@ -110,15 +110,67 @@ function events(...frames) {
 const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'echo-companion-regressions-'))
 process.env.ECHO_DATA_DIR = sandbox
 process.env.ECHO_CONFIG = path.join(sandbox, 'config.json')
+process.env.ECHO_COMPANION_TEST_KEY = 'fixture-only'
+process.env.ECHO_COMPANION_TEST_URL = 'https://model.invalid/v1'
+const originalFetch = globalThis.fetch
 try {
-  await fs.writeFile(process.env.ECHO_CONFIG, '{}')
-  const { companionStatus } = await import('../lib/companion.mjs')
+  const config = {
+    upstream: { apiKeyEnv: 'ECHO_COMPANION_TEST_KEY', baseUrlEnv: 'ECHO_COMPANION_TEST_URL' },
+    companion: { enabled: true }, memory: { enabled: false },
+    proactive: { quietHours: { start: '00:00', end: '00:00' } },
+    screen: { enabled: false, blocklist: ['Vault'], excludeTitlePatterns: ['private.project'] },
+  }
+  await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify(config))
+  const { companionStatus, ingestFrame, setCompanion, pendingBubbles } = await import('../lib/companion.mjs')
+  const { saveConfig } = await import('../lib/config.mjs')
+  const { readState, writeState } = await import('../lib/store.mjs')
   const hour = new Date().toISOString().slice(0, 13)
   await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { hourly: { key: hour, count: 7 } } }))
   assert.equal((await companionStatus()).hourCount, 7, 'status reports the actual current hour budget usage')
   await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { hourly: { key: '2000-01-01T00', count: 7 } } }))
   assert.equal((await companionStatus()).hourCount, 0, 'the previous hour does not count toward the current budget')
+
+  const requests = []
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://model.invalid/v1/chat/completions')
+    requests.push(options.body)
+    return Response.json({ choices: [{ message: { content: '{"speak":false}' } }] })
+  }
+  const stateBefore = await fs.readFile(path.join(sandbox, 'state.json'), 'utf8')
+  const frame = { app: 'Editor', title: 'Draft', text: 'Writing a few lines about the upcoming product demonstration.' }
+  for (const [fields, reason] of [
+    [{ app: 'My Vault' }, 'blocklist:Vault'],
+    [{ title: 'Private project notes' }, 'pattern:private.project'],
+    [{ text: 'Confidential private project details appear in the OCR output only.' }, 'pattern:private.project'],
+  ]) {
+    assert.equal((await ingestFrame({ ...frame, ...fields })).skipped, reason)
+  }
+  assert.equal(requests.length, 0, 'excluded frames never reach the model')
+  assert.equal(await fs.readFile(path.join(sandbox, 'state.json'), 'utf8'), stateBefore, 'excluded frames cannot become the saved OCR baseline')
+  assert.deepEqual((await fs.readdir(sandbox)).sort(), ['config.json', 'state.json'], 'excluded frames create no bubble or log files')
+  assert.equal((await ingestFrame(frame)).skipped, 'decided_quiet')
+  assert.equal(requests.length, 1, 'an allowed frame still reaches the fixture model')
+  for (const speak of [false, true]) {
+    for (const [reason, changePermission] of [
+      ['blocklist:Editor', () => saveConfig({ screen: { blocklist: ['Editor'] } })],
+      ['paused', () => setCompanion({ pauseMinutes: 30 })],
+      ['disabled', () => saveConfig({ companion: { enabled: false } })],
+    ]) {
+      await saveConfig({ screen: { blocklist: [] }, companion: { enabled: true } })
+      await writeState({ companion: {} })
+      globalThis.fetch = async (url) => {
+        assert.equal(url, 'https://model.invalid/v1/chat/completions')
+        await changePermission()
+        const reply = { speak, scenario: 'work', bubble: 'A late suggestion' }
+        return Response.json({ choices: [{ message: { content: JSON.stringify(reply) } }] })
+      }
+      assert.equal((await ingestFrame(frame)).skipped, reason)
+      assert.equal((await readState()).companion.lastFrameText, undefined)
+      assert.deepEqual(await pendingBubbles(), [])
+    }
+  }
 } finally {
+  globalThis.fetch = originalFetch
   await fs.rm(sandbox, { recursive: true, force: true })
 }
-console.log('Companion regressions passed: streaming; composer state; scoped native authentication; hourly budget.')
+console.log('Companion regressions passed: streaming, composer state, scoped native authentication, hourly budget and screen exclusions.')

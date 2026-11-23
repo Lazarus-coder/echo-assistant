@@ -380,7 +380,10 @@ try {
         { id: 'goal_brief_failed', title: '准备失败的目标', status: 'active', revision: 1, deadline: null, preparation: { state: 'failed', retryAt: now }, scope: {}, watch: {} },
         { id: 'goal_brief_tracked', title: '已接管的线索', status: 'active', revision: 1, preparation: { state: 'idle' }, candidateLoopId: 'loop_brief', scope: {}, watch: {} },
       ],
-      preparations: [{ id: 'prep_brief', commitmentId: 'goal_brief_due', revision: 1, title: '草稿标题', delivery: { status: 'pending', expiresAt: new Date(Date.now() + 3600000).toISOString() }, createdAt: now }],
+      preparations: [
+        { id: 'prep_brief', commitmentId: 'goal_brief_due', revision: 1, title: '草稿标题', delivery: { status: 'pending', expiresAt: new Date(Date.now() + 3600000).toISOString() }, createdAt: now },
+        { id: 'expired', commitmentId: 'goal_brief_due', revision: 1, delivery: { status: 'pending', expiresAt: since } },
+      ],
       dream: { loops: [{ id: 'loop_brief', topic: '已接管的线索', status: 'open' }, { id: 'loop_open', topic: '待接管的线索', status: 'open' }] },
     })
     globalThis.fetch = originalFetch
@@ -388,6 +391,7 @@ try {
     const kinds = brief.items.map((item) => item.kind)
     for (const kind of ['proactive', 'due', 'drafts', 'failed', 'loops']) assert.ok(kinds.includes(kind), `missing ${kind} in ${kinds}`)
     assert.equal(brief.items.find((item) => item.kind === 'due').goals[0].stage, 'today')
+    assert.deepEqual(brief.items.find((item) => item.kind === 'drafts').drafts.map((draft) => draft.id), ['prep_brief'])
     assert.equal(brief.items.find((item) => item.kind === 'loops').count, 1, 'tracked loops must not be listed as open')
     assert.equal(brief.items.find((item) => item.kind === 'proactive').count, 1)
     assert.equal(brief.since, since)

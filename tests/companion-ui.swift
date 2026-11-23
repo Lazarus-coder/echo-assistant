@@ -2,10 +2,50 @@ import AppKit
 import Foundation
 import JavaScriptCore
 
-// swiftc menubar/CompanionOverlay.swift tests/companion-ui.swift -o /tmp/echo-companion-ui-test
+// swiftc menubar/EchoBar.swift menubar/CompanionOverlay.swift tests/companion-ui.swift -o /tmp/echo-companion-ui-test
+private final class BubblePollFixture: URLProtocol {
+    static let received = DispatchSemaphore(value: 0)
+    static var expectedSince = ""
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: true)!
+        precondition(parts.host == "127.0.0.1" && parts.port == 1)
+        precondition(request.value(forHTTPHeaderField: "x-echo-local") == "native-test-token")
+        precondition(request.httpMethod == "GET" && parts.path == "/api/companion/pending")
+        precondition(parts.queryItems == [URLQueryItem(name: "since", value: Self.expectedSince)])
+        client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+        Self.received.signal()
+    }
+    override func stopLoading() {}
+}
+
 @main
 struct CompanionUITest {
-    static func main() {
+    static func main() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let data = root.appendingPathComponent("data")
+        try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "native-test-token\n".write(to: data.appendingPathComponent("local.token"), atomically: true, encoding: .utf8)
+        setenv("ECHO_ROOT", root.path, 1)
+        setenv("ECHO_PORT", "1", 1)
+        let controller = Controller()
+        precondition(URLProtocol.registerClass(BubblePollFixture.self))
+        BubblePollFixture.expectedSince = controller.bubbleSince
+        controller.pollBubbles()
+        precondition(BubblePollFixture.received.wait(timeout: .now() + 5) == .success)
+        URLProtocol.unregisterClass(BubblePollFixture.self)
+
+        let start = Date()
+        precondition(controller.recordCaptureIfDue(companion: false, force: false, now: start))
+        for second in stride(from: 0, to: 300, by: 20) {
+            precondition(controller.recordCaptureIfDue(companion: true, force: false, now: start.addingTimeInterval(Double(second))))
+        }
+        precondition(!controller.recordCaptureIfDue(companion: false, force: false, now: start.addingTimeInterval(299)))
+        precondition(controller.recordCaptureIfDue(companion: false, force: false, now: start.addingTimeInterval(300)))
+
         _ = NSApplication.shared
         let token = "test-'\"\\\n</script>😀"
         let authScript = OverlayController.miniAuthScript(origin: "http://127.0.0.1:8787", token: token)!
@@ -71,6 +111,6 @@ struct CompanionUITest {
         precondition(expires == 1, "A card must resume auto-hide after the pointer leaves")
         hovered.expire()
         precondition(expires == 1, "An expired card must not send duplicate feedback")
-        print("Companion UI regressions passed: scoped native credentials; HTTP(S) links; bubble lifecycle and hover.")
+        print("Companion UI regressions passed: native polling route, screen and companion cadence, scoped credentials, HTTP(S) links, bubble lifecycle and hover.")
     }
 }

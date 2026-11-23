@@ -38,7 +38,7 @@ const goal = {
   scope: { research: true, memory: false, urls: [], documents: [], folders: [], officialDomains: ['93.184.216.34'] },
 }
 const initialEvidence = [{ id: 'goal1', source: `commitment:${goal.id}`, label: 'Goal', observedAt: new Date().toISOString(), excerpt: 'Complete registration.' }]
-const finalJSON = () => ({ title: 'Registration checklist', content: 'Review the registration checklist. [goal1]', evidenceIds: ['goal1'], assumptions: [], question: null, deadlineClaims: [] })
+const finalJSON = () => ({ title: 'Registration checklist', content: 'Review the registration checklist. [goal1]', evidenceIds: ['goal1'], assumptions: [], question: 'Which registration guide should I use?', deadlineClaims: [] })
 const calls = (items) => items.map(([name, args], index) => ({ index, id: `call_${index}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }))
 function sse({ content, tools }) {
   return new Response(`data: ${JSON.stringify({ choices: [{ delta: tools ? { tool_calls: calls(tools) } : { content: JSON.stringify(content ?? finalJSON()) }, finish_reason: tools ? 'tool_calls' : 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 5 } })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
@@ -193,6 +193,7 @@ try {
       : requests.length === 2 ? sse({ tools: [['web_fetch', { url: 'https://93.184.216.34/registration' }]] })
         : sse({ content: { ...finalJSON(), content: 'Registration closes on the date stated by the school. [web1]', evidenceIds: ['web1'] } })
     const result = await researchCommitment(current, { evidence: initialEvidence })
+    assert.equal(result.json.resultKind, 'findings')
     assert.equal(requests.length, 3)
     assert.equal(result.evidence.length, 2)
     assert.doesNotMatch(JSON.stringify(result.evidence), /SEARCH_ONLY_SENTINEL/)
@@ -210,6 +211,29 @@ try {
     assert.equal((await store.readState()).commitments[0].deadline, undefined, 'research never mutates the goal or asserts completion')
   })
 
+  await test('a goal, search clue or uncited page cannot be published as a research finding', async () => {
+    for (const fixture of [
+      { tools: [['web_search', { query: '2027 registration' }]], evidenceIds: ['goal1'], citation: 'goal1' },
+      { tools: [['web_fetch', { url: 'https://93.184.216.34/registration' }]], evidenceIds: ['goal1', 'web1'], citation: 'goal1' },
+      { tools: [['web_fetch', { url: 'https://93.184.216.34/registration' }]], evidenceIds: ['goal1'], citation: 'web1' },
+    ]) {
+      const current = await setup()
+      modelReply = async () => requests.length === 1 ? sse({ tools: fixture.tools }) : sse({ content: {
+        ...finalJSON(), content: `The next deadline is tomorrow. [${fixture.citation}] https://93.184.216.34/registration`,
+        evidenceIds: fixture.evidenceIds, question: null,
+      } })
+      let runId
+      await assert.rejects(researchCommitment(current, { evidence: initialEvidence }), (error) => {
+        runId = error.runId
+        return /准备下一步/.test(error.message)
+      })
+      const run = await getRun(runId)
+      assert.equal(run.status, 'failed')
+      assert.ok(run.steps.every((step) => step.name !== 'research_result'))
+      assert.equal(requests.length, 2)
+    }
+  })
+
   await test('unconfirmed hosts and model authority assertions cannot create official evidence', async () => {
     const current = await setup()
     modelReply = async () => requests.length === 1 ? sse({ tools: [['web_fetch', { url: 'https://93.184.216.35/page' }]] }) : sse({})
@@ -222,8 +246,9 @@ try {
     const shared = await sources.saveResearchDocument({ name: 'shared.txt', data: Buffer.from('SHARED_DOCUMENT_TEXT').toString('base64') })
     const privateDocument = await sources.saveResearchDocument({ name: 'private.txt', data: Buffer.from('UNSHARED_DOCUMENT_SENTINEL').toString('base64') })
     const current = await setup({ documents: [shared.id] })
-    modelReply = async () => requests.length === 1 ? sse({ tools: [['document_read', { id: privateDocument.id }], ['document_read', { id: shared.id }]] }) : sse({})
+    modelReply = async () => requests.length === 1 ? sse({ tools: [['document_read', { id: privateDocument.id }], ['document_read', { id: shared.id }]] }) : sse({ content: { ...finalJSON(), content: 'Read the shared file. [document1]', evidenceIds: ['document1'] } })
     const result = await researchCommitment(current, { evidence: initialEvidence })
+    assert.equal(result.json.resultKind, 'findings')
     assert.doesNotMatch(JSON.stringify(requests), /UNSHARED_DOCUMENT_SENTINEL/)
     assert.equal(result.evidence.at(-1).source, `document:${shared.id}`)
     assert.equal(result.evidence.at(-1).page, 1)

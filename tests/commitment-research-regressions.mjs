@@ -264,14 +264,20 @@ try {
     assert.equal((await engine.pendingPreparations()).length, 1)
     await store.mutateState((state) => { state.commitments[0].watch.lastError = 'offline' })
     assert.deepEqual(await engine.pendingPreparations(), [])
+    const saved = await engine.updateCommitment(goal.id, { deadline: current.deadline, situation: current.situation, watch: { type: current.watch.type } })
+    assert.equal(saved.revision, current.revision, 'saving the same form preserves research provenance and the draft')
+    assert.equal(saved.deadlineOrigin, 'research')
     const changed = await engine.updateCommitment(goal.id, { deadline: '2027-02-01' })
     assert.equal(changed.deadlineOrigin, 'user')
+    assert.equal(changed.deadlineAssessment, undefined)
+    assert.equal((await engine.listCommitments()).commitments[0].deadlineVersion, undefined)
   })
 
   await test('known folder-file changes trigger combined watches even with an unchanged web source', async () => {
     await reset()
     await fs.writeFile(path.join(workspace, 'allowed', 'notes.txt'), 'Registration checklist version one.')
     streamTools = 'both'
+    output = () => ({ ...modelOutput(), content: 'Review the registration requirements. [file1]', evidenceIds: ['file1'] })
     await engine.createCommitment(scoped({ scope: { research: true, urls: [pageUrl], folders: ['allowed'], officialDomains: ['8.8.8.8'] } }))
     assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
     let current = (await engine.listCommitments()).commitments[0]
@@ -287,6 +293,7 @@ try {
   await test('manual research source freshness is rechecked and network disable blocks reads and delivery', async () => {
     await reset()
     streamTools = true
+    output = () => ({ ...modelOutput(), content: 'Review the registration requirements. [web1]', evidenceIds: ['web1'] })
     await engine.createCommitment(scoped({ watch: { type: 'manual' } }))
     assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
     assert.equal((await engine.pendingPreparations()).length, 1)
@@ -304,9 +311,16 @@ try {
 
   await test('an unresolved identity question waits for user clarification instead of repeated research', async () => {
     await reset()
-    output = () => ({ ...modelOutput(), question: 'Which program and application cycle?' })
+    const question = 'Which program and application cycle?'
+    output = () => ({ ...modelOutput(), title: 'UNSUPPORTED title', content: 'UNSUPPORTED findings. [goal1]', assumptions: ['UNSUPPORTED assumption'], question, deadlineClaims: [claim] })
     const goal = await engine.createCommitment(goalInput({ scope: { research: true }, watch: { type: 'combined' } }))
     assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
+    const [clarification] = await engine.pendingPreparations()
+    assert.equal(clarification.resultKind, 'clarification')
+    assert.equal(clarification.question, question)
+    assert.match(clarification.content, /尚无正文来源/)
+    assert.equal(clarification.deadlineAssessment.status, 'none')
+    assert.doesNotMatch(JSON.stringify(clarification), /UNSUPPORTED/)
     await store.mutateState((state) => { state.commitments[0].watch.nextCheckAt = '2000-01-01T00:00:00Z' })
     await engine.prepareDueCommitments()
     assert.equal(requests, 1)

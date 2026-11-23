@@ -332,7 +332,7 @@ function messageNode(m) {
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
       ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
       <div class="content"></div>
-      ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">加入跟进</button><span class="muted small">让 Echo 接手准备与跟进</span></div>` : ''}
+      ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">加入跟进</button><span class="muted small">${m.followUp.stale ? `这条线索是 ${esc(String(m.followUp.ageDays ?? ''))} 天前注意到的，先确认它是否还相关` : '让 Echo 接手准备与跟进'}</span></div>` : ''}
       ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
       ${imageGallery(m.images)}
       <div class="tail"></div>
@@ -443,18 +443,25 @@ const BRIEF_GAP_MS = 6 * 3600000
 
 /** 离开足够久后回来，用一次只读请求把"期间发生了什么"拼成一张卡；离开不足时不打扰。 */
 async function maybeShowReturnBrief() {
+  if (document.hidden) return
   const last = localStorage.getItem('echo.lastVisit')
   localStorage.setItem('echo.lastVisit', new Date().toISOString())
   if (!last || !Number.isFinite(Date.parse(last))) return
   if (Date.now() - Date.parse(last) < BRIEF_GAP_MS) return
   try {
     const brief = await api(`brief?since=${encodeURIComponent(last)}`)
-    if (!brief?.items?.length) return
-    S.brief = brief
+    S.brief = brief?.items?.length ? brief : null
+    $('#briefCard')?.remove()
     const inner = $('#threadInner')
-    if (inner && S.current === 'main') inner.prepend(briefCard(brief))
+    if (S.brief && inner && S.current === 'main') inner.prepend(briefCard(brief))
   } catch {}
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!S.boot || $('#app').hidden) return
+  if (document.hidden) localStorage.setItem('echo.lastVisit', new Date().toISOString())
+  else maybeShowReturnBrief()
+})
 
 function briefCard(brief) {
   const card = document.createElement('div')
@@ -469,9 +476,15 @@ function briefCardHtml(brief) {
   for (const item of brief.items) {
     if (item.kind === 'proactive') rows.push(`Echo 主动发了 <b>${item.count}</b> 条消息${item.latest?.preview ? ` · 最新：${esc(item.latest.preview)}` : ''}`)
     else if (item.kind === 'due') rows.push(item.goals.map((g) => `<b>${esc(g.title)}</b> ${g.stage === 'overdue' ? '已过截止' : g.stage === 'today' ? '今天截止' : '临近截止'}（${esc(g.deadline)}）`).join('；'))
-    else if (item.kind === 'drafts') rows.push(`<b>${item.count}</b> 份准备草稿待查看${item.drafts?.length ? `（${item.drafts.map((d) => esc(d.title)).join('、')}）` : ''}`)
+    else if (item.kind === 'drafts') rows.push(`<b>${item.count}</b> 份准备草稿待查看 ${(item.drafts ?? []).map((d) => `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(d.id)}" data-commitment-id="${esc(d.commitmentId)}">${esc(d.title)}</button>`).join(' ')}`)
     else if (item.kind === 'failed') rows.push(`<b>${item.count}</b> 个目标准备失败，稍后自动重试`)
-    else if (item.kind === 'loops') rows.push(`还有 <b>${item.count}</b> 条 Dream 待跟进线索可一键接管`)
+    else if (item.kind === 'loops') {
+      const fresh = item.freshCount ?? 0
+      // 隔了日子的线索不算"待接管"：Echo 自己没再看过的事，不该催用户现在接手
+      if (fresh) rows.push(`还有 <b>${fresh}</b> 条 Dream 线索可一键接管${item.count > fresh ? `；另有 ${item.count - fresh} 条已经隔了日子` : ''}`)
+      else if (item.newestDays != null) rows.push(`<b>${item.count}</b> 条 Dream 线索至少隔了 ${item.newestDays} 天，先不催你接`)
+      else rows.push(`有 <b>${item.count}</b> 条 Dream 线索，暂时判断不了它们还新不新`)
+    }
     else if (item.kind === 'facts') rows.push(`记下了 <b>${item.count}</b> 条新事实`)
   }
   return `<div class="brief-head"><span>你不在的这段时间</span><button class="icon-btn" data-action="dismiss-brief" aria-label="关闭简报"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
@@ -488,7 +501,10 @@ async function adoptFollowUp(btn) {
   btn.disabled = true
   try {
     const body = { title: proposal.title, successCriteria: proposal.successCriteria }
-    if (proposal.deadline) body.deadline = proposal.deadline
+    if (proposal.deadline) {
+      body.deadline = proposal.deadline
+      body.watch = { type: 'deadline' }
+    }
     if (proposal.candidateLoopId) body.candidateLoopId = proposal.candidateLoopId
     const r = await api('commitments', { method: 'POST', body })
     btn.textContent = '已加入跟进'
@@ -762,31 +778,33 @@ const W = {
 
 const STEPS = ['端点', '模型', '记忆', '搜索', '权限', '完成']
 
-async function openWizard({ restart = false } = {}) {
-  const [cat, cfgRes] = await Promise.all([api('providers'), api('settings').catch(() => null)])
+async function openWizard() {
+  const cat = await api('providers')
   W.catalog = cat
   if (!W.open) W.returnFocus = document.activeElement
   W.open = true
-  if (!restart) {
-    // 从现状预填，避免让人重填一遍
-    W.baseUrl = cat.onboarding.baseUrl || ''
-    W.models = S.boot?.config?.models?.map((m) => m.id) ?? []
-    W.defaultModel = S.boot?.config?.defaultModel ?? ''
-    W.utilityModel = S.boot?.config?.utilityModel ?? ''
-    W.imageModel = S.boot?.config?.defaultImageModel ?? ''
-    W.profile = cat.onboarding.profile || 'standard'
-    W.order = [...(cat.onboarding.searchOrder ?? ['scrape', 'gateway'])]
-  }
-  W.step = restart ? 0 : cat.onboarding.completed ? 0 : 0
+  const config = S.boot?.config
+  W.baseUrl = cat.onboarding.baseUrl || ''
+  W.models = config?.models?.map((m) => m.id) ?? []
+  W.defaultModel = config?.defaultModel ?? ''
+  W.utilityModel = config?.utilityModel ?? ''
+  W.imageModel = config?.defaultImageModel ?? ''
+  W.profile = cat.onboarding.profile || 'standard'
+  W.order = (cat.onboarding.searchOrder ?? ['scrape', 'gateway']).filter((id) => id !== 'none')
+  W.providerCfg = config?.search?.providers ?? {}
+  W.step = 0
+  W.test = W.perms = W.permTest = null
   $('#wizard').hidden = false
   renderWizard()
   syncScrim()
-  void cfgRes
 }
 
 function closeWizard() {
   W.open = false
+  W.apiKey = W.password = ''
+  W.keys = {}
   $('#wizard').hidden = true
+  $('#wizard').replaceChildren()
   syncScrim()
   restoreFocus(W.returnFocus)
 }
@@ -842,12 +860,10 @@ function stepEndpoint() {
 }
 
 function stepModels() {
-  const opts = W.models.length
-    ? W.models.map((m) => `<option value="${esc(m)}" ${m === W.defaultModel ? 'selected' : ''}>${esc(m)}</option>`).join('')
-    : ''
   return `
-    <div class="field"><label>默认模型${W.models.length ? `（已发现 ${W.models.length} 个）` : '（没拉到列表就手填）'}</label>
-      ${opts ? `<select id="wModel">${opts}</select>` : `<input type="text" id="wModel" placeholder="例如 gpt-4o-mini / qwen-plus" value="${esc(W.defaultModel)}" />`}</div>
+    <div class="field"><label for="wModel">默认模型（可选择或输入模型 ID）</label>
+      <input type="text" id="wModel" list="wModels" required placeholder="例如 gpt-4o-mini / qwen-plus" value="${esc(W.defaultModel)}" />
+      <datalist id="wModels">${W.models.map((m) => `<option value="${esc(m)}"></option>`).join('')}</datalist></div>
     <div class="field"><label>后台杂活模型（标题、记忆抽取、Dream；默认同默认模型）</label>
       <input type="text" id="wUtility" placeholder="留空 = 用默认模型" value="${esc(W.utilityModel)}" /></div>
     <div class="field"><label>出图模型（可选；留空就关掉 image_gen 工具）</label>
@@ -909,13 +925,13 @@ function stepPermissions() {
     ${row(p.runningUnderLaunchd, p.runningUnderLaunchd ? '已由 launchd 常驻（登录自启、崩溃自动拉起）' : '当前是手动启动的；要常驻请跑 ./install.sh')}
     ${row(p.tools.swiftc, p.tools.swiftc ? 'swiftc 可用（能编译状态栏图标）' : '缺少 swiftc：xcode-select --install')}
     ${row(true, `服务地址：${esc(p.bind)} :${p.port}${p.lanAddresses?.length ? ` · 局域网 ${esc(p.lanAddresses[0].split(' ')[0])}` : ''}`)}
-    ${row(!p.authRequired, p.authRequired ? '已开启口令验证' : '未要求口令（本机自用；公共网络下建议开）')}
+    ${row(p.authRequired, p.authRequired ? '已开启口令验证' : '尚未要求访问口令')}
     <div class="field" style="margin-top:12px"><label>屏幕录制权限（只有开启屏幕感知才需要）</label>
       <div class="row"><button class="btn small" data-w="perm-test">测试一次</button>
       <span class="muted small" id="wPermOut">${W.permTest ? (W.permTest.granted ? '✓ 已授权，能抓到画面' : `✗ ${esc(W.permTest.hint)}`) : '未测试'}</span></div>
     </div>
-    <div class="field"><label>设个访问口令（可选，<span class="muted">留空则免登录</span>）</label>
-      <input type="password" id="wPass" placeholder="≥6 位；开启后手机访问需要输入" value="${esc(W.password)}" /></div>
+    ${p.canSetInitialPassword ? `<div class="field"><label for="wPass">设置口令并开启登录验证（可选）</label>
+      <input type="password" id="wPass" minlength="6" autocomplete="new-password" placeholder="至少 6 位" value="${esc(W.password)}" /></div>` : '<p class="muted small">可在 Mac 本机的「设置 → 访问控制」管理口令。</p>'}
     <p class="muted small">权限说明与命令见仓库 docs/permissions.md。</p>`
 }
 
@@ -933,16 +949,30 @@ function stepDone() {
 
 function bindWizard() {
   const el = $('#wizard')
+  function syncEndpoint() {
+    const baseUrl = $('#wBase').value.trim().replace(/\/+$/, '')
+    if (baseUrl === W.baseUrl) return
+    W.baseUrl = baseUrl
+    W.test = null
+    W.apiKey = $('#wKey').value = ''
+    W.models = []
+    W.defaultModel = W.utilityModel = W.imageModel = ''
+    $('#wTestOut').textContent = ''
+  }
   el.querySelectorAll('[data-w]').forEach((btn) =>
     btn.addEventListener('click', async () => {
       const act = btn.dataset.w
       if (act === 'back') { W.step = Math.max(0, W.step - 1); return renderWizard() }
       if (act === 'skip') { localStorage.setItem('echo.onboardSkipped', '1'); closeWizard(); return toast('随时可以在「设置 → 引导与权限」里重新配置') }
       if (act === 'test') {
-        W.baseUrl = $('#wBase').value.trim()
+        syncEndpoint()
         W.apiKey = $('#wKey').value.trim()
         $('#wTestOut').textContent = '测试中…'
+        const pending = Symbol()
+        W.test = pending
         const r = await api('onboarding/test', { method: 'POST', body: { baseUrl: W.baseUrl, apiKey: W.apiKey } })
+          .catch((err) => ({ ok: false, error: err.message }))
+        if (!W.open || W.step !== 0 || W.test !== pending) return
         W.test = r
         if (r.ok) {
           W.models = r.models
@@ -958,14 +988,17 @@ function bindWizard() {
       if (act === 'next') {
         // 收集当前步骤的输入
         if (W.step === 0) {
-          W.baseUrl = ($('#wBase')?.value ?? W.baseUrl).trim()
+          syncEndpoint()
           W.apiKey = ($('#wKey')?.value ?? W.apiKey).trim()
+          if (W.baseUrl !== W.catalog.onboarding.baseUrl && !W.apiKey) return toast('更换模型端点时，请输入该端点的 API Key', true)
         } else if (W.step === 1) {
+          if ($('#wModel')?.reportValidity() === false) return
           W.defaultModel = ($('#wModel')?.value ?? '').trim()
           W.utilityModel = ($('#wUtility')?.value ?? '').trim()
           W.imageModel = ($('#wImage')?.value ?? '').trim()
         } else if (W.step === 4) {
-          W.password = ($('#wPass')?.value ?? '').trim()
+          if ($('#wPass')?.reportValidity() === false) return
+          W.password = $('#wPass')?.value ?? ''
         }
         if (W.step === 3) {
           W.providerCfg = {}
@@ -992,20 +1025,26 @@ function bindWizard() {
           keys: W.keys,
           password: W.password,
         }
-        const r = await api('onboarding/complete', { method: 'POST', body })
-        if (r.ok) {
+        try {
+          await api('onboarding/complete', { method: 'POST', body })
           toast('配置已保存，开始对话吧')
           closeWizard()
           await boot({ keep: true })
-        } else {
+        } catch (err) {
           btn.disabled = false
-          toast('保存失败：' + (r.error ?? ''), true)
+          toast(err.message, true)
         }
       }
     }),
   )
   el.querySelector('#wPreset')?.addEventListener('change', (e) => {
-    if (e.target.value) $('#wBase').value = e.target.value
+    $('#wBase').value = e.target.value
+    syncEndpoint()
+  })
+  el.querySelector('#wBase')?.addEventListener('input', syncEndpoint)
+  el.querySelector('#wKey')?.addEventListener('input', () => {
+    W.test = null
+    $('#wTestOut').textContent = ''
   })
   el.querySelectorAll('input[name="wProfile"]').forEach((r) =>
     r.addEventListener('change', () => {
@@ -1747,7 +1786,7 @@ async function renderMemoryPanel() {
                 (l) => `<div class="loop"><div class="row"><b>${esc(l.topic)}</b>${l.due ? `<span class="due">截止 ${esc(l.due)}</span>` : ''}
                   <button class="btn small right" data-action="adopt-loop" data-id="${esc(l.id)}">接下这件事</button>
                   <button class="btn small ghost" data-action="loop-done" data-id="${esc(l.id)}">不再跟进</button></div>
-                  <div class="muted small">${esc(l.why ?? '')}${l.raised ? ` · 已提过 ${l.raised} 次` : ''}</div></div>`,
+                  <div class="muted small">${esc(l.why ?? '')}${l.raised ? ` · 已提过 ${l.raised} 次` : ''}${l.ageDays != null ? ` · ${esc(String(l.ageDays))} 天前注意到` : ''}</div></div>`,
               )
               .join('')
           : '<div class="muted small">Dream 还没有整理出需要跟进的事。</div>'
@@ -2262,7 +2301,7 @@ async function renderProactivePanel({ poll = false, force = false } = {}) {
     const candidates = $('#commitmentCandidates')
     if (!candidates.contains(document.activeElement)) {
       const loops = COMMITMENTS.loops.filter((loop) => loop.status !== 'done' && !COMMITMENTS.items.some((goal) => goal.candidateLoopId === loop.id))
-      candidates.innerHTML = loops.map((loop) => `<div class="mem-item"><div class="txt"><b>${esc(loop.topic)}</b><p class="muted small">${esc(loop.why ?? '')}${loop.due ? ` · 截止 ${esc(loop.due)}` : ''}</p><button class="btn small" data-action="adopt-loop" data-id="${esc(loop.id)}">接下这件事</button></div></div>`).join('') || '<p class="muted small">暂无待确认事项。</p>'
+      candidates.innerHTML = loops.map((loop) => `<div class="mem-item"><div class="txt"><b>${esc(loop.topic)}</b><p class="muted small">${esc(loop.why ?? '')}${loop.due ? ` · 截止 ${esc(loop.due)}` : ''}${loop.ageDays != null ? ` · ${esc(String(loop.ageDays))} 天前注意到` : ''}</p><button class="btn small" data-action="adopt-loop" data-id="${esc(loop.id)}">接下这件事</button></div></div>`).join('') || '<p class="muted small">暂无待确认事项。</p>'
     }
     const overview = $('#proactiveOverview')
     const signature = JSON.stringify([p, dream.nudges, agency])
@@ -2800,7 +2839,8 @@ async function selectConv(id) {
   const meta = S.convs.find((c) => c.id === id)
   if (meta) meta.unread = 0
   $('#convTitle').textContent = S.conv.title ?? '对话'
-  $('#modelSelect').value = S.conv.model ?? prefs.model ?? S.boot.config.defaultModel
+  const preferredModel = S.conv.model || prefs.model
+  $('#modelSelect').value = S.boot.config.models?.some((m) => m.id === preferredModel) ? preferredModel : S.boot.config.defaultModel
   $('#searchSelect').value = S.conv.searchMode ?? prefs.searchMode
   renderConvs()
   renderThread()
@@ -2986,7 +3026,7 @@ async function handleAction(e) {
     await openPanel('proactive')
     const loop = COMMITMENTS.loops.find((item) => item.id === id)
     if (!loop) return toast('这条候选事项已更新，请查看最新列表', true)
-    return showCommitmentEditor({ title: loop.topic, deadline: loop.due }, { candidateLoopId: loop.id, quote: loop.why })
+    return showCommitmentEditor({ title: loop.topic, deadline: loop.due, watch: { type: loop.due ? 'deadline' : 'manual' } }, { candidateLoopId: loop.id, quote: loop.why })
   }
   if (act === 'goal-edit' || act === 'goal-complete') {
     const goal = COMMITMENTS.items.find((item) => item.id === id)
@@ -3326,7 +3366,7 @@ async function handleAction(e) {
   }
   if (act === 'rerun-wizard') {
     closeDrawer()
-    return openWizard({ restart: true })
+    return openWizard()
   }
   if (act === 'perm-test') {
     const out = $('#permOut')

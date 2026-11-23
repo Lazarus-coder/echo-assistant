@@ -19,19 +19,21 @@ research you choose to enable, and tools for the work in front of you.
 
 Echo brings conversations, personal context, and ongoing goals into one place. Start with a question, keep what matters, and return to a clear next step. Choose your own compatible model endpoint and API key; Echo runs on your Mac and stores its records there.
 
+**Which version has follow-ups?** The public alpha.6 installer supports goals through the **主动服务** panel. Chat-created goals, one-click adoption and the return brief are available in the current source. [Source setup](docs/development.md#requirements-and-source-setup)
+
 ## Made for work that continues
 
 | When you want to… | Echo helps you… |
 |---|---|
 | **Work through a question** | Discuss ideas, refine a prompt, search for sources, and revisit a conversation. Image input and generation are available when supported by your selected models. |
-| **Prepare for a goal** | Say "keep an eye on this" in chat and Echo takes it over: success criteria, background preparation, and a draft that comes back to the main conversation. Or define it in **主动服务** and choose each goal's sources. With research enabled, it uses public sources, attached documents, and selected folders, and follows relevant dates or source changes. |
+| **Prepare for a goal** | Ask Echo to track a goal with a due date. It prepares a draft in the background. Ask “show me the draft” to read the current result and its sources in chat, even with proactive messages off. Or define it in **主动服务** and choose each goal's sources. With research enabled, it uses public sources, attached documents, and selected folders, and follows relevant dates or source changes. |
 | **Work on a project** | Connect a local workspace to read files and, with the relevant permissions enabled, edit them or run commands. Follow the current step and outcome, then return to saved steps and outputs. |
 
 ## Context that stays useful
 
 **Memory you can manage.** Inspect, protect, revive, or remove remembered facts. Choose a memory level and adjust response preferences. Older, unused facts can fade; you decide what should remain.
 
-**Follow-up on your terms.** Background research starts off. Turn it on in **主动服务**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **加入跟进** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Come back after a few hours and a return brief collects what happened while you were away, from existing records only. You can review a result, correct it, pause a goal, or mark it complete.
+**Follow-up on your terms.** Background research starts off. Turn it on in **主动服务**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **加入跟进** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Return to chat after six hours away to see a brief of recorded activity and open any current draft directly. You can review a result, correct it, pause a goal, or mark it complete.
 
 **Optional screen context.** Screen awareness and companion mode start off. If you enable them and grant macOS Screen Recording permission, Echo can use recent screen context and offer brief suggestions. Selecting the deep memory profile also enables screen awareness. Capture can be paused from the menu bar.
 

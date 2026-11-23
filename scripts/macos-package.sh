@@ -119,16 +119,15 @@ if [ "$VERIFY" = "1" ]; then
   [ -f "$MOUNT/Echo.app/Contents/Info.plist" ] || die "Echo.app 不完整"
 
   info "在临时目标目录试装（不注册或打开服务）…"
+  INST="$INSTALL_TEST_ROOT/Library/Application Support/Echo"
   if env -u ECHO_PASSWORD -u ECHO_DATA_DIR -u ECHO_CONFIG -u NODE_OPTIONS \
      ECHO_FORCE=1 OPENAI_API_KEY=sk-installer-selftest OPENAI_BASE_URL=https://example.invalid/v1 \
-     ECHO_HOME="$INSTALL_TEST_ROOT/Apps/Echo" ECHO_PORT=0 \
-     "$MOUNT/Install Echo.command" --no-launchd --no-open --target "$INSTALL_TEST_ROOT/Apps/Echo" <<< "" >"$INSTALL_TEST_ROOT/install.log" 2>&1; then
+     ECHO_PORT=0 "$MOUNT/Install Echo.command" --no-launchd --no-open --target "$INST" <<< "" >"$INSTALL_TEST_ROOT/install.log" 2>&1; then
     ok "安装器跑通"
   else
     tail -20 "$INSTALL_TEST_ROOT/install.log"
     die "安装器在临时目标目录下失败（见上面输出）"
   fi
-  INST="$INSTALL_TEST_ROOT/Apps/Echo"
   [ -f "$INST/server.mjs" ] && [ -f "$INST/package-lock.json" ] && [ -d "$INST/node_modules/@modelcontextprotocol/sdk" ] && [ -f "$INST/Echo.app/Contents/MacOS/EchoBar" ] && [ -x "$INST/bin/echo" ] || die "安装结果缺少关键文件"
   ok "装出的内容完整（server.mjs / MCP 依赖 / Echo.app / bin/echo）"
 

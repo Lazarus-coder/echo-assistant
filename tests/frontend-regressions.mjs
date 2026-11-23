@@ -178,6 +178,41 @@ test('settings save submits config and provider keys', async () => {
   assert.deepEqual(body.env, { TEST_API_KEY: 'test-key' })
 })
 
+test('reopening setup preserves the manual model, utility model and offline search choice', async () => {
+  const h = harness()
+  h.run(`S.boot = { config: { defaultModel: 'manual-chat', utilityModel: 'small', models: [{ id: 'manual-chat' }] } };
+    api = async () => ({ onboarding: { searchOrder: ['none'], profile: 'light' } });
+    renderWizard = syncScrim = () => {}`)
+  await h.run('openWizard()')
+  assert.equal(h.run('W.utilityModel'), 'small')
+  assert.equal(h.run('W.order.length'), 0)
+  assert.match(h.run('stepModels()'), /<input[^>]+id="wModel"[^>]+value="manual-chat"/)
+})
+
+test('changing wizard endpoints clears credentials and discards pending discovery for the previous endpoint', async () => {
+  const h = harness()
+  const wizard = h.get('#wizard')
+  const testButton = element()
+  testButton.dataset.w = 'test'
+  wizard.querySelectorAll = (selector) => selector === '[data-w]' ? [testButton] : []
+  wizard.querySelector = h.get
+  h.get('#wBase').value = 'https://first.invalid/v1'
+  h.get('#wKey').value = 'fixture-key'
+  let finish
+  h.context.discover = () => new Promise((resolve) => { finish = resolve })
+  h.run(`Object.assign(W, { open: true, step: 0, baseUrl: 'https://first.invalid/v1', models: ['old'], defaultModel: 'old' });
+    api = discover; bindWizard()`)
+  const pending = testButton.dispatch('click')
+  await h.get('#wPreset').dispatch('change', { target: { value: 'https://second.invalid/v1' } })
+  assert.equal(h.get('#wKey').value, '')
+  assert.equal(h.run('W.apiKey'), '')
+  finish({ ok: true, models: ['old result'], count: 1 })
+  await pending
+  assert.equal(h.run('W.test'), null)
+  assert.equal(h.run('W.models.length'), 0)
+  assert.equal(h.run('W.defaultModel'), '')
+})
+
 test('polish controls do not implicitly submit the composer', () => {
   const h = harness()
   h.run(`POLISH.last = { polished: "Improved draft", changed: true };

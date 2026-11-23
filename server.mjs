@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
-import { loadConfig, saveConfig, upstreamCreds, deepMerge, P, DATA, ROOT } from './lib/config.mjs'
+import { loadConfig, saveConfig, upstreamCreds, deepMerge, checkLegacyProfile, P, DATA, ROOT } from './lib/config.mjs'
 import { loadEnvFile } from './lib/env.mjs'
 import { log } from './lib/log.mjs'
 import { readJSON, writeJSON, nowIso, clip, assertId, newId } from './lib/util.mjs'
@@ -294,6 +294,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public')
 const inflight = new Map()
 let mcp = new McpHub({})
 let cfg = await loadConfig()
+const launchEnvNames = new Set(Object.keys(process.env))
 let bootedAt = Date.now()
 let authState = { passwordSet: false }
 
@@ -380,7 +381,14 @@ function applyProfilePatch(patch, profileId) {
   return deepMerge(deepMerge(patch, { memory: { profile } }), rest)
 }
 
-async function writeEnvValues(values) {
+let envWrites = Promise.resolve()
+function writeEnvValues(values) {
+  const work = envWrites.then(() => persistEnvValues(values))
+  envWrites = work.catch(() => {})
+  return work
+}
+
+async function persistEnvValues(values) {
   const file = P.env
   let lines = []
   try {
@@ -392,6 +400,7 @@ async function writeEnvValues(values) {
     if (m) keep.set(m[1], m[2])
   }
   let removed = 0
+  const applied = []
   for (const [k, v] of Object.entries(values ?? {})) {
     if (v === undefined || v === null) continue
     // 键名不合法或值里带换行的条目直接拒收：写进文件会注入出别的环境变量
@@ -402,17 +411,41 @@ async function writeEnvValues(values) {
     if (String(v) === '') {
       // 显式清空 = 删除该密钥（界面不会发空值，只有明确的"清除"才会走到这）
       if (keep.delete(k)) removed++
-      delete process.env[k]
+      applied.push([k, ''])
       continue
     }
     keep.set(k, v)
-    process.env[k] = v
+    applied.push([k, String(v)])
   }
   if (removed) log.warn(`已从 echo.env 移除 ${removed} 个密钥`)
   await fs.mkdir(path.dirname(file), { recursive: true })
-  await fs.writeFile(file, `${[...keep.entries()].map(([k, v]) => `${k}=${v}`).join('\n')}${keep.size ? '\n' : ''}`, { mode: 0o600 })
-  await fs.chmod(file, 0o600).catch(() => {})
+  const temp = `${file}.${crypto.randomUUID()}.tmp`
+  try {
+    await fs.writeFile(temp, `${[...keep.entries()].map(([k, v]) => `${k}=${v}`).join('\n')}${keep.size ? '\n' : ''}`, { mode: 0o600, flag: 'wx' })
+    await fs.rename(temp, file)
+    for (const [key, value] of applied) {
+      if (value) process.env[key] = value
+      else delete process.env[key]
+    }
+  } finally {
+    await fs.rm(temp, { force: true })
+  }
   return [...keep.keys()]
+}
+
+function wizardConnection(body) {
+  const current = upstreamCreds()
+  const baseUrl = String(body.baseUrl || current.baseUrl).trim().replace(/\/+$/, '')
+  const apiKey = String(body.apiKey ?? '').trim()
+  const changed = baseUrl !== current.baseUrl
+  const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
+  if (baseUrl && (!URL.canParse(baseUrl) || !/^https?:\/\//.test(baseUrl) || /[\r\n]/.test(baseUrl))) fail('请输入完整的 HTTP 或 HTTPS 端点地址')
+  if (apiKey && !baseUrl) fail('请先输入该 API Key 对应的模型端点')
+  if (/[\r\n]/.test(apiKey)) fail('API Key 不能包含换行')
+  if (changed && !apiKey) fail('更换模型端点时，请输入该端点的 API Key')
+  if (changed && launchEnvNames.has(current.baseUrlEnv)) fail(`请先更新启动环境变量 ${current.baseUrlEnv} 并重启 Echo`)
+  if (apiKey && apiKey !== current.apiKey && launchEnvNames.has(current.apiKeyEnv)) fail(`请先更新启动环境变量 ${current.apiKeyEnv} 并重启 Echo`)
+  return { ...current, baseUrl, apiKey: apiKey || current.apiKey, changed }
 }
 
 /** BYOK 引导页第二步用：拿 key 去问端点有哪些模型。 */
@@ -436,7 +469,7 @@ async function discoverModels({ baseUrl, apiKey }) {
   return { baseUrl: base, count: models.length, models: models.slice(0, 400) }
 }
 
-async function permissionsReport() {
+async function permissionsReport(req) {
   const { apiKey, baseUrl } = upstreamCreds()
   const has = (cmd, args = ['--version']) =>
     new Promise((resolve) => {
@@ -458,6 +491,7 @@ async function permissionsReport() {
     bind: (process.env.ECHO_BIND ?? cfg.bind) === 'all' ? '0.0.0.0（局域网可访问）' : '127.0.0.1（仅本机）',
     lanAddresses: lanAddresses(),
     authRequired: cfg.requirePassword === true,
+    canSetInitialPassword: !authState.passwordSet && isLocalToolsRequest(req),
     configured: Boolean(apiKey && baseUrl),
     runningUnderLaunchd: process.ppid === 1 || Boolean(process.env.XPC_SERVICE_NAME),
     dataDir: DATA,
@@ -872,7 +906,7 @@ async function api(req, res, url) {
   if (method === 'POST' && p === 'onboarding/test') {
     const body = await readBody(req)
     try {
-      const r = await discoverModels({ baseUrl: body.baseUrl ?? cfg.upstream.baseUrl, apiKey: String(body.apiKey ?? '').trim() || upstreamCreds().apiKey })
+      const r = await discoverModels(wizardConnection(body))
       return send(res, 200, { ok: true, ...r })
     } catch (err) {
       return send(res, 200, { ok: false, error: err.message })
@@ -881,35 +915,48 @@ async function api(req, res, url) {
 
   if (method === 'POST' && p === 'onboarding/complete') {
     const body = await readBody(req)
+    const password = body.password ?? ''
+    if (password !== '') {
+      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'loopback_only', message: '请在 Mac 本机浏览器设置口令' })
+      if (typeof password !== 'string' || password.length < 6) return send(res, 400, { error: 'weak', message: '口令至少 6 位' })
+      if (authState.passwordSet) return send(res, 409, { error: 'password_exists', message: '已有访问口令，请在设置中管理' })
+    }
+    const connection = wizardConnection(body)
+    if (connection.changed && !String(body.defaultModel ?? '').trim()) return send(res, 400, { error: 'missing_model', message: '请为新端点选择或输入一个默认模型' })
     const envValues = {}
-    const keyName = String(body.apiKeyEnv || cfg.upstream.apiKeyEnv || 'OPENAI_API_KEY')
-    if (body.apiKey) envValues[keyName] = String(body.apiKey).trim()
-    for (const [k, v] of Object.entries(body.keys ?? {})) if (/^[A-Z0-9_]+$/.test(k) && v) envValues[k] = String(v).trim()
+    for (const p of searchProviderCatalog(cfg)) {
+      if (p.needsKey && body.keys?.[p.envVar]) envValues[p.envVar] = String(body.keys[p.envVar]).trim()
+    }
+    if ((connection.changed || body.apiKey) && !launchEnvNames.has(connection.baseUrlEnv)) envValues[connection.baseUrlEnv] = connection.baseUrl
+    if (body.apiKey) envValues[connection.apiKeyEnv] = connection.apiKey
     const written = await writeEnvValues(envValues)
 
-    const upstream = {}
-    if (body.baseUrl) upstream.baseUrl = String(body.baseUrl).replace(/\/+$/, '')
-    if (Array.isArray(body.models) && body.models.length) {
+    const upstream = connection.changed ? { models: [], imageModels: [], defaultImageModel: '', utilityModel: body.defaultModel, fallback: [] } : {}
+    if (body.baseUrl) upstream.baseUrl = connection.baseUrl
+    if (Array.isArray(body.models)) {
       upstream.models = body.models.map((m) => (typeof m === 'string' ? { id: m, label: m, group: '已发现' } : m))
     }
     if (body.defaultModel) upstream.defaultModel = body.defaultModel
     if (body.utilityModel) upstream.utilityModel = body.utilityModel
-    if (Array.isArray(body.imageModels) && body.imageModels.length) {
+    if (Array.isArray(body.imageModels)) {
       upstream.imageModels = body.imageModels
       upstream.defaultImageModel = body.defaultImageModel ?? body.imageModels[0]?.id ?? ''
     }
     const patch = applyProfilePatch({ onboarding: { completed: true, at: nowIso() }, upstream }, body.profile)
     if (body.search?.order) patch.search = { order: body.search.order.filter((x) => typeof x === 'string') }
     if (body.search?.providers) patch.search = { ...(patch.search ?? {}), providers: body.search.providers }
-    if (body.password && String(body.password).length >= 6) await setPassword(String(body.password))
-
+    if (password) patch.requirePassword = true
     cfg = await saveConfig(patch)
+    if (password) {
+      await setPassword(password)
+      await createSession(res)
+    }
     if (body.restartMcp) await connectMcp()
     log.info(`引导完成：端点 ${cfg.upstream.baseUrl || '(来自环境变量)'} · 模型 ${cfg.upstream.models.length} 个 · 记忆档 ${cfg.memory.profile} · 搜索链 ${(cfg.search.order ?? []).join('→')}${written.length ? ` · 写入密钥 ${written.join(',')}` : ''}`)
     return send(res, 200, { ok: true, envKeys: written, onboarding: onboardingState(), config: publicConfig(cfg) })
   }
 
-  if (method === 'GET' && p === 'permissions') return send(res, 200, await permissionsReport())
+  if (method === 'GET' && p === 'permissions') return send(res, 200, await permissionsReport(req))
   if (method === 'POST' && p === 'permissions/screen-test') return send(res, 200, await screenPermissionProbe())
 
   /* ------------------------------ 伴随模式 ------------------------------ */
@@ -1297,6 +1344,7 @@ function publicConfig(c) {
     defaultImageModel: c.upstream.defaultImageModel,
     media: c.media,
     defaultModel: c.upstream.defaultModel,
+    utilityModel: c.upstream.utilityModel,
     generation: c.generation,
     systemPrompt: c.systemPrompt,
     search: c.search,
@@ -1581,6 +1629,7 @@ const proactiveTimer = setInterval(async () => {
 /* --------------------------------- startup --------------------------------- */
 
 async function boot() {
+  checkLegacyProfile()
   await fs.mkdir(path.join(P.convDir), { recursive: true })
   await fs.mkdir(P.logs, { recursive: true })
   await ensureStorageDirs()

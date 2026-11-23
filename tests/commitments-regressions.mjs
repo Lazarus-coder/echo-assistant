@@ -76,6 +76,8 @@ try {
     assert.equal((await engine.listCommitments()).commitments[0].id, goal.id)
     assert.equal((await store.readState()).unrelated.keep, true)
     await assert.rejects(engine.createCommitment(input({ candidateLoopId: 'loop_missing' })), { status: 400 })
+    await store.mutateState((s) => { s.dream.loops = [{ id: 'closed_loop', status: 'done' }] })
+    await assert.rejects(engine.createCommitment(input({ candidateLoopId: 'closed_loop' })), { status: 400 })
   })
 
   await test('validation rejects invalid scopes, dates, oversized fields, provenance and incomplete completion', async () => {
@@ -382,7 +384,7 @@ try {
     assert.equal((await engine.pendingPreparations()).length, 0)
     assert.match((await engine.listCommitments()).commitments.find((g) => g.id === goal.id).preparation.error, /无法读取授权来源/)
   })
-await test('chat follow-up tools create, list, update and prepare a tracked commitment end to end', async () => {
+  await test('chat follow-up tools create, list and update a tracked commitment', async () => {
     await reset()
     const cfg = await loadConfig()
     const registry = buildToolRegistry({ cfg, mcp: null, conversationId: 'main', searchMode: 'off', run: null, allowLocalTools: false })
@@ -392,7 +394,7 @@ await test('chat follow-up tools create, list, update and prepare a tracked comm
     const goal = (await engine.listCommitments()).commitments.find((entry) => entry.title === 'Track visa slot')
     assert.equal(goal.status, 'active')
     assert.deepEqual(goal.scope.urls, ['https://example.com/visa'])
-    assert.equal(goal.watch.type, 'source_change')
+    assert.equal(goal.watch.type, 'combined')
     assert.equal(goal.preparation.state, 'queued')
     const duplicate = await registry.call('follow_up_create', { title: 'Track visa slot', successCriteria: 'ignored' })
     assert.equal(duplicate.existed, true)
@@ -401,6 +403,28 @@ await test('chat follow-up tools create, list, update and prepare a tracked comm
     await registry.call('follow_up_update', { id: goal.id, status: 'paused' })
     assert.equal((await engine.listCommitments()).commitments.find((entry) => entry.id === goal.id).status, 'paused')
     await assert.rejects(registry.call('follow_up_update', { id: goal.id, status: 'done' }), /follow_up_complete/)
+  })
+
+  await test('dated chat requests prepare once per deadline milestone and can clear the date', async () => {
+    await reset()
+    const cfg = await loadConfig()
+    const registry = buildToolRegistry({ cfg, conversationId: 'main' })
+    const date = new Date().toLocaleDateString('en-CA')
+    const { commitmentId: id } = await registry.call('follow_up_create', { ...input(), deadline: date })
+    await engine.prepareDueCommitments()
+    const goal = (await engine.listCommitments()).commitments[0]
+    assert.equal(goal.watch.type, 'deadline')
+    assert.ok(goal.watch.deadlineMilestones[date + ':today'])
+    // Model a Mac returning on the due date after it prepared the approaching milestone.
+    await store.mutateState((s) => { s.commitments[0].watch.deadlineMilestones = { [date + ':soon']: goal.updatedAt } })
+    await dueWatch(id)
+    await engine.prepareDueCommitments()
+    assert.equal(requests.length, 2)
+    await dueWatch(id)
+    await engine.prepareDueCommitments()
+    assert.equal(requests.length, 2)
+    await registry.call('follow_up_update', { id, deadline: '' })
+    assert.equal((await engine.listCommitments()).commitments[0].watch.type, 'manual')
   })
 
   await test('a chat-created follow-up becomes a reviewable draft through background preparation', async () => {

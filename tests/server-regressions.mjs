@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
@@ -7,13 +7,16 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'echo-server-'))
+const install = path.join(sandbox, 'Library', 'Application Support', 'Echo')
+const dataDir = path.join(install, 'data')
 let app
 let logs = ''
 const requestsFile = path.join(sandbox, 'model-requests.jsonl')
+const discoveryFile = path.join(sandbox, 'discovery-requests.jsonl')
 
 async function jsonLines(file) {
   return (await fs.readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map((line) => JSON.parse(line))
@@ -43,7 +46,13 @@ function rawRequest(port, target, host) {
 }
 
 try {
-  const config = path.join(sandbox, 'config.json')
+  await fs.mkdir(dataDir, { recursive: true })
+  for (const entry of ['server.mjs', 'lib', 'public', 'package.json']) {
+    await fs.cp(path.join(root, entry), path.join(install, entry), { recursive: true })
+  }
+  await fs.symlink(path.join(root, 'node_modules'), path.join(install, 'node_modules'), 'dir')
+  await fs.writeFile(path.join(dataDir, 'echo.env'), 'OPENAI_BASE_URL=https://model.invalid/v1\nECHO_SERVER_TEST_KEY=local-test-only\n', { mode: 0o600 })
+  const config = path.join(install, 'config.json')
   await fs.writeFile(config, JSON.stringify({
     requirePassword: false,
     dream: { enabled: false }, proactive: { enabled: false, research: { enabled: false } },
@@ -52,6 +61,25 @@ try {
     search: { enabled: false, maxToolRounds: 1 }, mcpServers: {},
     upstream: { apiKeyEnv: 'ECHO_SERVER_TEST_KEY', baseUrl: 'https://model.invalid/v1', defaultModel: 'fixture', utilityModel: 'fixture' },
   }))
+  await test('legacy records or access settings require an explicit profile choice before startup', async () => {
+    const oldRoot = pathToFileURL(install).pathname
+    const oldData = path.join(oldRoot, 'data')
+    const oldConfig = path.join(oldRoot, 'config.json')
+    await fs.mkdir(oldData, { recursive: true })
+    await fs.writeFile(path.join(oldData, 'auth.json'), '{}')
+    await fs.writeFile(oldConfig, JSON.stringify({ requirePassword: true }))
+    const check = (env) => spawnSync(process.execPath, ['--input-type=module', '-e', "import { checkLegacyProfile } from './lib/config.mjs'; checkLegacyProfile()"], {
+      cwd: install, env, encoding: 'utf8', timeout: 5000,
+    })
+    for (const env of [{}, { ECHO_DATA_DIR: oldData }, { ECHO_CONFIG: oldConfig }]) {
+      const result = check(env)
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, /docs\/getting-started\.md/)
+    }
+    assert.equal(check({ ECHO_CONFIG: oldConfig, ECHO_DATA_DIR: oldData }).status, 0)
+    await fs.rename(oldRoot, path.join(sandbox, 'archived profile'))
+    assert.equal(check({}).status, 0)
+  })
   const reservation = http.createServer()
   await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve))
   const port = reservation.address().port
@@ -62,10 +90,16 @@ try {
     const readdir = fs.readdir
     // Startup cleanup must not inspect the running user's shared capture directory.
     fs.readdir = (dir, ...args) => dir === '/tmp/echo-capture' ? Promise.resolve([]) : readdir(dir, ...args)
-    globalThis.fetch = async (url, { body: raw, signal }) => {
-      if (url !== 'https://model.invalid/v1/chat/completions') throw new Error('Unexpected network request: ' + url)
+    globalThis.fetch = async (url, { body: raw, headers, signal }) => {
+      const expectedKey = new URL(url).hostname === 'model.invalid' ? 'local-test-only' : 'new-fixture-key'
+      if (headers.authorization !== 'Bearer ' + expectedKey) throw new Error('Wrong fixture credential for endpoint')
+      if (url.endsWith('/models')) {
+        await fs.appendFile(${JSON.stringify(discoveryFile)}, JSON.stringify(url) + '\\n')
+        return Response.json({ data: [{ id: 'manual-chat' }] })
+      }
+      if (!['https://model.invalid/v1/chat/completions', 'https://new-model.invalid/v1/chat/completions'].includes(url)) throw new Error('Unexpected request: ' + url)
       const body = JSON.parse(raw)
-      await fs.appendFile(${JSON.stringify(requestsFile)}, JSON.stringify(body) + '\\n')
+      await fs.appendFile(${JSON.stringify(requestsFile)}, JSON.stringify({ ...body, endpoint: url }) + '\\n')
       if (!body.stream) return Response.json({ choices: [{ message: { content: '[]' } }] })
       const scenario = body.messages.findLast((message) => message.role === 'user').content
       if (scenario === 'STATUS:cancelled') return new Response(new ReadableStream({
@@ -78,13 +112,12 @@ try {
           : { content: 'Fixture completed.' }, finish_reason: scenario === 'STATUS:limit_reached' ? 'tool_calls' : 'stop' }] }
       return new Response('data: ' + JSON.stringify(chunk) + '\\n\\ndata: [DONE]\\n\\n')
     }
-    await import(${JSON.stringify(new URL('../server.mjs', import.meta.url).href)})
+    await import('./server.mjs')
   `], {
-    cwd: root,
+    cwd: install,
     env: {
-      PATH: process.env.PATH ?? '', ECHO_DATA_DIR: sandbox, ECHO_CONFIG: config,
+      PATH: process.env.PATH ?? '',
       ECHO_BIND: 'local', ECHO_PORT: String(port), ECHO_LOG_LEVEL: 'warn',
-      ECHO_SERVER_TEST_KEY: 'local-test-only',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -103,6 +136,16 @@ try {
     await delay(30)
   }
   assert.ok(ready, `Fixture did not start: ${logs}`)
+
+  await test('installed app serves chat and uses the credentials and data in Application Support', async () => {
+    assert.equal((await fetch(`${base}/`)).status, 200)
+    assert.equal((await fetch(`${base}/app.js`)).status, 200)
+    const { config } = await (await fetch(`${base}/api/bootstrap`)).json()
+    assert.equal(config.defaultModel, 'fixture')
+    assert.ok(config.models.some((model) => model.id === 'fixture'), 'existing manual-model profiles are selectable')
+    assert.equal(config.upstreamConfigured, true)
+    assert.ok((await fs.stat(path.join(dataDir, 'conversations', 'main.json'))).isFile())
+  })
 
   for (const host of ['[', 'localhost:invalid', 'bad%host']) {
     await test(`malformed Host ${host} returns 400 and leaves the server healthy`, async () => {
@@ -123,7 +166,6 @@ try {
       assert.match(await rawRequest(port, '/api/health?probe=1', host), /^HTTP\/1\.1 200 /)
     }
     assert.match(await rawRequest(port, `${base}/api/health`, `localhost:${port}`), /^HTTP\/1\.1 200 /)
-    assert.equal((await fetch(`${base}/`)).status, 200)
     assert.equal((await fetch(`${base}/missing`)).status, 404)
     assert.doesNotMatch(logs, /unhandledRejection|uncaughtException/)
   })
@@ -146,9 +188,9 @@ try {
       const terminal = events.findLast((event) => event.type === 'done' || event.type === 'error')
       const assistant = terminal.type === 'error' ? terminal.assistant : terminal.message
       assert.equal(assistant.runStatus, status)
-      const saved = JSON.parse(await fs.readFile(path.join(sandbox, 'conversations', `${conversation.id}.json`), 'utf8'))
+      const saved = JSON.parse(await fs.readFile(path.join(dataDir, 'conversations', `${conversation.id}.json`), 'utf8'))
       assert.deepEqual(saved.messages.at(-1), assistant)
-      const metric = await waitUntil(async () => (await jsonLines(path.join(sandbox, 'metrics.jsonl'))).find((event) => event.kind === 'turn' && event.conversationId === conversation.id))
+      const metric = await waitUntil(async () => (await jsonLines(path.join(dataDir, 'metrics.jsonl'))).find((event) => event.kind === 'turn' && event.conversationId === conversation.id))
       assert.equal(metric.ok, status === 'completed')
       if (status === 'failed' || status === 'cancelled') {
         assert.equal(assistant.content, '')
@@ -186,12 +228,55 @@ try {
     await healthy()
   })
 
-  await test('valid session survives malformed foreign cookies on authed routes (issue #1 lockout)', async () => {
-    const current = JSON.parse(await fs.readFile(config, 'utf8'))
-    await fs.writeFile(config, JSON.stringify({ ...current, requirePassword: true }))
-    await healthy()
-    const setup = await post('password', { password: 'correct horse battery' })
+  await test('onboarding saves an empty source selection as offline', async () => {
+    const response = await post('onboarding/complete', { defaultModel: 'manual-chat', models: [], search: { order: [] } })
+    assert.equal(response.status, 200)
+    const saved = await response.json()
+    assert.ok(saved.config.models.some((model) => model.id === 'manual-chat'))
+    assert.equal(saved.onboarding.usable, true)
+    assert.deepEqual(saved.config.search.order, ['none'])
+    assert.deepEqual(JSON.parse(await fs.readFile(config, 'utf8')).search.order, ['none'])
+    const result = await (await post('search/test', { query: 'offline test' })).json()
+    assert.deepEqual(result.attempts.map((attempt) => attempt.engine), ['none'])
+  })
+
+  await test('wizard password validation precedes saving other settings', async () => {
+    const foreign = await fetch(`${base}/api/onboarding/complete`, {
+      method: 'POST', headers: { 'x-echo-request': 'echo', 'content-type': 'application/json', origin: 'https://example.invalid' },
+      body: JSON.stringify({ password: 'foreign origin', defaultModel: 'invalid-change' }),
+    })
+    assert.equal(foreign.status, 403)
+    const response = await post('onboarding/complete', { password: 'short', defaultModel: 'invalid-change' })
+    assert.equal(response.status, 400)
+    const bootstrap = await (await fetch(`${base}/api/bootstrap`)).json()
+    assert.equal(bootstrap.config.defaultModel, 'manual-chat')
+    assert.deepEqual(bootstrap.config.auth, { required: false, passwordSet: false })
+  })
+
+  await test('changing model endpoint pairs the new address with an explicitly supplied key', async () => {
+    const oldBase = 'https://model.invalid/v1'
+    const newBase = 'https://new-model.invalid/v1'
+    const discover = async (body) => (await post('onboarding/test', body)).json()
+    assert.equal((await discover({ baseUrl: oldBase })).ok, true)
+    assert.equal((await discover({ baseUrl: newBase })).ok, false)
+    assert.equal((await post('onboarding/complete', { baseUrl: newBase, defaultModel: 'manual-chat' })).status, 400)
+    assert.deepEqual(await jsonLines(discoveryFile), [oldBase + '/models'])
+    const connection = { baseUrl: newBase, apiKey: 'new-fixture-key', defaultModel: 'manual-chat', models: [] }
+    assert.equal((await discover(connection)).ok, true)
+    const saved = await (await post('onboarding/complete', connection)).json()
+    assert.equal(saved.onboarding.baseUrl, newBase)
+    assert.deepEqual(saved.config.models.map((model) => model.id), ['manual-chat'])
+    const conversation = await (await post('conversations', {})).json()
+    await (await post('chat', { conversationId: conversation.id, userText: 'provider switched' })).text()
+    assert.ok((await jsonLines(requestsFile)).some((req) => req.stream && req.endpoint === newBase + '/chat/completions' && req.model === 'manual-chat'))
+    const env = await fs.readFile(path.join(dataDir, 'echo.env'), 'utf8')
+    assert.ok(env.includes('OPENAI_BASE_URL=' + newBase + '\n') && env.includes('ECHO_SERVER_TEST_KEY=new-fixture-key\n'))
+  })
+
+  await test('setting a wizard password enables login and keeps the current browser signed in with malformed foreign cookies', async () => {
+    const setup = await post('onboarding/complete', { password: 'correct horse battery' })
     assert.equal(setup.status, 200)
+    assert.deepEqual((await setup.json()).config.auth, { required: true, passwordSet: true })
     const session = /echo_s=([^;]+)/.exec(setup.headers.get('set-cookie') ?? '')?.[1]
     assert.ok(session, 'password setup must return a session cookie')
     const authed = await fetch(`${base}/api/bootstrap`, {
@@ -205,8 +290,12 @@ try {
       signal: AbortSignal.timeout(5000),
     })
     assert.equal(noSession.status, 401, 'malformed cookies must not bypass auth')
-    await fs.writeFile(config, JSON.stringify({ ...JSON.parse(await fs.readFile(config, 'utf8')), requirePassword: false }))
-    await healthy()
+    const repeat = await fetch(`${base}/api/onboarding/complete`, {
+      method: 'POST', headers: { cookie: `echo_s=${session}`, 'x-echo-request': 'echo', 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'replacement password' }),
+    })
+    assert.equal(repeat.status, 409, 'password changes use the existing password-management flow')
+    assert.equal((await post('login', { password: 'correct horse battery' })).status, 200)
   })
 } finally {
   if (app && app.exitCode === null && !app.signalCode) {

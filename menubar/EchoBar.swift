@@ -164,9 +164,10 @@ func jpegBase64(_ image: NSImage, maxEdge: CGFloat = 1280, quality: CGFloat = 0.
     return data.base64EncodedString()
 }
 
-func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 20,
+func request(_ path: String, query: [URLQueryItem] = [], method: String = "GET", body: [String: Any]? = nil, timeout: TimeInterval = 20,
              completion: @escaping ([String: Any]?) -> Void) {
-    var req = URLRequest(url: base.appendingPathComponent("api/" + path))
+    let endpoint = base.appendingPathComponent("api/" + path)
+    var req = URLRequest(url: query.isEmpty ? endpoint : endpoint.appending(queryItems: query))
     req.httpMethod = method
     req.timeoutInterval = timeout
     req.setValue(localToken(), forHTTPHeaderField: "x-echo-local")
@@ -254,11 +255,19 @@ final class Controller: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var working = false
     var capturing = false
-    var lastCaptureAt = Date.distantPast
+    var lastScreenCaptureAt = Date.distantPast
+    var lastCompanionCaptureAt = Date.distantPast
+
+    func recordCaptureIfDue(companion: Bool, force: Bool, now: Date = Date()) -> Bool {
+        let interval = companion ? summary.companionInterval : summary.screenInterval * 60
+        let previous = companion ? lastCompanionCaptureAt : lastScreenCaptureAt
+        guard force || now.timeIntervalSince(previous) >= Double(interval) else { return false }
+        if companion { lastCompanionCaptureAt = now } else { lastScreenCaptureAt = now }
+        return true
+    }
 
     /** 定期（或被要求时）看一眼屏幕：本地 OCR，图片不落盘，删掉临时文件。 */
     func maybeCapture(force: Bool, reason: String, companion: Bool = false) {
-        let intervalSeconds = companion ? summary.companionInterval : summary.screenInterval * 60
         if companion {
             guard summary.ok, summary.companionOn, !summary.companionPaused, !capturing else { return }
         } else {
@@ -268,9 +277,8 @@ final class Controller: NSObject, NSApplicationDelegate {
         if sessionLocked() { return }
         let idle = hidIdleSeconds()
         if idle > summary.screenIdleSkip { return }
-        if !force, Date().timeIntervalSince(lastCaptureAt) < Double(intervalSeconds) { return }
+        guard recordCaptureIfDue(companion: companion, force: force) else { return }
         capturing = true
-        lastCaptureAt = Date()
         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
         let title = frontmostWindowTitle()
         let mode = summary.screenMode
@@ -281,7 +289,7 @@ final class Controller: NSObject, NSApplicationDelegate {
             var body: [String: Any] = ["text": "", "app": appName, "title": title, "hidIdleSeconds": idle, "fromCapture": true]
             if ok, let img = NSImage(contentsOfFile: tmp) {
                 body["text"] = String(ocr(downscale(img, maxEdge: 2200)).prefix(8000))
-                if mode == "image", let b64 = jpegBase64(img) { body["image"] = "data:image/jpeg;base64," + b64 }
+                if !companion, mode == "image", let b64 = jpegBase64(img) { body["image"] = "data:image/jpeg;base64," + b64 }
             }
             let endpoint = companion ? "companion/frame" : "screen"
             request(endpoint, method: "POST", body: body, timeout: 240) { json in
@@ -327,7 +335,7 @@ final class Controller: NSObject, NSApplicationDelegate {
                 print("[menubar] 新主动消息：\(self.summary.lastPreview)")
             }
             self.rebuildMenu()
-            if self.summary.companionOn { self.pollBubbles() }
+            if self.summary.companionOn, !self.summary.companionPaused { self.pollBubbles() }
             if self.summary.captureRequested {
                 self.maybeCapture(force: true, reason: self.summary.captureReason ?? "requested")
             } else {
@@ -347,11 +355,10 @@ final class Controller: NSObject, NSApplicationDelegate {
 
     // 伴随：轮询待冒泡的气泡 → 悬浮窗呈现；点开进小对话窗
     let overlay = OverlayController()
-    var bubbleSince = ISO8601DateFormatter().string(from: Date())
+    let bubbleSince = Date().ISO8601Format(.init(includingFractionalSeconds: true))
     func pollBubbles() {
-        let q = "companion/pending?since=" + (bubbleSince.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")
-        request(q) { [weak self] json in
-            guard let self else { return }
+        request("companion/pending", query: [URLQueryItem(name: "since", value: bubbleSince)]) { [weak self] json in
+            guard let self, self.summary.companionOn, !self.summary.companionPaused else { return }
             let list = (json?["bubbles"] as? [[String: Any]]) ?? []
             guard !list.isEmpty else { return }
             let bubbles = list.map { item in

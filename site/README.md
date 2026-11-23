@@ -12,7 +12,7 @@ GitHub displays the HTML as source. To view the page, open `index.html` in a bro
 
 Update both pages together: version, download URL, release notes, system requirements, and any changes to product behavior. Use an explicit release tag while Echo has only prereleases; GitHub's `/releases/latest` endpoint does not select them.
 
-The installation and permissions links currently point to the documentation branch accompanying this site. Update them when that branch is merged or the documentation moves. Keep all external documentation links valid before publishing.
+Installation and permissions links point to the guides on `main`. Label source-only features where the site describes them alongside a published download.
 
 The interface illustrations are sample workflows, not screenshots of the live app. The README preview images capture this product page. Keep them aligned with visible changes to the first screen.
 

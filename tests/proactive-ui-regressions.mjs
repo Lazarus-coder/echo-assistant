@@ -50,6 +50,44 @@ function formFixture(h, values = {}) {
 }
 const fields = { title: '查报名时间', successCriteria: '确认适用年份的截止', nextAction: '查学校官网', urls: '', deadline: '', watch: 'combined', folders: '', officialDomains: '', questions: '' }
 
+test('returning to an open tab after six hours links directly to the saved draft', async () => {
+  const h = harness()
+  h.run("S.boot = {}; S.current = 'main'")
+  let last
+  h.context.localStorage.getItem = () => last
+  h.context.localStorage.setItem = (_, value) => { last = value }
+  h.document.hidden = true
+  h.listeners.get('visibilitychange').forEach((listener) => listener())
+  assert.ok(Number.isFinite(Date.parse(last)))
+  last = new Date(Date.now() - 7 * 3600000).toISOString()
+  const requests = [], cards = []
+  h.context.fetchBrief = async (route) => {
+    requests.push(route)
+    return { items: [{ kind: 'drafts', count: 1, drafts: [{ id: 'draft1', commitmentId: 'g1', title: 'Review <notes>' }] }] }
+  }
+  h.get('#threadInner').prepend = (card) => cards.push(card)
+  h.run('api = fetchBrief')
+  h.document.hidden = false
+  h.listeners.get('visibilitychange').forEach((listener) => listener())
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(cards.length, 1)
+  assert.match(cards[0].innerHTML, /data-action="view-preparation" data-preparation-id="draft1" data-commitment-id="g1">Review &lt;notes&gt;/)
+  await h.run('maybeShowReturnBrief()')
+  assert.equal(requests.length, 1)
+})
+
+test('accepting a dated suggestion enables its deadline watch', async () => {
+  const h = harness()
+  const writes = []
+  h.context.btn = element()
+  h.context.btn.dataset.message = 'm1'
+  h.context.send = async (route, options) => { if (options) writes.push(options.body); return {} }
+  h.run(`S.conv = { messages: [{ id: 'm1', followUp: { title: 'Check deadline', successCriteria: 'Review options', deadline: '2027-04-01', candidateLoopId: 'loop1' } }] }; api = send; toast = () => {}; renderConvs = () => {}`)
+  await h.run('adoptFollowUp(btn)')
+  assert.equal(writes[0].watch.type, 'deadline')
+  assert.equal(writes[0].candidateLoopId, 'loop1')
+})
+
 test('research is opt-in, new chats only, and scope/upstream/desktop limits are explicit', () => {
   const h = harness()
   const html = h.run('researchSettingsHtml()')
