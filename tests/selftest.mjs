@@ -761,8 +761,9 @@ async function startMockUpstream() {
       const sys = JSON.stringify(body?.messages?.find?.((m) => m.role === 'system')?.content ?? '')
       if (sys.includes('伴随模式')) {
         seen.push({ url: 'companion', body })
+        const selected = JSON.parse(body.messages[1].content)
         res.writeHead(200, { 'content-type': 'application/json' })
-        return res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ speak: mockRef.speak ?? true, scenario: mockRef.scenario ?? 'work', topic: '桩话题', bubble: '桩气泡：这件事值得说一句', why: '桩理由' }) }, finish_reason: 'stop' }], usage: { total_tokens: 12 } }))
+        return res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify({ speak: mockRef.speak ?? true, quote: selected.evidence.slice(0, 30), bubble: '桩气泡：' + selected.topic }) }, finish_reason: 'stop' }], usage: { total_tokens: 12 } }))
       }
       const leak = mockRef.forceLeak
       const content = JSON.stringify({
@@ -914,19 +915,17 @@ async function trackCompanion() {
   check('J', '同一屏内容不再调模型（变化检测省钱）', f2.json?.skipped === 'unchanged' && calls() === before + 1, `skipped=${f2.json?.skipped} 调用=${calls() - before}`)
 
   // 回归：被节流挡下的帧不能污染比较基线，否则间隔结束后同一屏永远不再被判断
-  const changedText = '微信窗口：张总问这个季度的复盘什么时候给他，他下周要跟老板汇报；我回了「这两天整理一下」，输入框里已经打了「好的张总」。'
-  const gapped = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'WeChat', title: '张总', hidIdleSeconds: 1 } })
+  const changedText = '回复草稿：这封项目邮件要说明季度复盘何时交付，以及下一次评审需要准备哪些材料，发送前还要核对格式。'
+  const gapped = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'TextEdit', title: 'Project draft', hidIdleSeconds: 1 } })
   await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
-  const retry = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'WeChat', title: '张总', hidIdleSeconds: 1 } })
+  const retry = await req('/api/companion/frame', { method: 'POST', body: { text: changedText, app: 'TextEdit', title: 'Project draft', hidIdleSeconds: 1 } })
   check('J', '被节流跳过的帧不会污染基线（同屏可再次被判断）', gapped.json?.skipped === 'min_gap' && retry.json?.bubble, `gap=${gapped.json?.skipped} retry=${retry.json?.bubble ? '出泡' : retry.json?.skipped}`)
 
   // 场景开关
   await req('/api/settings', { method: 'PATCH', body: { config: { companion: { scenarios: ['work'] } } } })
-  mock.scenario = 'video'
   await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
   const offScene = await req('/api/companion/frame', { method: 'POST', body: { text: '正在播放电影 Interstellar 的结尾段落，字幕显示：不要温和地走进那个良夜。播放器暂停在第 2 小时 14 分，片尾音乐还在继续。', app: 'IINA', title: 'film.mkv', hidIdleSeconds: 1 } })
   check('J', '未启用的场景不会冒泡', offScene.json?.skipped === 'scenario_off', `skipped=${offScene.json?.skipped} scenario=${offScene.json?.scenario}`)
-  mock.scenario = 'work'
   await req('/api/settings', { method: 'PATCH', body: { config: { companion: { scenarios: ['chat', 'video', 'work', 'code', 'browse', 'other'] } } } })
 
   // 每小时预算
@@ -958,7 +957,7 @@ async function trackCompanion() {
 
   // 气泡生命周期：自动淡出 = expired（不再重复弹），且不计入"被拒绝"的退避
   await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
-  const b3 = await req('/api/companion/frame', { method: 'POST', body: { text: '又一次不同的画面内容：浏览器里打开着一篇关于本地优先软件的长文，正文大约几百字，用来产生一个会被自动淡出的气泡并验证它不会反复出现。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+  const b3 = await req('/api/companion/frame', { method: 'POST', body: { text: '在资料页核对引用来源：文章比较两种本地优先软件的同步方案，并在末尾列出作者用到的论文题目。', app: 'Safari', title: '资料页', hidIdleSeconds: 1 } })
   const id3 = b3.json?.bubble?.id
   const once = await req('/api/companion/pending')
   await req(`/api/companion/${id3}/expire`, { method: 'POST', body: {} })

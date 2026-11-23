@@ -42,7 +42,7 @@ try {
     preferredName: 'PROFILE_NAME_SENTINEL', boundaries: 'PROFILE_BOUNDARY_SENTINEL',
   })
   await createRelationshipPerson({ name: 'Sentinel Person', context: 'PERSON_PRIVATE_SENTINEL', relationship: 'colleague' })
-  const loop = { id: 'loop_work', topic: 'Project proposal', why: 'User requested a project checklist', status: 'open', confidence: 0.8 }
+  const loop = { id: 'loop_work', touched_at: new Date().toLocaleDateString('en-CA'), topic: 'Project proposal', why: 'User requested a project checklist', status: 'open', confidence: 0.8 }
   const frame = {
     text: 'Email editor: draft a concise project schedule reply with the agreed checklist.',
     app: 'Editor', title: 'Project draft', hidIdleSeconds: 1,
@@ -51,8 +51,8 @@ try {
     const { relationship } = await readState()
     await writeState({ relationship, ...extra })
     requests.length = 0
-    answer = async (body) => body.messages[0].content.includes('主动服务决策')
-      ? { act: false, confidence: 0, reason: 'No useful follow-up now' }
+    answer = async (body) => body.messages[0].content.includes('本机选定的一件事')
+      ? { message: null }
       : { speak: false, scenario: 'chat', why: 'No useful wording change' }
   }
   const textOf = (body) => JSON.stringify(body)

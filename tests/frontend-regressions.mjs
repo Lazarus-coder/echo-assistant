@@ -216,15 +216,33 @@ test('timing status explains local rules separately from model content and honor
   const render = () => { h.run('renderProactiveOverview(state, {}, {})'); return h.get('#proactiveOverview').innerHTML }
   const html = render()
   assert.match(html, /本机判断[\s\S]*安静[\s\S]*时机不合适[\s\S]*近两周的 2 天[\s\S]*按此规则最早可提醒/)
-  assert.match(html, /模型判断[\s\S]*是否建议提醒[\s\S]*&lt;draft&gt;/)
+  assert.match(html, /旧版模型评估[\s\S]*&lt;draft&gt;/)
   assert.doesNotMatch(html, /repeated_wrong_time|<draft>/)
   h.context.state.nextGate.reason = 'quiet_hours'
   assert.match(render(), /现在是你设置的静默时段/)
   assert.doesNotMatch(render(), /按此规则最早可提醒/)
   h.context.state.nextGate = { allow: false, reason: 'quiet_style_gap' }
-  assert.match(render(), /至少两小时/)
+  assert.match(render(), /当前的建议间隔/)
   h.context.state.nextGate.reason = 'waiting_for_usual_window'
   assert.match(render(), /常聊的时段快到了/)
+})
+
+test('a local selection shows preset and effective parameters, its evidence and the separate wording outcome', () => {
+  const h = harness()
+  h.context.state = {
+    attention: { timing: { style: 'balanced', policy: {
+      base: { ambientGapMinutes: 0, habitWaitMinutes: 180, minScore: 0.62 },
+      effective: { ambientGapMinutes: 9, habitWaitMinutes: 205, minScore: 0.66 },
+    } } },
+    lastDecision: { policy: 'local', act: true, wording: 'abstained',
+      selection: { label: 'Review <slides>', score: 0.84, reasons: ['已给过有用反馈'] } },
+  }
+  h.run('renderProactiveOverview(state, {}, {})')
+  const html = h.get('#proactiveOverview').innerHTML
+  assert.match(html, /预设[\s\S]*当前[\s\S]*0\.62[\s\S]*0\.66/)
+  assert.match(html, /Review &lt;slides&gt;[\s\S]*0\.84[\s\S]*已给过有用反馈[\s\S]*模型未提供措辞/)
+  assert.doesNotMatch(html, /旧版模型评估|<slides>/)
+  assert.match(h.run('selectionDetails(state.lastDecision.selection)'), /为什么选这条提醒[\s\S]*&lt;slides&gt;/)
 })
 
 test('wrong time is available on delivered assistant interventions and leaves utility feedback selected', async () => {
@@ -239,14 +257,14 @@ test('wrong time is available on delivered assistant interventions and leaves ut
   const calls = [], notices = []
   h.context.sendFeedback = async (route, { body }) => {
     calls.push({ route, ...body })
-    return { outcome: { utility: 'good', timing: 'wrong_time' }, duplicate: calls.length > 1 }
+    return { outcome: { utility: 'good', timing: 'wrong_time' }, pausedUntil: new Date(Date.now() + 1800000).toISOString(), duplicate: calls.length > 1 }
   }
   h.context.showNotice = (text) => notices.push(text)
   h.context.button = { dataset: { action: 'fb', signal: 'wrong_time', kind: 'suggest', id: 'nudge' } }
   h.run("api = sendFeedback; toast = showNotice; S.current = 'main'; S.conv = {id:'main', messages:[{id:'nudge'}]}")
   await h.run('handleAction({target:{closest:() => button}})')
   assert.deepEqual(calls[0], { route: 'feedback', conversationId: 'main', messageId: 'nudge', kind: 'suggest', signal: 'wrong_time' })
-  assert.match(notices[0], /暂停打扰 30 分钟/)
+  assert.match(notices[0], /已记录时机反馈，暂停至/)
   assert.equal(h.run('S.conv.messages[0].feedback'), 'good')
   assert.equal(h.run('S.conv.messages[0].feedbackTiming'), 'wrong_time')
   await h.run('handleAction({target:{closest:() => button}})')
@@ -1252,6 +1270,8 @@ test('prepared results distinguish citation checks from truth and timing from us
   assert.match(html, /效果未知/)
   assert.doesNotMatch(html, /已反馈：unknown/)
   assert.match(html, /data-signal="wrong_time"[^>]*aria-pressed="true"/)
+  assert.match(html, /data-signal="good_time"[^>]*aria-pressed="false"/)
+  assert.match(h.run('preparationHtml({ id: "delivered", delivery: { deliveredAt: "2026-11-24T12:00:00Z" }, outcome: { signal: "completed", timing: "good_time" } })'), /data-signal="good_time"[^>]*aria-pressed="true"/)
   assert.match(html, /Needs confirmation/)
   assert.match(html, /Which date\?/)
   assert.doesNotMatch(html, /<script>|href="javascript:/)

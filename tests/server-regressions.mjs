@@ -100,7 +100,13 @@ try {
       if (!['https://model.invalid/v1/chat/completions', 'https://new-model.invalid/v1/chat/completions'].includes(url)) throw new Error('Unexpected request: ' + url)
       const body = JSON.parse(raw)
       await fs.appendFile(${JSON.stringify(requestsFile)}, JSON.stringify({ ...body, endpoint: url }) + '\\n')
-      if (!body.stream) return Response.json({ choices: [{ message: { content: '[]' } }] })
+      if (!body.stream) {
+        let selected
+        try { selected = JSON.parse(body.messages.at(-1).content) } catch {}
+        const wording = selected?.topic?.startsWith('Policy fixture ')
+          ? { message: 'Review the next step for ' + selected.topic + '.', quote: selected.topic } : []
+        return Response.json({ choices: [{ message: { content: JSON.stringify(wording) } }] })
+      }
       const scenario = body.messages.findLast((message) => message.role === 'user').content
       if (scenario === 'STATUS:cancelled') return new Response(new ReadableStream({
         start(controller) { signal.addEventListener('abort', () => controller.error(signal.reason), { once: true }) },
@@ -381,6 +387,74 @@ try {
     const reloaded = await (await fetch(`${base}/api/conversations/${conv.id}`)).json()
     assert.equal(reloaded.messages[0].feedback, 'good')
     assert.equal(reloaded.messages[0].feedbackTiming, 'wrong_time')
+    const correction = await feedback('good_time')
+    assert.equal(correction.outcome.timing, 'good_time')
+    assert.equal(correction.outcome.utility, 'good')
+    assert.equal((await feedback('good_time')).duplicate, true)
+    const corrected = await (await fetch(`${base}/api/conversations/${conv.id}`)).json()
+    assert.equal(corrected.messages[0].feedbackTiming, 'good_time')
+    assert.equal(corrected.messages[0].feedback, 'good')
+  })
+
+  await test('preparation and chat votes always reload from the same saved outcome', async () => {
+    const conv = await (await post('conversations', { title: 'Linked draft' })).json()
+    const prep = { id: 'prep_cross', commitmentId: 'goal_cross', delivery: {
+      status: 'delivered', conversationId: conv.id, messageId: 'msg_cross', deliveredAt: new Date().toISOString(),
+    } }
+    const msg = { id: prep.delivery.messageId, role: 'assistant', proactive: true, kind: 'brief', preparationId: prep.id,
+      commitmentId: prep.commitmentId, content: 'Draft ready.', feedback: 'wrong_time' }
+    const convFile = path.join(dataDir, 'conversations', conv.id + '.json')
+    const stateFile = path.join(dataDir, 'state.json')
+    const before = await fs.readFile(stateFile, 'utf8')
+    const state = JSON.parse(before)
+    await fs.writeFile(convFile, JSON.stringify({ ...conv, messages: [msg] }))
+    state.preparations = [...(state.preparations ?? []), prep]
+    await fs.writeFile(stateFile, JSON.stringify(state))
+    const vote = async (identity, signal) => (await (await post('feedback', { ...identity, signal })).json())
+    const card = { preparationId: prep.id }, chat = { conversationId: conv.id, messageId: msg.id }
+    const read = async () => (await (await fetch(`${base}/api/conversations/${conv.id}`)).json()).messages[0]
+    try {
+      const first = await vote(card, 'good_time')
+      assert.equal(first.outcome.messageId, msg.id)
+      assert.equal((await read()).feedbackTiming, 'good_time')
+      assert.equal((await read()).feedback, undefined, 'an old timing vote must not appear as utility')
+      await Promise.all([vote(chat, 'wrong_time'), vote(card, 'accepted')])
+      const projected = await read()
+      assert.equal(projected.feedback, 'accepted')
+      assert.equal(projected.feedbackTiming, 'wrong_time')
+      await Promise.all([vote(card, 'good_time'), vote(chat, 'wrong_time')])
+      const current = JSON.parse(await fs.readFile(stateFile, 'utf8')).agency.outcomes['preparation:' + prep.id]
+      const renamed = await (await patch('conversations/' + conv.id, { title: 'Renamed draft' })).json()
+      assert.equal(renamed.messages[0].feedbackTiming, current.timing)
+      assert.equal(renamed.messages[0].feedback, current.utility)
+      assert.equal(JSON.parse(await fs.readFile(convFile, 'utf8')).messages[0].feedbackTiming, undefined, 'votes have a single writable store')
+    } finally { await fs.writeFile(stateFile, before) }
+  })
+
+  await test('native bubble timing and mini-chat utility share one outcome across reloads', async () => {
+    const id = 'bubble_surface_test'
+    const file = path.join(dataDir, 'companion.jsonl')
+    const before = await fs.readFile(file, 'utf8').catch(() => '')
+    const bubble = { id, topic: 'Meeting', scenario: 'work', bubble: 'Review the agenda.', why: 'Meeting soon.',
+      frame: { app: 'Fixture', title: 'Agenda' }, status: 'pending', ts: new Date().toISOString() }
+    try {
+      await fs.writeFile(file, before + '\n' + JSON.stringify(bubble) + '\n')
+      const { conversationId } = await (await post('companion/' + id + '/open', {})).json()
+      assert.ok(conversationId)
+      const route = 'conversations/' + conversationId
+      const identity = { conversationId, messageId: 'm_' + id }
+      const native = () => post('companion/' + id + '/dismiss', { reason: 'wrong_time' })
+      const mini = (signal) => post('feedback', { ...identity, signal })
+      const intro = async () => (await (await fetch(`${base}/api/${route}`)).json()).messages[0]
+      await Promise.all([native(), mini('good')])
+      assert.equal((await intro()).feedback, 'good')
+      assert.equal((await intro()).feedbackTiming, 'wrong_time')
+      await mini('good_time')
+      assert.equal((await intro()).feedbackTiming, 'good_time')
+      await native()
+      assert.equal((await intro()).feedbackTiming, 'wrong_time')
+      assert.equal((await intro()).feedback, 'good')
+    } finally { await fs.writeFile(file, before) }
   })
 
   await test('status and a manual check agree on a quiet-style delay before model evaluation', async () => {
@@ -410,6 +484,49 @@ try {
         enabled: previousSettings.proactive.enabled, quietHours: previousSettings.proactive.quietHours,
       } } })
       await fs.writeFile(stateFile, before)
+    }
+  })
+
+  await test('the same preset and evidence produce different selected topics after actual content feedback', async () => {
+    const stateFile = path.join(dataDir, 'state.json')
+    const conversationFile = path.join(dataDir, 'conversations', 'main.json')
+    const originalState = await fs.readFile(stateFile, 'utf8')
+    const originalChat = await fs.readFile(conversationFile, 'utf8')
+    const cfg = (await (await fetch(`${base}/api/settings`)).json()).config
+    const status = async () => (await (await fetch(`${base}/api/proactive`)).json()).nextGate
+    const run = async () => (await (await post('proactive/run', {})).json()).result
+    const modelRequests = async () => (await jsonLines(requestsFile)).filter((row) => !row.stream && JSON.stringify(row.messages).includes('Policy fixture '))
+    const a = { id: 'loop_policy_a', topic: 'Policy fixture budget', why: 'A revision of the budget is due.', status: 'open', confidence: 0.98,
+      touched_at: new Date().toISOString(), due: new Date().toLocaleDateString('en-CA') }
+    const b = { ...a, id: 'loop_policy_b', topic: 'Policy fixture training', why: 'The workshop outline needs review.', confidence: 0.90, due: null }
+    try {
+      await fs.writeFile(stateFile, JSON.stringify({ dream: { loops: [a, b], nudges: [] } }))
+      assert.equal((await patch('settings', { config: {
+        attention: { style: 'balanced', minGapSeconds: 0 },
+        proactive: { enabled: true, notify: false, minGapMinutes: 0, quietHours: { start: '00:00', end: '00:00' } },
+      } })).status, 200)
+      assert.equal((await status()).selection.anchorId, a.id)
+      const first = await run()
+      assert.equal(first.message.selection.anchorId, a.id)
+      assert.equal((await (await post('feedback', { conversationId: 'main', messageId: first.message.id, signal: 'bad' })).json()).outcome.utility, 'bad')
+      const learned = JSON.parse(await fs.readFile(stateFile, 'utf8'))
+      learned.dream.loops[0].why = 'A new budget revision arrived today.'
+      const neutral = { ...learned, agency: {} }
+      await fs.writeFile(stateFile, JSON.stringify(neutral))
+      assert.equal((await status()).selection.anchorId, a.id, 'fresh material for A would be selected without the user vote')
+      await fs.writeFile(stateFile, JSON.stringify(learned))
+      assert.equal((await status()).selection.anchorId, b.id, 'the same inputs and starting preset now select B')
+      assert.equal((await run()).message.selection.anchorId, b.id)
+      const requests = await modelRequests()
+      assert.equal(requests.length, 2)
+      assert.ok(!JSON.stringify(requests[0].messages).includes(b.topic))
+      assert.ok(!JSON.stringify(requests[1].messages).includes(a.topic))
+      assert.equal((await run()).acted, false)
+      assert.equal((await modelRequests()).length, 2, 'suppressed or already delivered topics cost no composition requests')
+    } finally {
+      await patch('settings', { config: { proactive: cfg.proactive, attention: cfg.attention } })
+      await fs.writeFile(stateFile, originalState)
+      await fs.writeFile(conversationFile, originalChat)
     }
   })
 

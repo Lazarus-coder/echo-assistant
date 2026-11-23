@@ -48,7 +48,7 @@ import {
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { returnBrief } from './lib/brief.mjs'
 import { proactiveTick, proactiveStatus } from './lib/proactive.mjs'
-import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
+import { applyFeedback, agencyStats, messageWithFeedback, settlePending } from './lib/agency.mjs'
 import { listCommitments, createCommitment, updateCommitment, requestPreparation, answerPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
 import { discoverNeeds, cancelDiscovery, researchStatus, validateResearchSettings } from './lib/discovery.mjs'
 import { cancelAndDrainResearch } from './lib/research.mjs'
@@ -221,8 +221,10 @@ function publicChatMessage(message) {
   return { ...message, recalled: publicRecall(message.recalled) }
 }
 
-function publicConversation(conv) {
-  return { ...conv, messages: (conv.messages ?? []).map(publicChatMessage) }
+async function publicConversation(conv) {
+  const messages = conv.messages ?? []
+  const outcomes = messages.some((m) => m?.proactive || m?.companion) ? (await readState()).agency?.outcomes : null
+  return { ...conv, messages: messages.map((m) => publicChatMessage(messageWithFeedback(m, conv.id, outcomes))) }
 }
 
 function publicChatEvent(event) {
@@ -748,7 +750,7 @@ async function api(req, res, url) {
   if (method === 'POST' && p === 'conversations') {
     const body = await readBody(req)
     const conv = await createConversation({ title: body.title ?? '新对话', model: body.model, system: body.system })
-    return send(res, 200, publicConversation(conv))
+    return send(res, 200, await publicConversation(conv))
   }
   if (method === 'GET' && p === 'conversations') return send(res, 200, { conversations: await listConversations() })
 
@@ -765,12 +767,12 @@ async function api(req, res, url) {
     if (method === 'GET' && !action) {
       const conv = await getConversation(id)
       if (!conv) return send(res, 404, { error: 'not found' })
-      return send(res, 200, publicConversation(conv))
+      return send(res, 200, await publicConversation(conv))
     }
     if (method === 'PATCH' && !action) {
       const body = await readBody(req)
       const conv = await patchConversation(id, body)
-      return send(res, 200, conv ? publicConversation(conv) : { error: 'not found' })
+      return send(res, 200, conv ? await publicConversation(conv) : { error: 'not found' })
     }
     if (method === 'DELETE' && !action) {
       if (id === MAIN_ID) return send(res, 400, { error: '主对话不能删除' })
@@ -1215,19 +1217,9 @@ async function api(req, res, url) {
   }
   if (method === 'POST' && p === 'feedback') {
     const body = await readBody(req)
-    const conv = body.conversationId ? await getConversation(String(body.conversationId)) : null
-    const msg = conv?.messages?.find((m) => m.id === body.messageId)
-    const kind = msg?.kind ?? body.kind ?? null
     const r = await applyFeedback({
-      kind, signal: String(body.signal ?? ''), conversationId: body.conversationId,
+      kind: body.kind, signal: String(body.signal ?? ''), conversationId: body.conversationId,
       messageId: body.messageId, commitmentId: body.commitmentId, preparationId: body.preparationId,
-    })
-    if (msg && !r.ignored) await mutateConversation(conv.id, (current) => {
-      const target = current.messages.find((m) => m.id === msg.id)
-      if (target) {
-        if (body.signal === 'wrong_time' || target.feedback === 'wrong_time') target.feedbackTiming = 'wrong_time'
-        if (body.signal !== 'wrong_time') target.feedback = String(body.signal ?? '')
-      }
     })
     return send(res, 200, { ok: true, ...r, agency: await agencyStats() })
   }

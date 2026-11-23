@@ -4,11 +4,11 @@
 
 | Design | What informed Echo |
 |---|---|
-| Hermes Agent can use a scheduled job's local pre-check to skip an entire model turn. [Hermes scheduled tasks](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | A five-minute timer is a reason to check locally. It is a poor reason to repeatedly ask the model the same question. After the model declines to speak, Echo can reuse that decision until the evidence, relevant settings or local three-hour band changes. |
+| Hermes Agent can use a scheduled job's local pre-check to skip an entire model turn. [Hermes scheduled tasks](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | A timer starts a local check. Echo only requests wording after one eligible trigger clears the local threshold. It can hold a previously attempted item and consider other material. |
 | OpenClaw exposes active hours, foreground-work priority and empty-checklist skips on scheduled checks. [OpenClaw scheduling policies](https://docs.openclaw.ai/gateway/heartbeat) | Echo checks hard limits first and checks again at delivery. A draft the user requested can have higher priority than an inferred tip. Both must respect quiet hours. |
 | ActivityWatch's AFK watcher uses observable device signals and documents cases where they misclassify activity. [ActivityWatch FAQ](https://docs.activitywatch.net/en/latest/faq.html) | Echo learns from the local times at which someone actually messages Echo. This is a habit of using this assistant. It gives limited evidence about when the person will welcome a suggestion. |
 
-Here, self-evolution has a narrow, testable meaning. Each personal Echo profile learns which kinds of help received explicit useful feedback and which **trigger and time** combinations received explicit timing objections. The user can set the starting preference. A person who opens Echo late at night or ignores a suggestion has supplied neither a personality trait nor a vote against a topic.
+Each personal Echo profile learns which kinds of help and topics received explicit usefulness votes, and which delivery times received positive or negative timing votes. The user chooses the starting preset. Opening Echo late at night contributes a chat-time observation only when the user sends a message. Ignoring a suggestion supplies no vote.
 
 ## Five open-source agent designs revisited · 2026-11-23
 

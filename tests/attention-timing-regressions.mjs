@@ -22,18 +22,65 @@ globalThis.fetch = async (url, options) => {
     return new Response('data: {"choices":[{"delta":{"content":"Fixture."}}]}\n\ndata: [DONE]\n\n')
   }
   return Response.json({ choices: [{ message: { content: JSON.stringify({
-    speak: true, scenario: 'work', topic: 'Fixture', bubble: 'Review this meeting agenda.', why: 'The screen shows an agenda.',
+    speak: true, quote: 'meeting agenda', bubble: 'Review the agenda before the meeting.',
   }) } }] })
 }
 
 try {
   const { saveConfig } = await import('../lib/config.mjs')
   const { readState, writeState, mutateState, createConversation, appendMessage } = await import('../lib/store.mjs')
-  const { checkAttention, preparationTrigger } = await import('../lib/attention.mjs')
+  const { checkAttention, preparationTrigger, effectiveInterruptionPolicy } = await import('../lib/attention.mjs')
   const { applyFeedback } = await import('../lib/agency.mjs')
   const { ingestFrame, pendingBubbles, dismissBubble, openBubble } = await import('../lib/companion.mjs')
   const { proactiveTick, proactiveStatus } = await import('../lib/proactive.mjs')
   const { runTurn } = await import('../lib/chat.mjs')
+  const profileNow = at('2026-11-05T12:00:00')
+  const policyFor = (samples, { now = profileNow, trigger = 'suggestion', style = 'balanced', calibration = 0.62 } = {}) =>
+    effectiveInterruptionPolicy({ attention: { style }, proactive: { confidenceThreshold: calibration } },
+      { attention: { timingSamples: { zone: 'America/New_York', ...samples } } }, { now, trigger })
+  for (const [style, minScore, ambientGapMinutes, habitWaitMinutes] of [
+    ['quiet', 0.70, 120, 360], ['balanced', 0.62, 0, 180], ['engaged', 0.52, 0, 0],
+  ]) {
+    const cold = policyFor({}, { style })
+    assert.deepEqual(cold.base, { minScore, ambientGapMinutes, habitWaitMinutes })
+    assert.deepEqual(cold.effective, cold.base)
+  }
+  const objections = { suggestion: ['2026-11-03T09', '2026-11-04T12'] }
+  const calibrated = policyFor({}, { style: 'engaged', calibration: 0.72 })
+  assert.equal(calibrated.base.minScore, 0.52)
+  assert.equal(calibrated.effective.minScore, 0.62)
+  assert.deepEqual(calibrated.reasons, ['score_calibration'])
+  assert.equal(policyFor({}, { style: 'engaged', calibration: 0 }).effective.minScore, 0)
+  assert.equal(policyFor(objections, { style: 'quiet', calibration: 1 }).effective.minScore, 1)
+  const adapted = policyFor(objections)
+  assert.ok(policyFor(objections, { style: 'engaged' }).effective.habitWaitMinutes > 0, 'an initial zero wait can grow with explicit timing feedback')
+  assert.equal(adapted.feedbackDays, 2)
+  assert.deepEqual(adapted.reasons, ['timing_feedback'])
+  for (const key of Object.keys(adapted.effective)) assert.ok(adapted.effective[key] > adapted.base[key])
+  const older = policyFor(objections, { now: at('2026-11-12T12:00:00') })
+  assert.ok(older.effective.minScore > older.base.minScore && older.effective.minScore < adapted.effective.minScore)
+  for (const unchanged of [
+    policyFor({ suggestion: ['2026-11-04T09', '2026-11-04T09', '2026-11-04T12'] }),
+    policyFor(objections, { trigger: 'companion' }), policyFor(objections, { now: at('2026-11-23T12:00:00') }),
+    effectiveInterruptionPolicy({}, {}, { now: profileNow }),
+  ]) assert.deepEqual(unchanged.effective, unchanged.base)
+  const routine = { chat: ['2026-11-01T21', '2026-11-02T21', '2026-11-03T21', '2026-11-04T21'] }
+  assert.ok(policyFor(routine).effective.habitWaitMinutes > policyFor({}).effective.habitWaitMinutes)
+  assert.equal(policyFor(routine).effective.minScore, policyFor({}).effective.minScore, 'chat habits do not imply that content was useful')
+  assert.equal(policyFor(routine, { style: 'engaged' }).effective.habitWaitMinutes, 0)
+  const welcome = { votes: {
+    'message:main:first': { signal: 'good_time', trigger: 'suggestion', band: '2026-11-03T09' },
+    'message:main:second': { signal: 'good_time', trigger: 'suggestion', band: '2026-11-04T12' },
+  } }
+  const moreWilling = policyFor(welcome, { style: 'quiet' })
+  assert.equal(moreWilling.welcomeDays, 2)
+  assert.deepEqual(moreWilling.reasons, ['welcome_timing'])
+  assert.ok(moreWilling.timingAdjustment < 0)
+  for (const key of Object.keys(moreWilling.base)) assert.ok(moreWilling.effective[key] < moreWilling.base[key])
+  assert.deepEqual(policyFor(welcome, { trigger: 'companion' }).effective, policyFor({}).effective)
+  const mixed = policyFor({ ...objections, ...welcome })
+  assert.equal(mixed.timingAdjustment, 0)
+  assert.deepEqual(mixed.effective, mixed.base)
   const style = (style) => saveConfig({ attention: { style } })
   const timing = async (local, trigger = 'suggestion') => {
     const now = at(local)
@@ -138,6 +185,11 @@ try {
   const explicit = await checkAttention()
   assert.equal(explicit.reason, 'repeated_wrong_time')
   assert.equal(explicit.timing.wrongTimeDays, 2)
+  assert.equal(explicit.timing.policy.feedbackDays, 2, 'two messages on one original delivery day count once')
+  await applyFeedback({ signal: 'good', conversationId: 'main', messageId: 'm_a' })
+  await applyFeedback({ signal: 'bad', conversationId: 'main', messageId: 'm_a' })
+  assert.ok((await applyFeedback({ signal: 'wrong_time', conversationId: 'main', messageId: 'm_a' })).duplicate)
+  assert.deepEqual((await checkAttention()).timing.policy, explicit.timing.policy, 'correcting utility or repeating timing on the same ID cannot create another timing observation')
   assert.equal((await checkAttention({ trigger: 'requested_goal' })).allow, true)
   assert.equal((await checkAttention({ channel: 'companion' })).allow, true)
   const beforeExplicitHold = calls
@@ -149,7 +201,15 @@ try {
   process.env.TZ = 'Asia/Shanghai'
   assert.equal((await timing('2026-11-05T12:00:00')).timing.wrongTimeDays, 0, 'a different local zone does not inherit old clock windows')
   process.env.TZ = 'America/New_York'
+  const recentDelivery = at('2026-11-05T15:00:00')
+  await mutateState((s) => { s.attention.history = [{ id: 'attention_fixture', at: new Date(recentDelivery).toISOString(), channel: 'companion', status: 'delivered' }] })
+  const betweenWindows = await timing('2026-11-05T15:03:00')
+  assert.equal(betweenWindows.reason, 'learned_timing_gap')
+  assert.equal(Date.parse(betweenWindows.timing.nextEligibleAt), recentDelivery + betweenWindows.timing.policy.effective.ambientGapMinutes * 60000)
+  assert.equal((await timing('2026-11-05T15:03:00', 'requested_goal')).allow, true)
   await writeState({})
+  const wiped = (await checkAttention()).timing.policy
+  assert.deepEqual(wiped.effective, wiped.base, 'clearing locally stored signals restores the selected preset')
   await style('quiet')
   const bubble = (await ingestFrame(frame)).bubble
   assert.ok(bubble)
@@ -165,7 +225,47 @@ try {
   const duplicate = await dismissBubble(bubble.id, { reason: 'wrong_time' })
   assert.equal(duplicate.dismissedAt, dismissed.dismissedAt)
   assert.equal((await readState()).attention.pausedUntil, pausedUntil, 'duplicate native/mini votes do not extend the pause')
-  assert.deepEqual((await readState()).attention.timingSamples.companion, ['2026-11-05T12'])
+  assert.deepEqual((await readState()).attention.timingSamples.votes['bubble:' + bubble.id], {
+    band: '2026-11-05T12', trigger: 'companion', signal: 'wrong_time',
+  })
+  await applyFeedback({ signal: 'good_time', conversationId: mini.conversationId, messageId: 'm_' + bubble.id })
+  assert.equal((await readState()).attention.pausedUntil, null, 'correcting the only active wrong-time vote releases its pause')
+  assert.equal((await readState()).attention.timingSamples.votes['bubble:' + bubble.id].signal, 'good_time')
+  await applyFeedback({ signal: 'wrong_time', conversationId: mini.conversationId, messageId: 'm_' + bubble.id })
+  assert.equal((await readState()).attention.pausedUntil, pausedUntil, 'changing the same vote back cannot renew its original pause')
+
+  await writeState({})
+  clock('2026-11-06T18:00:00')
+  await wrong('m_same_day_one', '2026-11-03T13:15:00')
+  await wrong('m_same_day_two', '2026-11-03T13:45:00')
+  clock('2026-11-06T18:05:00')
+  await wrong('m_other_day', '2026-11-04T13:00:00')
+  const peerPause = (await readState()).attention.pausedUntil
+  const endorse = (messageId) => applyFeedback({ signal: 'good_time', conversationId: 'main', messageId })
+  await endorse('m_same_day_one')
+  assert.equal((await readState()).attention.pausedUntil, peerPause)
+  let snapshot = (await timing('2026-11-06T13:00:00')).timing
+  assert.equal(snapshot.wrongTimeDays, 2, 'a different negative vote at the same day and hour survives')
+  await endorse('m_other_day')
+  snapshot = (await timing('2026-11-06T13:00:00')).timing
+  assert.equal(snapshot.wrongTimeDays, 1)
+  assert.equal(snapshot.policy.feedbackDays, 1)
+  assert.equal(snapshot.policy.welcomeDays, 2)
+  assert.ok(snapshot.policy.effective.minScore < snapshot.policy.base.minScore)
+  await endorse('m_same_day_two')
+  assert.equal((await readState()).attention.pausedUntil, null)
+  assert.ok((await endorse('m_same_day_two')).duplicate)
+  await writeState({
+    attention: { timingSamples: { zone: 'America/New_York', suggestion: ['2026-11-04T12'] } },
+    agency: { learningVersion: 2, outcomes: { 'message:main:m_other_day': {
+      id: 'message:main:m_other_day', conversationId: 'main', messageId: 'm_other_day', timing: 'wrong_time',
+      utility: 'good', reward: 1, updatedAt: '2026-11-04T19:00:00Z',
+    } } },
+  })
+  const migrated = await endorse('m_other_day')
+  assert.equal(migrated.outcome.utilityAt, '2026-11-04T19:00:00Z')
+  assert.equal((await checkAttention()).timing.policy.feedbackDays, 0, 'an attributable historical objection can be corrected')
+  assert.equal((await checkAttention()).timing.policy.welcomeDays, 1)
 
   await writeState({ attention: { timingSamples: {
     zone: 'America/New_York', chat: ['broken', null, 9, '2026-11-04T21', '2026-11-04T21'], suggestion: 'old-format',

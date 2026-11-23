@@ -307,15 +307,22 @@ async function refreshList() {
 const MESSAGE_FEEDBACK_LABELS = {
   good: ['有用', '这条提醒的内容有用'],
   bad: ['没用', '这条提醒的内容没用'],
+  good_time: ['来得正好', '这条提醒来得正是时候'],
   wrong_time: ['时机不合适', '这条提醒的时机不合适，暂停打扰 30 分钟'],
 }
 
 function messageFeedbackHtml(m) {
   if (!m.id || (!m.proactive && !m.companion)) return ''
   return Object.entries(MESSAGE_FEEDBACK_LABELS).map(([signal, [label, description]]) => {
-    const selected = m.feedback === signal || signal === 'wrong_time' && m.feedbackTiming === signal
+    const selected = signal.endsWith('_time') ? (m.feedbackTiming ?? m.feedback) === signal : m.feedback === signal
     return `<button type="button" data-action="fb" data-signal="${signal}" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" aria-label="${description}" title="${description}" aria-pressed="${selected}">${label}</button>`
   }).join('')
+}
+
+function selectionDetails(selection) {
+  if (!selection?.label) return ''
+  const reasons = Array.isArray(selection.reasons) ? selection.reasons : []
+  return `<details class="fold"><summary>为什么选这条提醒</summary><div class="fold-body">${esc(selection.label)}${reasons.length ? `<ul>${reasons.map((reason) => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}</div></details>`
 }
 
 function messageNode(m) {
@@ -345,6 +352,7 @@ function messageNode(m) {
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
       ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
       <div class="content"></div>
+      ${selectionDetails(m.selection ?? m.companion?.selection)}
       ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">加入跟进</button><span class="muted small">${m.followUp.stale ? `这条线索是 ${esc(String(m.followUp.ageDays ?? ''))} 天前注意到的，先确认它是否还相关` : '让 Echo 接手准备与跟进'}</span></div>` : ''}
       ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
       ${imageGallery(m.images)}
@@ -2075,7 +2083,7 @@ const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, load
 const answerDrafts = new Map()
 const GOAL_STATUS = { active: '进行中', paused: '已暂停', done: '已完成', cancelled: '已取消' }
 const PREPARATION_STATUS = { idle: '尚未准备', queued: '等待准备', running: '正在准备', ready: '已有准备结果', failed: '准备失败' }
-const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
+const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', good_time: '来得正好', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
 
 function agencyTime(value) {
   const date = new Date(value)
@@ -2215,7 +2223,9 @@ function preparationQuestionHtml(preparation, goal) {
 function preparationHtml(preparation, goal) {
   const rawOutcome = typeof preparation.outcome === 'string' ? preparation.outcome : preparation.outcome?.signal
   const outcome = OUTCOME_LABEL[rawOutcome] ? rawOutcome : null
-  const wrongTime = preparation.outcome?.timing === 'wrong_time'
+  const timing = preparation.outcome?.timing
+  const signals = ['accepted', 'completed', 'irrelevant', 'incorrect', 'wrong_time']
+  if (preparation.delivery?.deliveredAt || timing) signals.push('good_time')
   const verified = preparation.verification?.passed === true
   const checks = preparation.verification?.checks ?? []
   const checkText = Array.isArray(checks) ? checks.map((check) => typeof check === 'string' ? check : check.label || check.name || check.message || '').filter(Boolean).join('；') : ''
@@ -2244,8 +2254,8 @@ function preparationHtml(preparation, goal) {
         <ol>${(preparation.evidence ?? []).map((item) => evidenceHtml({ ...item, discovered: preparation.goalOrigin === 'discovered' })).join('') || '<li>没有可展示的来源。</li>'}</ol>
       </details>
       <p class="muted small">${deliveryText}${waiting && preparation.delivery.expiresAt ? ` 提醒有效至 ${esc(agencyTime(preparation.delivery.expiresAt))}。` : ''}</p>
-      <div class="outcome-actions" aria-label="这份结果是否有帮助">${['accepted', 'completed', 'wrong_time', 'irrelevant', 'incorrect'].map((signal) => `<button class="btn small ${signal === outcome || signal === 'wrong_time' && wrongTime ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === 'wrong_time' && wrongTime}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
-      <p class="muted small">${outcome ? `已反馈：${esc(OUTCOME_LABEL[outcome])}` : '效果未知 · 沉默不会被当作没用。'}${wrongTime ? ' 已反馈时机不合适。' : ''}</p>
+      <div class="outcome-actions" role="group" aria-label="评价这份结果及提醒时间">${signals.map((signal) => `<button class="btn small ${signal === outcome || signal === timing ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === timing}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
+      <p class="muted small">${outcome ? `已反馈：${esc(OUTCOME_LABEL[outcome])}` : '效果未知 · 沉默不会被当作没用。'}${timing && OUTCOME_LABEL[timing] ? ` 时机反馈：${esc(OUTCOME_LABEL[timing])}。` : ''}</p>
     </div>
   </details>`
 }
@@ -2616,9 +2626,9 @@ document.addEventListener('submit', (event) => {
 
 const ATTENTION_STYLE_LABELS = { quiet: '安静', balanced: '均衡', engaged: '积极' }
 const ATTENTION_STYLE_HINTS = {
-  quiet: '一般建议至少间隔 2 小时',
-  balanced: '临近常聊时段时稍等',
-  engaged: '按现有间隔提醒',
+  quiet: '较长间隔，较高筛选门槛',
+  balanced: '适中的筛选门槛',
+  engaged: '较短等待，较低筛选门槛',
 }
 const PROACTIVE_REASON_LABELS = {
   sparse_history: '聊天记录还不足以判断常聊时段。',
@@ -2626,7 +2636,8 @@ const PROACTIVE_REASON_LABELS = {
   outside_usual_window: '当前在常聊时段之外。',
   waiting_for_usual_window: '常聊的时段快到了，提醒暂缓。',
   repeated_wrong_time: '你在这个时段多次反馈过时机不合适，提醒暂缓。',
-  quiet_style_gap: '安静风格会在一般建议与上次打扰之间留出至少两小时。',
+  quiet_style_gap: '距上次打扰还未达到当前的建议间隔。',
+  learned_timing_gap: '距上次提醒还未达到按时机反馈调整后的间隔。',
   requested_goal: '这是你要求跟进的事项，可以在常聊时段之外提醒。',
   quiet_hours: '现在是你设置的静默时段。', wrong_time_pause: '你反馈过时机不合适，提醒正在暂停。',
   recent_chat_activity: '你刚发过消息，稍后再提醒。', user_active: '对话正在进行中。',
@@ -2638,8 +2649,36 @@ const PROACTIVE_REASON_LABELS = {
   unchanged_context: '提醒依据和上次评估时相同，这次无需再次询问模型。',
   expired: '这条提醒已经过期。', stale_preparation: '准备结果已经更新或失效。', stale_evidence: '提醒依据已经变化或失效。',
   already_delivered: '这条提醒已送达。', tick_running: '另一次检查正在进行。',
-  below_threshold: '这次内容评估没有达到提醒条件。', empty_message: '这次没有生成可发送的提醒。',
+  below_threshold: '候选内容的本地评分低于提醒门槛。', empty_message: '这次没有生成可发送的提醒。',
+  feedback_suppressed: '你最近认为这个事项帮助有限。', composer_abstained: '模型未能为选定的事项提供措辞。',
+  unusable_wording: '返回的措辞不适合选定的事项。', composer_error: '已选定事项，措辞请求暂时失败。',
   unsupported_evidence: '这次提醒缺少可用依据。', bad_json: '未能读取这次内容评估。', error: '这次检查未完成。',
+}
+
+function policyParametersHtml(policy) {
+  if (!policy?.base || !policy.effective) return ''
+  const rows = [['ambientGapMinutes', '建议间隔（分钟）'], ['habitWaitMinutes', '可等候常聊时段（分钟）'], ['minScore', '内容最低分（0–1）']]
+  const value = (n) => Number.isFinite(n) ? Number(n.toFixed(2)) : '—'
+  const explanations = {
+    timing_feedback: '近期有时机不合适的反馈', welcome_timing: '近期有来得正好的反馈',
+    regular_chat_hours: '已观察到常聊时段', score_calibration: '已计入设置中的内容筛选强度',
+  }
+  const adjustments = (Array.isArray(policy.reasons) ? policy.reasons : []).map((key) => explanations[key]).filter(Boolean)
+  return `<table class="policy-parameters"><caption>当前触发类型的参数</caption>
+    <thead><tr><th scope="col">参数</th><th scope="col">预设</th><th scope="col">当前</th></tr></thead>
+    <tbody>${rows.map(([key, label]) => `<tr><th scope="row">${label}</th><td>${value(policy.base[key])}</td><td>${value(policy.effective[key])}</td></tr>`).join('')}</tbody></table>
+    ${adjustments.length ? `<p class="muted small">${esc(adjustments.join('；'))}。</p>` : ''}`
+}
+
+function lastSelectionHtml(decision) {
+  if (!decision) return '<p class="muted small">尚无内容选择记录。</p>'
+  if (decision.policy !== 'local') return `<p class="muted small">旧版模型评估 · ${esc(decision.reason ?? '未记录理由')}</p>`
+  const selection = decision.selection
+  const wording = { drafted: '已生成措辞', abstained: '模型未提供措辞', unusable: '措辞未通过检查', prepared: '直接使用已有成果', error: '措辞请求暂时失败' }
+  return `<dl class="kv"><dt>${decision.act ? '选中内容' : '暂缓原因'}</dt><dd>${esc(decision.act ? selection?.label ?? '—' : PROACTIVE_REASON_LABELS[decision.reason] ?? decision.reason ?? '—')}</dd>
+    ${Number.isFinite(selection?.score) ? `<dt>本地排序分（0–1）</dt><dd>${selection.score.toFixed(2)}</dd>` : ''}
+    ${Array.isArray(selection?.reasons) && selection.reasons.length ? `<dt>选择依据</dt><dd>${esc(selection.reasons.join('；'))}</dd>` : ''}
+    ${wording[decision.wording] ? `<dt>内容呈现</dt><dd>${wording[decision.wording]}</dd>` : ''}</dl>`
 }
 
 function renderProactiveOverview(p, dream, agency) {
@@ -2654,9 +2693,8 @@ function renderProactiveOverview(p, dream, agency) {
     .join('')
   const kindRows = (agency.kinds ?? [])
     .map((k) => {
-      const thr = (p.kindThresholds ?? {})[k.kind]
       return `<div class="mem-item"><div class="txt">${esc(KIND_LABEL[k.kind] ?? k.kind)}
-        <div class="muted small">有用程度估计 ${(k.mean * 100).toFixed(0)}% · 明确反馈 ${k.trials} 次${thr ? ` · 当前门槛 ${thr}` : ''}</div>
+        <div class="muted small">有用程度估计 ${(k.mean * 100).toFixed(0)}% · 明确反馈 ${k.trials} 次</div>
       </div><div class="bar" style="width:56px"><i style="width:${Math.round(k.mean * 100)}%"></i></div></div>`
     })
     .join('')
@@ -2679,6 +2717,7 @@ function renderProactiveOverview(p, dream, agency) {
         <dt>提醒风格</dt><dd>${esc(ATTENTION_STYLE_LABELS[style] ?? ATTENTION_STYLE_LABELS.balanced)}</dd>
         ${timing?.trigger ? `<dt>提醒类型</dt><dd>${esc(({ requested_goal: '你要求跟进的事项', suggestion: '一般建议', companion: '伴随气泡' })[timing.trigger] ?? '主动提醒')}</dd>` : ''}
         <dt>当前判断</dt><dd>${esc(gateSummary)}</dd>
+        ${gate?.allow && gate.selection?.label ? `<dt>当前优先内容</dt><dd>${esc(gate.selection.label)}</dd>` : ''}
         ${timing && timing.reason !== gate?.reason && PROACTIVE_REASON_LABELS[timing.reason] ? `<dt>时段依据</dt><dd>${esc(PROACTIVE_REASON_LABELS[timing.reason])}</dd>` : ''}
         ${usualHours ? `<dt>常聊时段（Echo 本地时间）</dt><dd>${esc(usualHours)}</dd>` : ''}
         ${timing?.reason === 'sparse_history' && Number.isInteger(timing.observedDays) ? `<dt>近两周已有记录的聊天日</dt><dd>${timing.observedDays} 天（截至昨天）</dd>` : ''}
@@ -2686,18 +2725,15 @@ function renderProactiveOverview(p, dream, agency) {
         ${timing?.nextEligibleAt && timing.reason === gate?.reason ? `<dt>按此规则最早可提醒</dt><dd>${esc(agencyTime(timing.nextEligibleAt))}</dd>` : ''}
         <dt>静默时段</dt><dd>${esc(p.quietHours?.start ?? '—')} → ${esc(p.quietHours?.end ?? '—')}</dd>
       </dl>
+      ${policyParametersHtml(timing?.policy)}
     </div>
     <div class="sect">
-      <h4>最近一次内容评估（模型判断）</h4>
-      <div class="kv">
-        <dt>是否建议提醒</dt><dd>${p.lastDecision ? (p.lastDecision.act ? '是' : '否') : '尚无评估'}</dd>
-        <dt>置信度</dt><dd>${p.lastDecision?.confidence != null ? p.lastDecision.confidence.toFixed(2) : '—'}</dd>
-        <dt>模型给出的理由</dt><dd style="text-align:left">${esc(p.lastDecision?.reason ?? '—')}</dd>
-      </div>
+      <h4>最近一次内容选择</h4>
+      ${lastSelectionHtml(p.lastDecision)}
     </div>
     <div class="sect">
       <h4>反馈学习（哪种开口方式你更受用）</h4>
-      <p class="muted small">采用、完成和有用等明确反馈帮助 Echo 学习。普通回复和沉默都不代表有用或没用。「时机不合适」只调整打扰时机，并暂停打扰 30 分钟。</p>
+      <p class="muted small">「有用」和「没用」调整同类内容和话题的排序。「来得正好」和「时机不合适」调整同类提醒的打扰时机。时机不合适时也会立即暂停打扰 30 分钟。</p>
       <div class="list">${kindRows || '<div class="muted small">还没有样本。</div>'}</div>
       <div class="row" style="margin-top:8px">
         <button class="btn small" data-action="fb" data-signal="more" data-kind="global">多说一点</button>
@@ -2867,7 +2903,7 @@ async function renderSettingsPanel() {
         <span class="muted small">今日看过 ${S.companion?.framesToday ?? 0} 帧 · 本小时气泡 ${S.companion?.hourCount ?? 0}/${c.companion?.hourlyBudget ?? 15} · 连续被忽略 ${S.companion?.dismissStreak ?? 0} 次</span></div>
       <div class="list" style="margin-top:8px">${(S.companion?.recent ?? []).slice(0, 5).map((b) =>
         `<div class="mem-item"><div class="txt">${esc(b.bubble)}
-          <div class="muted small">${esc(b.scenario)} · ${esc(b.topic)} · ${String(b.ts).slice(11, 16)} · ${esc(b.status)}${b.why ? ` · ${esc(b.why.slice(0, 60))}` : ''}</div></div></div>`).join('')}</div>
+          <div class="muted small">${esc(b.scenario)} · ${esc(b.topic)} · ${String(b.ts).slice(11, 16)} · ${esc(b.status)}${b.why && !b.selection ? ` · ${esc(b.why.slice(0, 60))}` : ''}</div>${selectionDetails(b.selection)}</div></div>`).join('')}</div>
     </div>
     <div class="sect">
       <h4>磁盘预算</h4>
@@ -2898,7 +2934,7 @@ async function renderSettingsPanel() {
         <input type="range" id="setBudget" min="0" max="12" step="1" value="${c.proactive.dailyBudget}" /></div>
       <div class="field"><label>最少间隔（分钟）<b>${c.proactive.minGapMinutes}</b></label>
         <input type="range" id="setMinGap" min="10" max="240" step="5" value="${c.proactive.minGapMinutes}" /></div>
-      <div class="field"><label>开口置信度阈值 <b>${c.proactive.confidenceThreshold}</b></label>
+      <div class="field"><label for="setThresh">内容筛选强度 <b>${c.proactive.confidenceThreshold}</b></label>
         <input type="range" id="setThresh" min="0.3" max="0.95" step="0.01" value="${c.proactive.confidenceThreshold}" /></div>
       <div class="field"><label>静默时段（本地时间）</label>
         <div class="row"><input type="text" id="setQuietStart" value="${esc(c.proactive.quietHours.start)}" style="width:110px" />
@@ -2910,7 +2946,7 @@ async function renderSettingsPanel() {
       <div class="field"><label for="setAttentionStyle">提醒风格</label>
         <select id="setAttentionStyle" aria-describedby="attentionStyleHelp">${Object.entries(ATTENTION_STYLE_LABELS).map(([value, label]) =>
           `<option value="${value}" ${value === (c.attention?.style ?? 'balanced') ? 'selected' : ''}>${label} · ${ATTENTION_STYLE_HINTS[value]}</option>`).join('')}</select></div>
-      <p class="muted small" id="attentionStyleHelp">Echo 在本机参考聊天时段和你给的时机反馈。所有风格都遵守静默时段和次数上限。</p>
+      <p class="muted small" id="attentionStyleHelp">预设提供起始参数。Echo 会根据聊天时段和明确反馈调整等待时间、筛选门槛与话题排序。静默时段和次数上限始终生效。</p>
       <p class="muted small">主动消息、伴随气泡和准备结果共用此预算，也保留各自的频率上限。安静准备不占打扰次数。</p>
       <div class="field"><label for="setAttentionBudget">每天合计最多打扰几次</label><input id="setAttentionBudget" type="number" min="0" max="100" step="1" required value="${c.attention?.dailyBudget ?? 20}" /></div>
       <div class="field"><label for="setAttentionGap">不同渠道之间至少间隔（秒）</label><input id="setAttentionGap" type="number" min="0" max="3600" step="5" required value="${c.attention?.minGapSeconds ?? 75}" /></div>
@@ -3251,7 +3287,7 @@ async function handleAction(e) {
     try {
       const feedback = await api('feedback', { method: 'POST', body: { commitmentId: id, preparationId: btn.dataset.preparationId, signal: btn.dataset.signal } })
       if (feedback.ignored) throw new Error('原准备结果已不可用，请刷新后重试')
-      toast(btn.dataset.signal === 'wrong_time' ? '收到，暂停打扰 30 分钟，结果仍保留' : `已记录：${OUTCOME_LABEL[btn.dataset.signal]}`)
+      toast(btn.dataset.signal === 'wrong_time' && Date.parse(feedback.pausedUntil) > Date.now() ? `已记录时机反馈，暂停至 ${agencyTime(feedback.pausedUntil)}` : `已记录：${OUTCOME_LABEL[btn.dataset.signal]}`)
       await renderProactivePanel({ force: true })
     } finally { btn.disabled = false; restoreGoalActionFocus(btn) }
     return
@@ -3336,16 +3372,24 @@ async function handleAction(e) {
   if (act === 'fb') {
     const signal = btn.dataset.signal
     const conversationId = S.current
-    const r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId, messageId: btn.dataset.id } })
+    const controls = btn.parentElement?.querySelectorAll('button[data-action="fb"]') ?? []
+    controls.forEach((b) => { b.disabled = true })
+    let r
+    try {
+      r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId, messageId: btn.dataset.id } })
+    } finally {
+      controls.forEach((b) => { b.disabled = false })
+    }
     if (r.ignored) return toast('这条反馈未能关联到原消息，请刷新后重试', true)
     if (r.outcome) {
       const message = S.conv?.id === conversationId && S.conv.messages.find((m) => m.id === btn.dataset.id)
       if (message) Object.assign(message, { feedback: r.outcome.utility, feedbackTiming: r.outcome.timing })
-      btn.parentElement?.querySelectorAll('button[data-action="fb"]').forEach((b) =>
+      controls.forEach((b) =>
         b.setAttribute('aria-pressed', String([r.outcome.utility, r.outcome.timing].includes(b.dataset.signal))))
     }
     const confirmations = { more: '已增加主动服务频率', less: '已减少主动服务频率', good: '已记录：这条内容有用', bad: '已记录：这条内容没用',
-      wrong_time: r.duplicate ? '已记录过这条提醒的时机反馈' : '已记录时机反馈，暂停打扰 30 分钟' }
+      good_time: '已记录这条提醒出现的时间合适',
+      wrong_time: r.duplicate ? '已记录过这条提醒的时机反馈' : (r.pausedUntil && Date.parse(r.pausedUntil) > Date.now() ? `已记录时机反馈，暂停至 ${agencyTime(r.pausedUntil)}` : '已记录时机反馈') }
     toast(confirmations[signal])
     return
   }

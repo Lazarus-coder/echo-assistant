@@ -38,8 +38,13 @@ function renderMessage(m) {
     el.innerHTML = `<div class="avatar">E</div><div class="body"><div class="content"></div><div class="tail"></div></div>`
     $('.content', el).innerHTML = mdLite(m.content ?? '')
     if (m.companion?.bubbleId === bubbleId && m.id) {
-      const saved = m.feedbackTiming === 'wrong_time' || m.feedback === 'wrong_time'
-      $('.tail', el).innerHTML = `<button type="button" class="btn small ghost" data-timing-message="${esc(m.id)}" ${saved ? 'disabled' : ''}>${saved ? '已记录时机反馈' : '时机不合适'}</button> <span class="muted small" role="status"></span>`
+      const timing = m.feedbackTiming ?? m.feedback
+      $('.tail', el).innerHTML = `<fieldset class="mini-feedback" data-feedback-message="${esc(m.id)}" aria-label="评价这条气泡">
+        <button class="btn small ghost" data-signal="good" aria-pressed="${m.feedback === 'good'}">有用</button>
+        <button class="btn small ghost" data-signal="bad" aria-pressed="${m.feedback === 'bad'}">没用</button>
+        <button class="btn small ghost" data-signal="good_time" aria-pressed="${timing === 'good_time'}">来得正好</button>
+        <button class="btn small ghost" data-signal="wrong_time" aria-pressed="${timing === 'wrong_time'}">时机不合适</button>
+        <span class="muted small" role="status"></span></fieldset>`
     }
   }
   return el
@@ -196,18 +201,24 @@ $('#input').addEventListener('keydown', (e) => {
   }
 })
 document.addEventListener('click', async (e) => {
-  const timing = e.target.closest('[data-timing-message]')
-  if (timing && conversationId && !timing.disabled) {
-    timing.disabled = true
-    const status = timing.nextElementSibling
+  const button = e.target.closest('button[data-signal]')
+  const group = button?.closest('[data-feedback-message]')
+  if (group && conversationId && !group.disabled && !button.disabled) {
+    group.disabled = true
+    const signal = button.dataset.signal
+    const status = $('[role="status"]', group)
     try {
-      const reply = await api('feedback', { method: 'POST', body: { signal: 'wrong_time', conversationId, messageId: timing.dataset.timingMessage } })
-      if (reply.outcome?.timing !== 'wrong_time') throw new Error('无法确认时机反馈')
-      timing.textContent = '已记录时机反馈'
-      status.textContent = '这条气泡的时机反馈已保存。'
+      const reply = await api('feedback', { method: 'POST', body: { signal, conversationId, messageId: group.dataset.feedbackMessage } })
+      const saved = signal.endsWith('_time') ? reply.outcome?.timing : reply.outcome?.utility
+      if (saved !== signal) throw new Error('无法确认反馈')
+      for (const item of group.querySelectorAll('[aria-pressed]')) {
+        if (item.dataset.signal.endsWith('_time') === signal.endsWith('_time')) item.setAttribute('aria-pressed', String(item.dataset.signal === signal))
+      }
+      status.textContent = '反馈已保存。'
     } catch (err) {
-      timing.disabled = false
       status.textContent = `保存失败：${err.message}。可再次点击重试。`
+    } finally {
+      group.disabled = false
     }
     return
   }

@@ -24,7 +24,7 @@ try {
   const { mutateState, mutateConversation, createConversation, appendMessage, getConversation } = await import('../lib/store.mjs')
   const { inQuietHours, checkAttention, reserveAttention, finishAttention, interventionKeys } = await import('../lib/attention.mjs')
   const { applyFeedback, posteriors, settlePending, agencyStats } = await import('../lib/agency.mjs')
-  const { proactiveTick, recordUserEngagement } = await import('../lib/proactive.mjs')
+  const { proactiveTick, proactiveStatus, recordUserEngagement } = await import('../lib/proactive.mjs')
   const { createCommitment } = await import('../lib/commitments.mjs')
   const { ingestFrame } = await import('../lib/companion.mjs')
   const { workingContext } = await import('../lib/screen.mjs')
@@ -151,25 +151,30 @@ try {
   assert.equal((await readJSON(P.state)).proactive.queue.length, 0, 'an artifact reviewed in the panel is removed from queued notifications')
   assert.equal((await getConversation('main')).messages.length, beforeReviewedTick)
 
-  const loop = { id: 'loop_test', topic: 'Project proposal', why: 'User mentioned a project deadline', status: 'open', confidence: 0.8 }
-  const goodDecision = { act: true, confidence: 0.99, kind: 'follow_up', anchor_id: loop.id, evidence_ids: [loop.id], message: 'The proposal deadline is approaching; the checklist can help.', reason: 'User project evidence' }
+  const loop = { id: 'loop_test', touched_at: new Date().toLocaleDateString('en-CA'), topic: 'Project proposal', why: 'User mentioned a project deadline', status: 'open', confidence: 0.8 }
+  const goodDecision = { quote: 'proposal', act: true, confidence: 0.99, kind: 'follow_up', anchor_id: loop.id, evidence_ids: [loop.id], message: 'The proposal deadline is approaching; the checklist can help.', reason: 'User project evidence' }
   await reset({ dream: { loops: [loop] } })
-  answer = async () => ({ act: false, confidence: 0.8, reason: 'No actionable change yet.' })
+  answer = async () => ({ message: null })
   const beforeQuiet = calls
-  assert.equal((await proactiveTick()).skipped, 'below_threshold')
+  assert.equal((await proactiveTick()).skipped, 'composer_abstained')
   assert.equal((await proactiveTick()).skipped, 'unchanged_context')
-  assert.equal(calls, beforeQuiet + 1, 'unchanged polling after an explicit no-op makes no model request')
+  assert.equal(calls, beforeQuiet + 1, 'unchanged evidence after an abstention needs no wording call')
   await mutateState((s) => { s.dream.loops[0].due = '2026-12-01' })
-  assert.equal((await proactiveTick()).skipped, 'below_threshold')
+  assert.equal((await proactiveTick()).skipped, 'composer_abstained')
   assert.equal(calls, beforeQuiet + 2, 'a changed deadline is new evidence')
   await reset({ dream: { loops: [loop] } })
   answer = async (body) => {
-    const suggested = /建议类型 (\w+)/.exec(body.messages.at(-1).content)[1]
-    const kind = suggested === 'ask' ? 'guide' : 'ask'
-    await mutateState((s) => { s.agency = { learningVersion: 2, kinds: { [kind]: { a: 1.6, b: 10.6 } } } })
-    return { ...goodDecision, kind, confidence: 0.70 }
+    const selected = JSON.parse(body.messages.at(-1).content)
+    assert.equal(selected.kind, 'follow_up')
+    assert.equal(selected.topic, loop.topic)
+    return { ...goodDecision, act: false, kind: 'ask', confidence: 0, anchor_id: 'forged', evidence_ids: ['forged'] }
   }
-  assert.equal((await proactiveTick()).skipped, 'below_threshold', 'the proposed content must clear the threshold for its actual kind')
+  const forced = await proactiveTick()
+  assert.equal(forced.message.kind, 'follow_up')
+  assert.equal(forced.message.anchorId, loop.id)
+  assert.equal(forced.message.evidence[0].id, loop.id)
+  assert.ok(forced.message.selection.score > 0)
+  assert.equal(forced.message.confidence, undefined)
   await reset({ dream: { loops: [loop] } })
   await screen('normal')
   answer = async () => { await screen('deep'); return goodDecision }
@@ -189,7 +194,7 @@ try {
   assert.equal((await readJSON(P.state)).proactive.queue.length, 0, 'stale candidates expire')
 
   await reset({ dream: { loops: [loop] } })
-  answer = async () => ({ ...goodDecision, evidence_ids: ['invented'] })
+  answer = async () => ({ ...goodDecision, quote: 'unavailable quotation' })
   assert.equal((await proactiveTick()).skipped, 'unsupported_evidence')
   const queuedEvidence = [{ id: loop.id, source: `dream:${loop.id}`, excerpt: `${loop.topic}；${loop.why}；截止 未知` }]
   const validQueued = {
@@ -238,12 +243,12 @@ try {
   await reset()
   answer = async () => {
     await screen('meeting')
-    return { speak: true, scenario: 'work', topic: 'Project', bubble: 'A concrete useful companion suggestion', why: 'Visible project data' }
+    return { speak: true, quote: 'deadline', bubble: 'A concrete useful companion suggestion' }
   }
   const frame = { text: 'The project plan contains a deadline and a checklist of remaining work.', app: 'Editor', title: 'Project', hidIdleSeconds: 1 }
   assert.equal((await ingestFrame(frame)).skipped, 'focus_meeting', 'companion also rechecks focus after its model call')
   await screen('normal')
-  answer = async () => ({ speak: true, scenario: 'work', topic: 'Project', bubble: 'A concrete useful companion suggestion', why: 'Visible project data' })
+  answer = async () => ({ speak: true, quote: 'deadline', bubble: 'A concrete useful companion suggestion' })
   assert.ok((await ingestFrame(frame)).bubble, 'deferred frame can be retried after focus changes')
   assert.equal((await checkAttention({ channel: 'proactive' })).reason, 'shared_min_gap')
 
@@ -251,7 +256,7 @@ try {
   await reset({ dream: { at: now(), loops: [{ id: 'loop_visa', topic: '签证预约', why: '注册受阻，等待确认', due: '2026-12-01', status: 'open', confidence: 0.8 }] } })
   answer = async () => ({
     act: true, confidence: 0.9, kind: 'follow_up', anchor_id: 'loop_visa', evidence_ids: ['loop_visa'],
-    message: '你提过签证预约还在等确认，要不要我接着盯？', reason: 'Dream 发现的待跟进线索',
+    quote: '签证预约', message: '你提过签证预约还在等确认，要不要我接着盯？', reason: 'Dream 发现的待跟进线索',
   })
   const suggestion = await proactiveTick()
   assert.equal(suggestion.acted, true)
@@ -271,6 +276,131 @@ try {
   const persisted = (await getConversation('main')).messages.find((message) => message.id === suggestion.message.id)
   assert.equal(persisted.followUp.candidateLoopId, 'loop_visa')
 
+  const { contentFeedback, contentTopicKey } = await import('../lib/agency.mjs')
+  const fixtureNow = Date.now()
+  const oldVote = { reward: 0, kind: 'suggest', utilityAt: new Date(fixtureNow - 90 * 86400000).toISOString() }
+  const aggregate = { agency: { learningVersion: 2, kinds: { suggest: { a: 1.6, b: 11.6 } }, outcomes: { oldVote } } }
+  assert.equal(contentFeedback(aggregate, { kind: 'suggest', now: fixtureNow }).kindVotes, 1)
+  assert.equal(contentFeedback(aggregate, { kind: 'suggest', now: fixtureNow + 1 }).kindVotes, 0,
+    'an expired attributable vote cannot resurrect the lifetime aggregate')
+  assert.equal(contentFeedback({ agency: { ...aggregate.agency, outcomes: {} } }, { kind: 'suggest', now: fixtureNow }).kindVotes, 10,
+    'aggregate-only explicit feedback remains usable on older profiles')
+  const { appendObservation } = await import('../lib/memory.mjs')
+  const otherTopic = { id: 'nudge_watch', topic: 'Other grounded topic', why: 'An explicit project dependency', urgency: 5, at: now() }
+  const setTopics = async () => reset({ dream: { at: now(), loops: [loop], nudges: [otherTopic] } })
+  await setTopics()
+  const preview = () => proactiveStatus().then((status) => status.nextGate)
+  const startCalls = calls
+  const initial = (await preview()).selection
+  assert.equal(initial.anchorId, loop.id)
+  assert.deepEqual((await preview()).selection, initial, 'the same inputs produce the same score and choice')
+  const previous = { id: 'm_prior_topic', kind: 'follow_up', proactive: true, anchorId: loop.id, createdAt: now(),
+    role: 'assistant', selection: initial, content: 'Older phrasing' }
+  await appendMessage('main', previous)
+  const vote = (signal) => applyFeedback({ signal, conversationId: 'main', messageId: previous.id, kind: 'forged' })
+  await vote('bad')
+  assert.equal((await preview()).selection.anchorId, otherTopic.id, 'a declined first topic yields to the next eligible topic')
+  await vote('good')
+  const corrected = (await preview()).selection
+  assert.equal(corrected.anchorId, loop.id)
+  assert.ok(corrected.score > initial.score)
+  assert.equal(calls, startCalls)
+  await mutateState((s) => {
+    s.dream.loops[0].id = 'loop_reassigned'
+    s.dream.loops[0].topic = 'PROJECT proposal!'
+  })
+  const regenerated = (await preview()).selection
+  assert.equal(regenerated.anchorId, 'loop_reassigned')
+  assert.equal(regenerated.topicKey, contentTopicKey('proactive', 'Project proposal'))
+  assert.ok(regenerated.reasons.includes('你曾肯定这个话题'), 'topic preferences survive a regenerated source ID')
+  answer = async (request) => {
+    const payload = JSON.parse(request.messages.at(-1).content)
+    assert.equal(payload.evidence.length, 1)
+    assert.doesNotMatch(JSON.stringify(request), /Other grounded topic|Older phrasing/)
+    return { message: 'PROJECT proposal! 可以继续核对。', quote: 'PROJECT', anchor_id: otherTopic.id, confidence: 1, kind: 'brief' }
+  }
+  const normal = await proactiveTick()
+  assert.deepEqual(normal.message.selection, regenerated)
+  assert.equal(normal.message.kind, 'follow_up')
+  assert.equal(normal.message.evidence[0].id, regenerated.anchorId)
+  await mutateState((s) => {
+    s.attention.history[0].at = new Date(Date.now() - 3 * 3600000).toISOString()
+    delete s.proactive.lastAt
+    s.dream.nudges = []
+    s.dream.loops[0].id = 'loop_reassigned_again'
+  })
+  const beforeDuplicate = calls
+  assert.equal((await proactiveTick()).skipped, 'unchanged_evidence')
+  assert.equal(calls, beforeDuplicate, 'unchanged material with a regenerated ID incurs zero requests')
+
+  // A verified but speculative result may be too weak for this user. The draft remains readable.
+  const lowGoal = { ...goal, title: 'Unadopted background draft', origin: 'discovered', discovery: { adopted: false, expiresAt: freshUntil() } }
+  await reset({ commitments: [lowGoal], preparations: [preparation], dream: { at: now(), loops: [loop] },
+    agency: { learningVersion: 2, kinds: { brief: { a: 1.6, b: 18.6 } } } })
+  assert.equal((await preview()).selection.anchorId, loop.id)
+  answer = async () => goodDecision
+  assert.equal((await proactiveTick()).message.anchorId, loop.id)
+  assert.equal((await readJSON(P.state)).preparations[0].delivery.status, 'pending')
+  await reset({ commitments: [lowGoal], preparations: [preparation], agency: { learningVersion: 2, kinds: { brief: { a: 1.6, b: 18.6 } } } })
+  const beforeFloor = calls
+  assert.equal((await preview()).reason, 'below_threshold')
+  assert.equal((await proactiveTick()).skipped, 'below_threshold')
+  assert.equal(calls, beforeFloor)
+
+  await reset({ dream: { at: now(), loops: [{ ...loop, touched_at: '2001-01-01' }] } })
+  assert.equal((await proactiveTick()).skipped, 'no_material')
+  assert.equal(calls, beforeFloor, 'stale source is filtered before composition')
+  await reset()
+  const fact = await appendObservation({ kind: 'project', importance: 5, source: 'fixture', text: 'Private Aurora migration project.' })
+  await saveConfig({ memory: { enabled: true, inject: true } })
+  assert.equal((await preview()).selection.anchorId, fact.id)
+  answer = async () => { await saveConfig({ memory: { inject: false } }); return { message: 'Aurora still has a draft.', quote: 'Aurora' } }
+  assert.equal((await proactiveTick()).skipped, 'stale_evidence', 'revoked memory cannot persist in a draft or proactive message')
+  assert.equal((await readJSON(P.state)).proactive.queue.length, 0)
+  const beforeRevoked = calls
+  assert.equal((await proactiveTick()).skipped, 'no_material')
+  assert.equal(calls, beforeRevoked)
+  assert.doesNotMatch(JSON.stringify(await proactiveStatus()), /Aurora/)
+
+  await saveConfig({ memory: { enabled: true, inject: true } })
+  answer = async () => ({ message: 'Aurora has a migration draft.', quote: 'Aurora' })
+  assert.equal((await proactiveTick()).message?.selection.anchorId, fact.id)
+  await saveConfig({ memory: { inject: false } })
+  assert.doesNotMatch(JSON.stringify(await proactiveStatus()), /Aurora/, 'revoked history and selection previews no longer expose source wording')
+
+  await reset({ dream: { at: now(), loops: [loop], nudges: [otherTopic] } })
+  const feedbackFrom = async (id, kind, label, signal) => {
+    const selection = { source: 'nudge', kind, anchorId: id, topicKey: contentTopicKey('proactive', label), label }
+    await appendMessage('main', { id, kind, selection, role: 'assistant', proactive: true, createdAt: now() })
+    await applyFeedback({ signal, conversationId: 'main', messageId: id })
+  }
+  await feedbackFrom('m_other_followup', 'follow_up', 'Unrelated project', 'bad')
+  await feedbackFrom('m_other_suggest', 'suggest', 'Another dependency', 'good')
+  assert.equal((await preview()).selection.anchorId, otherTopic.id, 'explicit kind preferences transfer to unfamiliar topics')
+  await feedbackFrom('m_earlier_topic', 'ask', loop.topic, 'good')
+  await feedbackFrom('m_earlier_nudge', 'ask', otherTopic.topic, 'bad')
+  assert.equal((await preview()).selection.anchorId, loop.id, 'opposing topic preferences transfer across kinds and source IDs')
+  const old = new Date(Date.now() - 120000).toISOString()
+  await reset({ dream: { at: now(), loops: [loop] }, attention: { history: [
+    { id: 'old_reservation', status: 'reserved', at: old, anchorKey: keys.anchorKey },
+  ] } })
+  assert.equal((await preview()).selection.anchorId, loop.id, 'an abandoned reservation is refunded in both ranking and timing')
+  await reset({ commitments: [goal], preparations: [preparation], dream: { at: now(), loops: [loop] } })
+  await screen('meeting')
+  await proactiveTick()
+  const blockedPrep = (await readJSON(P.state)).proactive.queue[0]
+  await mutateState((s) => { s.attention = { history: [{ id: 'previous', at: old, status: 'delivered', fingerprint: blockedPrep.fingerprint }] } })
+  await screen('normal')
+  assert.equal((await preview()).selection.anchorId, loop.id, 'an already sent draft cannot hide another actionable source')
+  answer = async () => goodDecision
+  assert.equal((await proactiveTick()).message?.anchorId, loop.id)
+  await reset({ dream: { loops: [loop] } })
+  answer = async () => { throw new Error('Fixture composer unavailable') }
+  const failedAt = calls
+  assert.equal((await proactiveTick()).skipped, 'composer_error')
+  assert.equal((await proactiveStatus()).lastDecision.wording, 'error')
+  assert.equal((await proactiveTick()).skipped, 'unchanged_context')
+  assert.equal(calls, failedAt + 1, 'a composer failure observes bounded backoff')
   console.log('Agency regressions passed: explicit outcome attribution; shared atomic attention; fresh evidence; deferred and once-only delivery; loop suggestions adopt on confirm; no live requests.')
 } finally {
   globalThis.fetch = originalFetch
