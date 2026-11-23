@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import os from 'node:os'
 import { promises as fs } from 'node:fs'
-import { loadConfig, saveConfig, upstreamCreds, deepMerge, checkLegacyProfile, P, DATA, ROOT } from './lib/config.mjs'
+import { loadConfig, saveConfig, upstreamCreds, deepMerge, checkLegacyProfile, ATTENTION_STYLES, P, DATA, ROOT } from './lib/config.mjs'
 import { loadEnvFile } from './lib/env.mjs'
 import { log } from './lib/log.mjs'
 import { readJSON, writeJSON, nowIso, clip, assertId, newId } from './lib/util.mjs'
@@ -31,6 +31,7 @@ import {
   loadCore,
   saveCore,
   listObservations,
+  recalledFactsForReply,
   memoryStats,
   extractMemory,
   retrieve,
@@ -46,9 +47,9 @@ import {
 } from './lib/memory.mjs'
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { returnBrief } from './lib/brief.mjs'
-import { proactiveTick, proactiveStatus, recordUserEngagement } from './lib/proactive.mjs'
+import { proactiveTick, proactiveStatus } from './lib/proactive.mjs'
 import { applyFeedback, agencyStats, settlePending } from './lib/agency.mjs'
-import { listCommitments, createCommitment, updateCommitment, requestPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
+import { listCommitments, createCommitment, updateCommitment, requestPreparation, answerPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
 import { discoverNeeds, cancelDiscovery, researchStatus, validateResearchSettings } from './lib/discovery.mjs'
 import { cancelAndDrainResearch } from './lib/research.mjs'
 import { saveResearchDocument, listResearchDocuments, getResearchDocument, clearResearchDocuments } from './lib/research-sources.mjs'
@@ -209,6 +210,31 @@ function send(res, status, body, headers = {}) {
   res.end(payload)
 }
 
+// The stored snapshots let the disclosure check for changed facts. Chat clients need only their IDs.
+function publicRecall(recalled) {
+  if (!Array.isArray(recalled)) return []
+  return recalled.filter((fact) => typeof fact?.id === 'string').map(({ id }) => ({ id }))
+}
+
+function publicChatMessage(message) {
+  if (!message || !Object.hasOwn(message, 'recalled')) return message
+  return { ...message, recalled: publicRecall(message.recalled) }
+}
+
+function publicConversation(conv) {
+  return { ...conv, messages: (conv.messages ?? []).map(publicChatMessage) }
+}
+
+function publicChatEvent(event) {
+  if (event.type === 'meta') {
+    const { system, memory, ...meta } = event
+    return { ...meta, memory: publicRecall(memory) }
+  }
+  if (event.type === 'done') return { ...event, message: publicChatMessage(event.message) }
+  if (event.type === 'error' && event.assistant) return { ...event, assistant: publicChatMessage(event.assistant) }
+  return event
+}
+
 async function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0
@@ -292,6 +318,7 @@ const PUBLIC_DIR = path.join(ROOT, 'public')
 /* --------------------------------- runtime --------------------------------- */
 
 const inflight = new Map()
+const busyConversations = () => new Set(inflight.keys())
 let mcp = new McpHub({})
 let cfg = await loadConfig()
 const launchEnvNames = new Set(Object.keys(process.env))
@@ -591,7 +618,7 @@ async function api(req, res, url) {
       memory: await memoryStats(),
       followUps: (await listCommitments()).commitments.filter((c) => c.status === 'active').length,
       dream: await dreamStatus(),
-      proactive: await proactiveStatus(),
+      proactive: await proactiveStatus({ busyConversations }),
       mcp: mcp.status(),
       upstream: upstreamReady(),
     })
@@ -635,7 +662,7 @@ async function api(req, res, url) {
         enabled: cfg.companion?.enabled === true,
         paused: Boolean(state?.companion?.pausedUntil && Date.parse(state.companion.pausedUntil) > Date.now()),
         intervalSeconds: cfg.companion?.intervalSeconds ?? 20,
-        pending: (await pendingBubbles()).length,
+        pending: (await pendingBubbles({ busyConversations: () => new Set(inflight.keys()) })).length,
       },
       mainTitle: main?.title ?? '主对话',
       lastPreview: clip(String(main?.messages?.at(-1)?.content ?? ''), 80),
@@ -645,6 +672,13 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'settings') {
     const body = await readBody(req)
     let patch = body.config ?? {}
+    if (Object.hasOwn(patch, 'attention')) {
+      const a = patch.attention
+      if (!a || typeof a !== 'object' || Array.isArray(a)) return send(res, 400, { error: '提醒设置必须为对象' })
+      if (Object.hasOwn(a, 'style') && !ATTENTION_STYLES.includes(a.style)) {
+        return send(res, 400, { error: '请选择安静、均衡或积极的提醒风格' })
+      }
+    }
     if ((patch.harness !== undefined || patch.mcpServers !== undefined || body.restartMcp) && !isLocalToolsRequest(req)) {
       return send(res, 403, { error: 'local_tools_only', message: '工作区与 MCP 能力只能在本机浏览器配置' })
     }
@@ -714,22 +748,29 @@ async function api(req, res, url) {
   if (method === 'POST' && p === 'conversations') {
     const body = await readBody(req)
     const conv = await createConversation({ title: body.title ?? '新对话', model: body.model, system: body.system })
-    return send(res, 200, conv)
+    return send(res, 200, publicConversation(conv))
   }
   if (method === 'GET' && p === 'conversations') return send(res, 200, { conversations: await listConversations() })
 
   if (seg[1] === 'conversations' && seg[2]) {
     const id = assertId(seg[2])
     const action = seg[3]
+    if (method === 'GET' && action === 'messages' && seg.length === 6 && seg[5] === 'recalled-facts') {
+      const messageId = assertId(seg[4])
+      const conv = await getConversation(id)
+      const reply = conv?.messages?.find((message) => message.id === messageId && message.role === 'assistant')
+      if (!reply) return send(res, 404, { error: '找不到这条回复' })
+      return send(res, 200, await recalledFactsForReply(reply.recalled))
+    }
     if (method === 'GET' && !action) {
       const conv = await getConversation(id)
       if (!conv) return send(res, 404, { error: 'not found' })
-      return send(res, 200, conv)
+      return send(res, 200, publicConversation(conv))
     }
     if (method === 'PATCH' && !action) {
       const body = await readBody(req)
       const conv = await patchConversation(id, body)
-      return send(res, 200, conv ?? { error: 'not found' })
+      return send(res, 200, conv ? publicConversation(conv) : { error: 'not found' })
     }
     if (method === 'DELETE' && !action) {
       if (id === MAIN_ID) return send(res, 400, { error: '主对话不能删除' })
@@ -968,11 +1009,11 @@ async function api(req, res, url) {
       title: body.title,
       ts: body.ts,
       hidIdleSeconds: Number(body.hidIdleSeconds ?? 0),
-    })
+    }, { busyConversations: () => new Set(inflight.keys()) })
     return send(res, 200, result)
   }
   if (method === 'GET' && p === 'companion') return send(res, 200, await companionStatus({ includeBubbles: Number(url.searchParams.get('n') ?? 12) }))
-  if (method === 'GET' && p === 'companion/pending') return send(res, 200, { bubbles: await pendingBubbles({ since: url.searchParams.get('since') }) })
+  if (method === 'GET' && p === 'companion/pending') return send(res, 200, { bubbles: await pendingBubbles({ since: url.searchParams.get('since'), busyConversations: () => new Set(inflight.keys()) }) })
   if (method === 'PATCH' && p === 'companion') {
     const body = await readBody(req)
     return send(res, 200, await setCompanion(body.companion ?? body))
@@ -1165,6 +1206,12 @@ async function api(req, res, url) {
       kickPreparation()
       return
     }
+    if (method === 'POST' && seg[3] === 'answer' && !seg[4]) {
+      const result = await answerPreparation(id, await readBody(req))
+      send(res, 200, result)
+      if (!result.duplicate) kickPreparation()
+      return
+    }
   }
   if (method === 'POST' && p === 'feedback') {
     const body = await readBody(req)
@@ -1177,20 +1224,23 @@ async function api(req, res, url) {
     })
     if (msg && !r.ignored) await mutateConversation(conv.id, (current) => {
       const target = current.messages.find((m) => m.id === msg.id)
-      if (target) target.feedback = String(body.signal ?? '')
+      if (target) {
+        if (body.signal === 'wrong_time' || target.feedback === 'wrong_time') target.feedbackTiming = 'wrong_time'
+        if (body.signal !== 'wrong_time') target.feedback = String(body.signal ?? '')
+      }
     })
     return send(res, 200, { ok: true, ...r, agency: await agencyStats() })
   }
 
-  if (method === 'GET' && p === 'proactive') return send(res, 200, await proactiveStatus())
+  if (method === 'GET' && p === 'proactive') return send(res, 200, await proactiveStatus({ busyConversations }))
   if (method === 'POST' && p === 'proactive/run') {
-    const result = await proactiveTick({ busyConversations: () => new Set(inflight.keys()) })
-    return send(res, 200, { result, status: await proactiveStatus() })
+    const result = await proactiveTick({ busyConversations })
+    return send(res, 200, { result, status: await proactiveStatus({ busyConversations }) })
   }
   if (method === 'PATCH' && p === 'proactive') {
     const body = await readBody(req)
     cfg = await saveConfig({ proactive: { enabled: Boolean(body.enabled) } })
-    return send(res, 200, await proactiveStatus())
+    return send(res, 200, await proactiveStatus({ busyConversations }))
   }
 
   if (method === 'POST' && p === 'search/test') {
@@ -1452,8 +1502,6 @@ async function streamChatHandler(req, res) {
     }
   }
 
-  if (body.userText || attachments.length) await recordUserEngagement(conversationId)
-
   try {
     const main = await getConversation(MAIN_ID)
     if (conversationId === MAIN_ID && main?.unread) await patchConversation(MAIN_ID, { unread: 0 })
@@ -1483,7 +1531,7 @@ async function streamChatHandler(req, res) {
       }
       if (ev.type === 'done') doneEvt = ev
       if (res.writableEnded) break
-      sseWrite(res, ev.type, ev)
+      sseWrite(res, ev.type, publicChatEvent(ev))
     }
     record({
       kind: 'turn',
@@ -1617,7 +1665,7 @@ const proactiveTimer = setInterval(async () => {
     if (Date.now() - lastProactiveAttempt < tickMs) return
     lastProactiveAttempt = Date.now()
     proactiveBusy = true
-    const result = await proactiveTick({ busyConversations: () => new Set(inflight.keys()) })
+    const result = await proactiveTick({ busyConversations })
     if (!result.acted && result.skipped !== 'quiet_hours' && result.skipped !== 'disabled') log.debug('主动服务跳过:', result.skipped)
   } catch (err) {
     log.error('主动服务调度异常', err.message)

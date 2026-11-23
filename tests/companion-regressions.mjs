@@ -14,7 +14,8 @@ function miniWindow(response, token) {
     value = ''
     innerHTML = ''
     append(child) { this.children.push(child) }
-    addEventListener() {}
+    listeners = {}
+    addEventListener(name, listener) { this.listeners[name] = listener }
     setAttribute(name, value) { this.attributes[name] = value }
     querySelector(selector) {
       this.parts ??= {}
@@ -60,6 +61,19 @@ function events(...frames) {
   return new Response(frames.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(''), {
     headers: { 'content-type': 'text/event-stream' },
   })
+}
+
+{
+  const page = miniWindow(Response.json({ outcome: { timing: 'wrong_time' } }))
+  const tail = page.api('renderMessage({role:"assistant", id:"intro", companion:{bubbleId:"test"}})').querySelector('.tail')
+  assert.match(tail.innerHTML, /data-timing-message="intro"/)
+  const timing = { dataset: { timingMessage: 'intro' }, nextElementSibling: {} }
+  await page.document.listeners.click({ target: { closest: () => timing } })
+  assert.equal(page.requests[0].url, '/api/feedback')
+  assert.deepEqual(JSON.parse(page.requests[0].body), { signal: 'wrong_time', conversationId: 'test', messageId: 'intro' })
+  assert.equal(timing.disabled, true)
+  assert.match(timing.nextElementSibling.textContent, /已保存/)
+  assert.match(page.api('renderMessage({role:"assistant", id:"intro", companion:{bubbleId:"test"}, feedbackTiming:"wrong_time"})').querySelector('.tail').innerHTML, /disabled/)
 }
 
 {

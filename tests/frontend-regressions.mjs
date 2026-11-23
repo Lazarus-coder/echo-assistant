@@ -155,6 +155,7 @@ test('settings save submits config and provider keys', async () => {
   h.get('#setExcludes').value = 'private，secret'
   h.get('#setQuietStart').value = '23:00'
   h.get('#setQuietEnd').value = '07:00'
+  h.get('#setAttentionStyle').value = 'engaged'
   h.get('#setAttentionBudget').value = '14'
   h.get('#setAttentionGap').value = '120'
   h.collections.set('#panelSettings [data-order]', [{ checked: true, dataset: { order: 'custom' } }])
@@ -171,11 +172,142 @@ test('settings save submits config and provider keys', async () => {
   assert.deepEqual(body.config.search.order, ['custom'])
   assert.equal(body.config.search.providers.custom.endpoint, 'https://example.test/search')
   assert.deepEqual(body.config.screen.blocklist, ['Password Manager', 'Private Browser'])
-  assert.deepEqual(body.config.attention, { dailyBudget: 14, minGapSeconds: 120 })
+  assert.deepEqual(body.config.attention, { style: 'engaged', dailyBudget: 14, minGapSeconds: 120 })
   for (const key of ['media', 'memory', 'storage', 'companion', 'dream', 'proactive']) {
     assert.ok(body.config[key], `Missing settings section: ${key}`)
   }
   assert.deepEqual(body.env, { TEST_API_KEY: 'test-key' })
+})
+
+test('reopening settings removes the stale form before fetching and ignores an earlier render', async () => {
+  const h = harness()
+  const pending = []
+  const config = { models: [], generation: {}, search: {}, dream: {}, memory: {}, proactive: { quietHours: {} } }
+  h.context.settingsApi = async (route) => {
+    if (route === 'settings') return new Promise((resolve, reject) => pending.push({ resolve, reject }))
+    return route === 'providers' ? { profiles: {} } : null
+  }
+  h.run('S.boot = { config: {} }; api = settingsApi')
+  const el = h.get('#panelSettings')
+  el.innerHTML = '<select id="setAttentionStyle"></select><button data-action="save-settings">保存设置</button>'
+  const first = h.run('renderSettingsPanel()')
+  assert.match(el.innerHTML, /正在读取设置/)
+  assert.doesNotMatch(el.innerHTML, /setAttentionStyle|save-settings/)
+  const second = h.run('renderSettingsPanel()')
+  pending[1].resolve({ config: { ...config, attention: { style: 'engaged' } }, mcp: [] })
+  await second
+  assert.match(el.innerHTML, /for="setAttentionStyle"/)
+  assert.match(el.innerHTML, /<option value="engaged" selected>/)
+  const fresh = el.innerHTML
+  pending[0].resolve({ config, mcp: [] })
+  await first
+  assert.equal(el.innerHTML, fresh)
+  const third = h.run('renderSettingsPanel()')
+  pending[2].reject(new Error('offline'))
+  await third
+  assert.match(el.innerHTML, /role="alert"[^>]*>未能读取设置：offline/)
+  assert.match(el.innerHTML, /重新读取设置/)
+})
+
+test('timing status explains local rules separately from model content and honors higher-priority gates', () => {
+  const h = harness()
+  const timing = { style: 'quiet', reason: 'repeated_wrong_time', wrongTimeDays: 2, nextEligibleAt: '2026-11-20T12:00:00Z' }
+  h.context.state = { nextGate: { allow: false, reason: timing.reason }, attention: { timing }, lastDecision: { act: true, reason: '<draft>' } }
+  const render = () => { h.run('renderProactiveOverview(state, {}, {})'); return h.get('#proactiveOverview').innerHTML }
+  const html = render()
+  assert.match(html, /本机判断[\s\S]*安静[\s\S]*时机不合适[\s\S]*近两周的 2 天[\s\S]*按此规则最早可提醒/)
+  assert.match(html, /模型判断[\s\S]*是否建议提醒[\s\S]*&lt;draft&gt;/)
+  assert.doesNotMatch(html, /repeated_wrong_time|<draft>/)
+  h.context.state.nextGate.reason = 'quiet_hours'
+  assert.match(render(), /现在是你设置的静默时段/)
+  assert.doesNotMatch(render(), /按此规则最早可提醒/)
+  h.context.state.nextGate = { allow: false, reason: 'quiet_style_gap' }
+  assert.match(render(), /至少两小时/)
+  h.context.state.nextGate.reason = 'waiting_for_usual_window'
+  assert.match(render(), /常聊的时段快到了/)
+})
+
+test('wrong time is available on delivered assistant interventions and leaves utility feedback selected', async () => {
+  const h = harness()
+  const makeHtml = (message) => h.run(`messageFeedbackHtml(${JSON.stringify(message)})`)
+  assert.equal(makeHtml({ id: 'regular' }), '')
+  for (const message of [{ proactive: true }, { companion: { bubbleId: 'bubble' } }]) {
+    const html = makeHtml({ ...message, id: 'nudge', feedback: 'good', feedbackTiming: 'wrong_time' })
+    assert.match(html, /data-signal="good"[^>]*aria-pressed="true"/)
+    assert.match(html, /data-signal="wrong_time"[^>]*aria-label="[^"]+暂停打扰 30 分钟"[^>]*aria-pressed="true">时机不合适/)
+  }
+  const calls = [], notices = []
+  h.context.sendFeedback = async (route, { body }) => {
+    calls.push({ route, ...body })
+    return { outcome: { utility: 'good', timing: 'wrong_time' }, duplicate: calls.length > 1 }
+  }
+  h.context.showNotice = (text) => notices.push(text)
+  h.context.button = { dataset: { action: 'fb', signal: 'wrong_time', kind: 'suggest', id: 'nudge' } }
+  h.run("api = sendFeedback; toast = showNotice; S.current = 'main'; S.conv = {id:'main', messages:[{id:'nudge'}]}")
+  await h.run('handleAction({target:{closest:() => button}})')
+  assert.deepEqual(calls[0], { route: 'feedback', conversationId: 'main', messageId: 'nudge', kind: 'suggest', signal: 'wrong_time' })
+  assert.match(notices[0], /暂停打扰 30 分钟/)
+  assert.equal(h.run('S.conv.messages[0].feedback'), 'good')
+  assert.equal(h.run('S.conv.messages[0].feedbackTiming'), 'wrong_time')
+  await h.run('handleAction({target:{closest:() => button}})')
+  assert.match(notices[1], /已记录过/)
+})
+
+test('chat footers link each distinct saved draft once, using only a successful draft lookup', () => {
+  const h = harness()
+  const tail = element()
+  h.context.wrapper = { querySelector: () => tail }
+  const step = { name: 'follow_up_list', ok: true, preparation: { commitmentId: 'goal_one', preparationId: 'prep_one', title: '<Checklist>' } }
+  const unrelated = { ...step, preparation: { commitmentId: 'goal_other', preparationId: 'prep_other', title: 'Wrong' } }
+  h.context.reply = { tools: [
+    step, step, { ...step, preparation: { commitmentId: 'goal_two', preparationId: 'prep_two', title: 'Agenda' } },
+    { ...unrelated, name: 'web_search' }, { ...unrelated, ok: false }, { name: 'follow_up_list', ok: true, args: { id: 'goal_other' }, result: 'prep_other' },
+  ] }
+  h.run('renderTail(wrapper, reply)')
+  assert.equal((tail.innerHTML.match(/data-action="view-preparation"/g) ?? []).length, 2)
+  assert.match(tail.innerHTML, /data-preparation-id="prep_one" data-commitment-id="goal_one".*?&lt;Checklist&gt;/)
+  assert.match(tail.innerHTML, /data-preparation-id="prep_two" data-commitment-id="goal_two".*?Agenda/)
+  assert.doesNotMatch(tail.innerHTML, /prep_other|goal_other/)
+})
+
+test('reply memory details load on opening, discard earlier responses on reopening, and expose recoverable errors', async () => {
+  const h = harness()
+  const detail = element(), panel = element(), tail = element()
+  panel.replaceChildren = (...children) => { panel.children = children }
+  detail.querySelector = () => panel
+  tail.querySelector = () => detail
+  h.context.wrapper = { querySelector: () => tail }
+  h.run('S.current = "test_conversation"; renderTail(wrapper, { id: "legacy" })')
+  assert.doesNotMatch(tail.innerHTML, /recalled-facts/)
+  const requests = []
+  h.context.inspect = (route) => new Promise((resolve, reject) => requests.push({ route, resolve, reject }))
+  h.run('api = inspect; renderTail(wrapper, { id: "reply", aborted: true, recalled: [{ text: "OLD SECRET" }] })')
+  assert.match(tail.innerHTML, /<details.*<summary>为这条回复检索的记忆/)
+  assert.doesNotMatch(tail.innerHTML, /OLD SECRET/)
+  assert.equal(requests.length, 0)
+  detail.open = true
+  const first = detail.dispatch('toggle')
+  assert.equal(requests[0].route, 'conversations/test_conversation/messages/reply/recalled-facts')
+  assert.match(panel.children[0].textContent, /核对/)
+  detail.open = false
+  await detail.dispatch('toggle')
+  assert.equal(panel.children.length, 0)
+  detail.open = true
+  const second = detail.dispatch('toggle')
+  requests[1].resolve({ facts: [{ text: '<updated>' }], unavailableCount: 1 })
+  await second
+  requests[0].resolve({ facts: [{ text: 'Earlier response' }], unavailableCount: 0 })
+  await first
+  assert.match(panel.children[0].innerHTML, /&lt;updated&gt;/)
+  assert.match(panel.children[0].innerHTML, /1 条记忆已变更/)
+  assert.doesNotMatch(panel.children[0].innerHTML, /Earlier response/)
+  detail.open = false
+  await detail.dispatch('toggle')
+  detail.open = true
+  const third = detail.dispatch('toggle')
+  requests[2].reject(new Error('offline'))
+  await third
+  assert.match(panel.children[0].textContent, /offline.*重试/)
 })
 
 test('reopening setup preserves the manual model, utility model and offline search choice', async () => {

@@ -23,7 +23,8 @@ The installer places Echo and its data under `~/Library/Application Support/Echo
 - **Network:** chat listens on the local network by default and does not require a password. In Settings, enable password protection and set a password before using a shared network. For local access only, configure `bind: "local"` and restart Echo; source launches can use `ECHO_BIND=local`. See [the detailed controls](permissions.md#5-network-exposure).
 - **Model and search:** content used in answers goes to the endpoint you choose; search queries go to the configured search provider. Review their data terms and usage charges. Local record storage does not mean every request stays on your device.
 - **Research:** enable it in **主动服务**, choose sources per goal, and review the results. Research and notification controls are independent. Checks pause when the Mac sleeps or Echo stops.
-- **Follow-ups.** In the public alpha.6 package, open **主动服务** to create a goal, set its date and choose its sources. In the current source you can also ask “Track my proposal until Friday” in chat. Check the saved date, then ask “Show me the proposal draft.” Echo can read the current draft and its source references even when proactive messages are off. A returned draft still needs your review.
+- **Follow-ups.** In the public alpha.6 package, open **主动服务** to create a goal, set its date and choose its sources. With the current source, try “Track my proposal until Friday” in chat. Check the saved date, then ask “Show me the proposal draft.” You can read the draft and its sources with proactive messages off. If the draft asks a question, open it in **主动服务**, enter your answer and choose **回答并继续准备**. Your answer stays beside the original question. The goal shows when the next draft is ready.
+- **Recall in a reply.** In the current source, expand **为这条回复检索的记忆** under a chat reply to see the facts retrieved for that turn. The list shows facts that are still active and match the original text. Choose **管理记忆** to open your memory settings.
 - **Tools:** workspace file access must be enabled. Shell and MCP calls need approval and can act with the privileges of your account or the configured server. Stop does not undo a completed action.
 
 The app does not automatically import your browser, email, or calendar. Screen context is optional; on-device OCR is the default, while image mode can send screenshots to your chosen model.
@@ -67,7 +68,8 @@ Echo 目前是 alpha 产品，面向 macOS 13 或更高版本，安装包支持 
 - **网络：**默认向局域网开放对话且不要求口令。在共享网络使用前，请在设置中启用口令保护并设置口令；若只需本机访问，将 `bind` 配置为 `"local"` 并重启 Echo。源码启动也可使用 `ECHO_BIND=local`。详细操作见[网络访问说明](permissions.md#5-network-exposure)。
 - **模型与搜索：**回答所需内容会发送到你选择的模型端点，搜索词会发送到所配置的搜索提供方。请了解提供方的数据条款与计费；记录存在本机不代表所有请求都留在本机。
 - **研究：**在 **主动服务** 开启，为每个目标选择来源，并复核结果。研究与通知分别控制；Mac 睡眠或 Echo 停止时暂停检查。
-- **跟进。** 公开的 alpha.6 安装包可在「主动服务」面板中创建目标、设定日期并选择来源。使用当前源码时，也可以在对话里说“帮我跟进提案，周五截止”。核对保存的日期后，再问“给我看看提案草稿”，就能读到当前草稿及其来源。关闭主动消息也能查，结果仍需自己核对。
+- **跟进。** 公开的 alpha.6 安装包可在「主动服务」面板中创建目标、设定日期并选择来源。使用当前源码时，也可以在对话里说“帮我跟进提案，周五截止”。核对日期后，再问“给我看看提案草稿”，就能读到当前草稿及其来源。关闭主动消息也能查。如果草稿里有待确认问题，在「主动服务」打开它，填好回答并点「回答并继续准备」。回答会保留在原问题下，回到目标即可查看下一版的进度。
+- **核对回复召回的记忆。** 使用当前源码时，在回复下展开「为这条回复检索的记忆」，可以看到当时召回且现在仍有效、内容相符的事实。点「管理记忆」可进入记忆设置。
 - **工具：**工作区文件访问需先开启。Shell 与 MCP 调用需要确认，并按本机账号或所配置服务的权限执行；停止不能撤销已完成的动作。
 
 应用不会自动导入浏览器、邮箱或日历。屏幕上下文按需开启，默认在本机进行 OCR；图片模式可能把截图发给所选模型。

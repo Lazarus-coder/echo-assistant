@@ -174,6 +174,54 @@ try {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
   })
+  const patch = (route, body) => fetch(`${base}/api/${route}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
+    body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
+  })
+  await test('reply memory inspection resolves only unchanged active facts without model calls or memory writes', async () => {
+    const conv = await (await post('conversations', {})).json()
+    const recorded = ['kept', 'changed', 'deleted', 'faded', 'missing'].map((label) => ({ id: 'fact_' + label, kind: 'fact', text: label + ' at retrieval' }))
+    const file = path.join(dataDir, 'memory', 'observations.jsonl')
+    const before = await fs.readFile(file, 'utf8').catch(() => '')
+    const rows = [recorded[0], { ...recorded[1], text: 'changed since retrieval' }, recorded[2], recorded[3], { id: 'unrelated', text: 'other active fact' }]
+      .map((row, i) => JSON.stringify({ ...row, hits: 3, status: ['active', 'active', 'deleted', 'faded', 'active'][i] }))
+    const entries = before + '\n' + rows.join('\n') + '\n'
+    const messageFile = path.join(dataDir, 'conversations', conv.id + '.json')
+    const get = (id, convId = conv.id) => fetch(`${base}/api/conversations/${convId}/messages/${id}/recalled-facts`)
+    const requestsBefore = (await jsonLines(requestsFile)).length
+    try {
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(file, entries)
+      await fs.writeFile(messageFile, JSON.stringify({ ...conv, messages: [
+        { role: 'assistant', id: 'reply_aborted', runStatus: 'cancelled', recalled: recorded },
+        { role: 'assistant', id: 'reply_legacy' }, { role: 'user', id: 'user_original' },
+      ] }))
+      const response = await get('reply_aborted')
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('cache-control'), 'no-store')
+      assert.deepEqual(await response.json(), { facts: [{ id: recorded[0].id, text: recorded[0].text }], unavailableCount: 4 })
+      assert.deepEqual(await (await get('reply_legacy')).json(), { facts: [], unavailableCount: 0 })
+      assert.equal((await get('user_original')).status, 404)
+      assert.equal((await get('reply_aborted', 'main')).status, 404)
+      const route = 'conversations/' + conv.id
+      for (const res of [await fetch(`${base}/api/${route}`), await patch(route, { title: 'Renamed chat' })]) {
+        assert.equal(res.status, 200)
+        const chat = await res.json()
+        assert.deepEqual(chat.messages[0].recalled, recorded.map(({ id }) => ({ id })))
+        assert.equal(Object.hasOwn(chat.messages[1], 'recalled'), false)
+        assert.doesNotMatch(JSON.stringify(chat), /at retrieval|since retrieval/)
+      }
+      const saved = JSON.parse(await fs.readFile(messageFile, 'utf8'))
+      assert.equal(saved.title, 'Renamed chat')
+      assert.deepEqual(saved.messages[0].recalled, recorded)
+      assert.equal(await fs.readFile(file, 'utf8'), entries)
+      await fs.writeFile(file, '')
+      assert.deepEqual(await (await get('reply_aborted')).json(), { facts: [], unavailableCount: 5 })
+      assert.equal((await jsonLines(requestsFile)).length, requestsBefore)
+    } finally {
+      await fs.writeFile(file, before)
+    }
+  })
   for (const status of ['completed', 'failed', 'cancelled', 'limit_reached']) {
     await test(`HTTP chat ${status} preserves the outcome in history and success metrics`, async () => {
       const conversation = await (await post('conversations', {})).json()
@@ -200,6 +248,34 @@ try {
       }
     })
   }
+  await test('chat streams expose only recall IDs in metadata, completed replies and failed replies', async () => {
+    const file = path.join(dataDir, 'memory', 'observations.jsonl')
+    const before = await fs.readFile(file, 'utf8').catch(() => '')
+    const fact = { id: 'fact_orchid', text: 'Synthetic orchid recall text', kind: 'fact', importance: 5, status: 'active', last_seen: new Date().toISOString() }
+    try {
+      assert.equal((await patch('settings', { config: { memory: { inject: true, extract: false } } })).status, 200)
+      await fs.writeFile(file, JSON.stringify(fact) + '\n')
+      for (const prompt of ['Orchid fixture', 'STATUS:failed']) {
+        const conv = await (await post('conversations', { title: 'Fixture' })).json()
+        const response = await post('chat', { conversationId: conv.id, userText: prompt })
+        assert.equal(response.status, 200)
+        const stream = await response.text()
+        assert.ok(!stream.includes(fact.text))
+        const events = [...stream.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1]))
+        const meta = events.find((ev) => ev.type === 'meta')
+        assert.equal(Object.hasOwn(meta, 'system'), false)
+        assert.deepEqual(meta.memory, [{ id: fact.id }])
+        const terminal = events.findLast((ev) => ['error', 'done'].includes(ev.type))
+        assert.equal(terminal.type, prompt === 'STATUS:failed' ? 'error' : 'done')
+        assert.deepEqual((terminal.assistant ?? terminal.message).recalled, [{ id: fact.id }])
+        const saved = JSON.parse(await fs.readFile(path.join(dataDir, 'conversations', conv.id + '.json'), 'utf8'))
+        assert.equal(saved.messages.at(-1).recalled[0].text, fact.text)
+      }
+    } finally {
+      await fs.writeFile(file, before)
+      assert.equal((await patch('settings', { config: { memory: { inject: false, extract: true } } })).status, 200)
+    }
+  })
   await test('malformed foreign cookie values never 500 the API (issue #1)', async () => {
     const response = await fetch(`${base}/api/logout`, {
       method: 'POST',
@@ -271,6 +347,70 @@ try {
     assert.ok((await jsonLines(requestsFile)).some((req) => req.stream && req.endpoint === newBase + '/chat/completions' && req.model === 'manual-chat'))
     const env = await fs.readFile(path.join(dataDir, 'echo.env'), 'utf8')
     assert.ok(env.includes('OPENAI_BASE_URL=' + newBase + '\n') && env.includes('ECHO_SERVER_TEST_KEY=new-fixture-key\n'))
+  })
+
+  await test('legacy settings default to balanced and a valid interruption style survives profile changes', async () => {
+    const settings = async () => (await (await fetch(`${base}/api/settings`)).json()).config
+    assert.equal((await settings()).attention.style, 'balanced')
+    for (const style of ['quiet', 'balanced', 'engaged']) {
+      const res = await patch('settings', { config: { attention: { style } } })
+      assert.equal(res.status, 200)
+      assert.equal((await res.json()).config.attention.style, style)
+      assert.equal(JSON.parse(await fs.readFile(config, 'utf8')).attention.style, style)
+    }
+    for (const attention of [null, 'quiet', [], { style: '' }, { style: null }, { style: ['quiet'] }, { style: 'QUIET' }]) {
+      const res = await patch('settings', { config: { attention, systemPrompt: 'invalid partial save' } })
+      assert.equal(res.status, 400)
+    }
+    assert.notEqual((await settings()).systemPrompt, 'invalid partial save')
+    await patch('settings', { config: { attention: { minGapSeconds: 95 }, memory: { profile: 'off' } } })
+    const boot = await (await fetch(`${base}/api/bootstrap`)).json()
+    assert.equal(boot.config.attention.minGapSeconds, 95)
+    assert.equal(boot.config.attention.style, 'engaged')
+    assert.equal(boot.config.memory.profile, 'off')
+  })
+
+  await test('feedback on a delivered message keeps utility and timing independent across reloads', async () => {
+    const conv = await (await post('conversations', { title: 'Fixture' })).json()
+    const msg = { id: 'test_nudge', role: 'assistant', proactive: true, kind: 'suggest', content: 'Fixture reminder.' }
+    await fs.writeFile(path.join(dataDir, 'conversations', conv.id + '.json'), JSON.stringify({ ...conv, messages: [msg] }))
+    const feedback = async (signal) => (await (await post('feedback', { signal, conversationId: conv.id, messageId: msg.id })).json())
+    assert.equal((await feedback('good')).outcome.utility, 'good')
+    assert.equal((await feedback('wrong_time')).outcome.timing, 'wrong_time')
+    assert.equal((await feedback('wrong_time')).duplicate, true)
+    const reloaded = await (await fetch(`${base}/api/conversations/${conv.id}`)).json()
+    assert.equal(reloaded.messages[0].feedback, 'good')
+    assert.equal(reloaded.messages[0].feedbackTiming, 'wrong_time')
+  })
+
+  await test('status and a manual check agree on a quiet-style delay before model evaluation', async () => {
+    const stateFile = path.join(dataDir, 'state.json')
+    const before = await fs.readFile(stateFile, 'utf8')
+    const state = JSON.parse(before)
+    const previousSettings = (await (await fetch(`${base}/api/settings`)).json()).config
+    const requestsBefore = (await jsonLines(requestsFile)).length
+    const lastAt = new Date(Date.now() - 60 * 60000)
+    try {
+      state.lastUserMessageAt = null
+      state.attention = { history: [{ id: 'fixture_delivery', channel: 'companion', at: lastAt.toISOString(), status: 'delivered' }] }
+      await fs.writeFile(stateFile, JSON.stringify(state))
+      const configured = await patch('settings', { config: {
+        attention: { style: 'quiet' }, proactive: { enabled: true, quietHours: { start: '00:00', end: '00:00' } },
+      } })
+      assert.equal(configured.status, 200)
+      const status = await (await fetch(`${base}/api/proactive`)).json()
+      assert.equal(status.nextGate.reason, 'quiet_style_gap')
+      assert.equal(status.attention.timing.style, 'quiet')
+      assert.equal(status.attention.timing.nextEligibleAt, new Date(lastAt.getTime() + 120 * 60000).toISOString())
+      const checked = await (await post('proactive/run', {})).json()
+      assert.equal(checked.result.skipped, status.nextGate.reason)
+      assert.equal((await jsonLines(requestsFile)).length, requestsBefore)
+    } finally {
+      await patch('settings', { config: { attention: { style: previousSettings.attention.style }, proactive: {
+        enabled: previousSettings.proactive.enabled, quietHours: previousSettings.proactive.quietHours,
+      } } })
+      await fs.writeFile(stateFile, before)
+    }
   })
 
   await test('setting a wizard password enables login and keeps the current browser signed in with malformed foreign cookies', async () => {

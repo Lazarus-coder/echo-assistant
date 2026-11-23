@@ -37,6 +37,10 @@ function renderMessage(m) {
   } else {
     el.innerHTML = `<div class="avatar">E</div><div class="body"><div class="content"></div><div class="tail"></div></div>`
     $('.content', el).innerHTML = mdLite(m.content ?? '')
+    if (m.companion?.bubbleId === bubbleId && m.id) {
+      const saved = m.feedbackTiming === 'wrong_time' || m.feedback === 'wrong_time'
+      $('.tail', el).innerHTML = `<button type="button" class="btn small ghost" data-timing-message="${esc(m.id)}" ${saved ? 'disabled' : ''}>${saved ? '已记录时机反馈' : '时机不合适'}</button> <span class="muted small" role="status"></span>`
+    }
   }
   return el
 }
@@ -191,7 +195,22 @@ $('#input').addEventListener('keydown', (e) => {
     $('#composer').requestSubmit()
   }
 })
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
+  const timing = e.target.closest('[data-timing-message]')
+  if (timing && conversationId && !timing.disabled) {
+    timing.disabled = true
+    const status = timing.nextElementSibling
+    try {
+      const reply = await api('feedback', { method: 'POST', body: { signal: 'wrong_time', conversationId, messageId: timing.dataset.timingMessage } })
+      if (reply.outcome?.timing !== 'wrong_time') throw new Error('无法确认时机反馈')
+      timing.textContent = '已记录时机反馈'
+      status.textContent = '这条气泡的时机反馈已保存。'
+    } catch (err) {
+      timing.disabled = false
+      status.textContent = `保存失败：${err.message}。可再次点击重试。`
+    }
+    return
+  }
   if (conversationId && e.target.closest('[data-act="open-main"]')) {
     window.open(`/?conv=${conversationId}`, '_blank')
   }

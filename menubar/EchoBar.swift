@@ -376,8 +376,8 @@ final class Controller: NSObject, NSApplicationDelegate {
                 onOpen: { b in
                     self.overlay.openMini(for: b, port: port, token: localToken())
                 },
-                onDismiss: { b in
-                    request("companion/\(b.id)/dismiss", method: "POST", body: ["reason": "menu_bubble"]) { _ in self.refresh() }
+                onDismiss: { b, reason in
+                    request("companion/\(b.id)/dismiss", method: "POST", body: ["reason": reason]) { _ in self.refresh() }
                 },
                 onExpire: { b in
                     // 自动淡出只标过期：不在服务端计"被拒绝"，也不该再次弹出来

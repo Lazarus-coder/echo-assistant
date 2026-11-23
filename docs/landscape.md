@@ -1,5 +1,29 @@
 # 同类项目全景与 Echo 的取舍
 
+## Personal agents and proactive assistance · 2026-11-23
+
+| Design | What informed Echo |
+|---|---|
+| Hermes Agent can use a scheduled job's local pre-check to skip an entire model turn. [Hermes scheduled tasks](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | A five-minute timer is a reason to check locally. It is a poor reason to repeatedly ask the model the same question. After the model declines to speak, Echo can reuse that decision until the evidence, relevant settings or local three-hour band changes. |
+| OpenClaw exposes active hours, foreground-work priority and empty-checklist skips on scheduled checks. [OpenClaw scheduling policies](https://docs.openclaw.ai/gateway/heartbeat) | Echo checks hard limits first and checks again at delivery. A draft the user requested can have higher priority than an inferred tip. Both must respect quiet hours. |
+| ActivityWatch's AFK watcher uses observable device signals and documents cases where they misclassify activity. [ActivityWatch FAQ](https://docs.activitywatch.net/en/latest/faq.html) | Echo learns from the local times at which someone actually messages Echo. This is a habit of using this assistant. It gives limited evidence about when the person will welcome a suggestion. |
+
+Here, self-evolution has a narrow, testable meaning. Each personal Echo profile learns which kinds of help received explicit useful feedback and which **trigger and time** combinations received explicit timing objections. The user can set the starting preference. A person who opens Echo late at night or ignores a suggestion has supplied neither a personality trait nor a vote against a topic.
+
+## Five open-source agent designs revisited · 2026-11-23
+
+We compared five projects against two moments in Echo. A draft asks a question and the user wants to answer it. A reply recalls something personal and the user wants to see what Echo retrieved. The table records what each project does and the product decision we took from it.
+
+| Project | What a user or developer can do there | Decision for Echo |
+|---|---|---|
+| LangGraph | Pause a workflow with a question, then resume the same thread with the answer. [Interrupts](https://docs.langchain.com/oss/javascript/langgraph/interrupts) | **Adopted.** Answer a question on the draft that asked it. Save the answer against that revision and queue a new draft with the same goal and permissions. |
+| Khoj | Open the reference notes supplied for a chat response. [Chat and references](https://github.com/khoj-ai/khoj/blob/master/documentation/docs/features/chat.md) | **Adopted for personal facts.** Inspect the facts recalled for one reply. A fact's presence tells you what Echo retrieved. It cannot tell you which part of a model's answer depended on it. |
+| Goose | Return to a saved session and distinguish work in progress, completed work and errors in the session list. [Session management](https://goose-docs.ai/docs/guides/sessions/session-management/) | **Keep the existing return brief.** Echo already links from the brief to a particular draft. Answering its question gives the user a way to continue from that same place. |
+| Aider | List the files in chat and inspect the token cost of the current context. [In-chat commands](https://aider.chat/docs/usage/commands.html) | **Use ordinary chat controls.** Echo exposes recalled facts on the reply where the user needs them. File and token accounting would answer a different question. |
+| Letta | Mark a memory block read-only to the agent, reserving changes for its external owner. [Memory blocks](https://docs.letta.com/v1-sdk/memory/memory-blocks) | **Deferred.** Echo's protection control prevents a fact from fading. Giving a person exclusive editing authority would require a separate guarantee across every memory writer. |
+
+## Original survey · 2026-10-19
+
 调研时间：2026-10-19。目的是把 Echo 放在已有工作的坐标系里：哪些设计是公认的好做法（照抄）、哪些是各家分歧点（选择）、哪些是 Echo 自己的东西（创新）。
 
 > 历史设计笔记：下文的竞品比较、研究数字与早期 Echo 行为保留调研时的表述，未经持续复核，不代表当前产品能力或独立评测结论。当前 Echo 功能见 README 与 CHANGELOG，依赖和测试结果以当前源码及实际运行输出为准。

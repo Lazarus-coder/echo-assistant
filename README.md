@@ -31,9 +31,13 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 
 ## Context that stays useful
 
-**Memory you can manage.** Inspect, protect, revive, or remove remembered facts. Choose a memory level and adjust response preferences. Older, unused facts can fade; you decide what should remain.
+**Memory you can manage.** On a reply that recalled personal facts, open its memory details to see which facts Echo retrieved for that turn. You can inspect, protect, revive, or remove facts in the memory panel.
+
+**When a draft needs your input.** In the current source, open the draft in **主动服务**, answer its question, and submit. Echo saves your answer with the question and queues another draft for the same goal. You can come back later with proactive messages off.
 
 **Follow-up on your terms.** Background research starts off. Turn it on in **主动服务**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **加入跟进** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Return to chat after six hours away to see a brief of recorded activity and open any current draft directly. You can review a result, correct it, pause a goal, or mark it complete.
+
+**Teach Echo when to interrupt.** In the current source, choose a quieter, balanced or more proactive style in Settings. Echo checks local time, your recent chat routine and the kind of trigger before asking a model to compose a suggestion. Mark a message or bubble **时机不合适** (“wrong time”) to pause interruptions for 30 minutes. Repeated feedback at that time teaches Echo to hold similar interruptions. Open **主动服务 → 打扰时机与反馈学习** to see its decision.
 
 **Optional screen context.** Screen awareness and companion mode start off. If you enable them and grant macOS Screen Recording permission, Echo can use recent screen context and offer brief suggestions. Selecting the deep memory profile also enables screen awareness. Capture can be paused from the menu bar.
 
@@ -69,6 +73,7 @@ This repository describes the current source. Published packages may lag behind 
 - [Product site files](site/) · [English page](site/en.html) · [Preview locally](docs/development.md#preview-the-product-site)
 - [Getting started](docs/getting-started.md) · [Permissions and data](docs/permissions.md)
 - [Development, tests, and source installation](docs/development.md)
+- [Open-source personal agents, interruption timing and what Echo adopted](docs/landscape.md)
 - [Release history](CHANGELOG.md) · [Report an issue](https://github.com/Lazarus-coder/echo-assistant/issues)
 
 No license file is currently included in this repository. Contact the maintainers about reuse.

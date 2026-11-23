@@ -50,6 +50,100 @@ function formFixture(h, values = {}) {
 }
 const fields = { title: '查报名时间', successCriteria: '确认适用年份的截止', nextAction: '查学校官网', urls: '', deadline: '', watch: 'combined', folders: '', officialDomains: '', questions: '' }
 
+function answerFixture() {
+  const h = harness(), form = element(), input = element(), button = element(), status = element()
+  Object.assign(form.dataset, { answerPreparation: 'prep1', goal: 'goal1', revision: '2' })
+  form.querySelector = (selector) => selector === 'textarea' ? input : selector.startsWith('button') ? button : status
+  input.name = 'answer'
+  input.form = form
+  input.value = '  给设计组  '
+  h.context.form = form
+  h.run(`COMMITMENTS.items = [{id:'goal1',status:'active',revision:2,preparation:{state:'ready',artifactId:'prep1'}}];
+    COMMITMENTS.preparations = [{id:'prep1',commitmentId:'goal1',revision:2,question:'谁会看？'}];
+    toast = () => {}; syncCommitmentCards = () => {}; renderProactivePanel = async () => {}`)
+  return { h, form, input, button, status }
+}
+
+test('only the current question accepts answers and historical questions retain the saved reply', () => {
+  const { h } = answerFixture()
+  const card = () => h.run('commitmentHtml(COMMITMENTS.items[0], COMMITMENTS.preparations)')
+  assert.match(card(), /<textarea[^>]+name="answer"[^>]+maxlength="1600"/)
+  for (const change of ["{status:'paused'}", "{status:'done'}", "{revision:3}", "{discovery:{expiresAt:'2001-01-01'}}", "{preparation:{state:'running'}}", "{preparation:{state:'ready',artifactId:'prep2'}}"]) {
+    const html = h.run(`commitmentHtml({...COMMITMENTS.items[0], ...${change}}, COMMITMENTS.preparations)`)
+    assert.doesNotMatch(html, /回答并继续准备/)
+  }
+  h.run(`COMMITMENTS.preparations[0].answer = {text:'<img src=x>',answeredAt:'2026-11-12'};
+    COMMITMENTS.items[0].preparation = {state:'queued',reason:'answered'}`)
+  assert.match(card(), /谁会看？/)
+  assert.match(card(), /你的回答：<\/b>&lt;img src=x&gt;/)
+  assert.match(card(), /下一版已加入准备队列/)
+  assert.doesNotMatch(card(), /回答并继续准备|<img src=x>/)
+})
+
+test('answer text survives card redraws and stays with its original question', () => {
+  const { h, input } = answerFixture()
+  h.listeners.get('input').forEach((handler) => handler({ target: input }))
+  const current = () => h.run('commitmentHtml(COMMITMENTS.items[0], COMMITMENTS.preparations)')
+  assert.match(current(), /给设计组  <\/textarea>/)
+  h.run(`COMMITMENTS.items[0].preparation.artifactId = 'prep2';
+    COMMITMENTS.preparations.unshift({id:'prep2',commitmentId:'goal1',revision:2,question:'需要几页？'})`)
+  assert.match(current(), /id="answer-prep1"[^>]+readonly>  给设计组/)
+  assert.match(current(), /id="answer-prep2"[^>]*><\/textarea>/)
+  assert.match(current(), /data-preparation-id="prep2" data-commitment-id="goal1">查看最新结果/)
+})
+
+test('polling shows the revised result while focus stays on the previous result summary', () => {
+  const h = harness(), card = element(), summary = element(), detail = element(), replacement = element()
+  card.dataset = { goalId: 'g', signature: 'previous' }
+  summary.tagName = 'SUMMARY'
+  summary.parentElement = detail
+  detail.dataset.detailKey = 'previous'
+  detail.querySelector = () => replacement
+  card.querySelectorAll = (selector) => selector.includes('details') ? [detail] : []
+  card.contains = (node) => node === summary
+  h.get('#commitmentList').querySelectorAll = () => [card]
+  h.document.activeElement = summary
+  h.run(`COMMITMENTS.items = [{id:'g',status:'active',revision:3,preparation:{state:'ready',artifactId:'revised'}}];
+    COMMITMENTS.preparations = [{id:'revised',commitmentId:'g',revision:3,title:'下一版提纲',question:'需要几页？'}]; syncCommitmentCards()`)
+  assert.match(card.innerHTML, /下一版提纲/)
+  assert.equal(replacement.focused, true)
+})
+
+test('answer submission sends one revision-bound request and displays the persisted response', async () => {
+  const { h } = answerFixture()
+  let finish, calls = 0
+  h.context.send = (path, options) => {
+    calls++
+    assert.equal(path, 'commitments/goal1/answer')
+    assert.deepEqual(JSON.parse(JSON.stringify(options.body)), { preparationId: 'prep1', expectedRevision: 2, answer: '给设计组' })
+    return new Promise((resolve) => { finish = resolve })
+  }
+  h.run('api = send')
+  const pending = h.run('submitPreparationAnswer(form)')
+  await h.run('submitPreparationAnswer(form)')
+  assert.equal(calls, 1)
+  finish({ commitment: { id:'goal1', revision:3, status:'active', preparation:{state:'queued',reason:'answered'} }, answer: {text:'给设计组',answeredAt:'2026-11-23'} })
+  await pending
+  assert.equal(h.run('answerDrafts.size'), 0)
+  assert.match(h.run('commitmentHtml(COMMITMENTS.items[0], COMMITMENTS.preparations)'), /你的回答：<\/b>给设计组/)
+})
+
+test('temporary errors keep answer drafts retryable and conflicts direct users to the latest result', async () => {
+  for (const code of [503, 409]) {
+    const { h, input } = answerFixture()
+    h.document.activeElement = input
+    h.run(`api = async () => { throw Object.assign(new Error('服务状态已更新'), {status:${code}}) }`)
+    await h.run('submitPreparationAnswer(form)')
+    assert.equal(h.run('answerDrafts.get("prep1").text'), input.value)
+    assert.equal(h.document.activeElement, input)
+    const html = h.run('commitmentHtml(COMMITMENTS.items[0], COMMITMENTS.preparations)')
+    assert.match(html, /给设计组/)
+    assert.match(html, code === 409 ? /查看当前目标/ : /你可以重试/)
+    if (code === 409) assert.doesNotMatch(html, /回答并继续准备/)
+    else assert.match(html, /回答并继续准备/)
+  }
+})
+
 test('returning to an open tab after six hours links directly to the saved draft', async () => {
   const h = harness()
   h.run("S.boot = {}; S.current = 'main'")

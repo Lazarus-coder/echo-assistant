@@ -61,6 +61,14 @@ Echo never *initiates* a permission dialog on its own: without the grant it simp
 
 Proactive messages announce themselves through `osascript`. If nothing shows up, allow notifications for your terminal/launcher app in **System Settings → Notifications**, or just rely on the unread dot in the menu bar.
 
+### How timing is personalized in the current source
+
+The timing policy belongs to the Mac's Echo data profile. Anyone chatting through a shared installation contributes to that same profile. While proactive messages or companion bubbles are enabled, Echo records which three-hour local time bands contained a user chat, at most once per band and date. The timing sample contains no chat text. The policy considers the last 14 local dates in the current time zone. **全部忘掉** clears the learned timing history.
+
+Quiet mode spaces optional interruptions at least two hours apart and can wait up to six hours for a usual chat window. Balanced can wait up to three hours. Engaged uses the normal configured gaps. A user-requested draft can pass those preference-based waits. All styles respect quiet hours, active chats, fresh meeting or deep-focus signals, pauses and delivery limits.
+
+Marking **时机不合适** pauses all interruptions for 30 minutes. Marking the same kind of interruption on two separate delivery dates in the same three-hour band teaches Echo to hold that kind for the rest of that band on matching days. A requested draft, an unsolicited suggestion and a companion bubble have separate timing histories. Content usefulness has separate feedback controls. The local timing calculation makes no model request. Preparing a draft or composing an eligible suggestion can still use your model.
+
 ## 4. Residency — `./install.sh`
 
 Echo is designed to stay running. `./install.sh` registers two launchd agents:

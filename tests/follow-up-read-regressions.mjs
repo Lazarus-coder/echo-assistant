@@ -10,7 +10,7 @@ process.env.ECHO_CONFIG = path.join(sandbox, 'config.json')
 process.env.ECHO_DRAFT_TEST_KEY = 'fixture-only'
 process.env.ECHO_DRAFT_TEST_URL = 'http://127.0.0.1:1/v1'
 const { saveConfig } = await import('../lib/config.mjs')
-const { writeState, createConversation, readState } = await import('../lib/store.mjs')
+const { writeState, createConversation, getConversation, readState } = await import('../lib/store.mjs')
 const { runTurn } = await import('../lib/chat.mjs')
 const { returnBrief } = await import('../lib/brief.mjs')
 const { buildToolRegistry } = await import('../lib/tools.mjs')
@@ -35,7 +35,9 @@ try {
     const older = { ...draft, revision: 1, id: 'prep_old', content: 'OLD_DRAFT' }
     const unrelated = { ...draft, commitmentId: 'goal_other', content: 'UNRELATED_DRAFT' }
     await writeState({ commitments: [goal], preparations: [older, draft, unrelated] })
-    assert.doesNotMatch((await read({})).text, /09:00|PRIVATE_FULL_SOURCE/)
+    const summary = await read({})
+    assert.doesNotMatch(summary.text, /09:00|PRIVATE_FULL_SOURCE/)
+    assert.equal(summary.preparation, undefined)
     const conv = await createConversation()
     let toolText
     globalThis.fetch = async (_, options) => {
@@ -49,6 +51,9 @@ try {
     let last
     for await (const event of runTurn({ conversationId: conv.id, userText: 'Show me my train draft' })) last = event
     assert.equal(last.message.runStatus, 'completed')
+    const reference = { commitmentId: goal.id, preparationId: draft.id, title: draft.title }
+    assert.deepEqual(last.message.tools[0].preparation, reference)
+    assert.deepEqual((await getConversation(conv.id)).messages.at(-1).tools[0].preparation, reference)
     for (const value of [draft.content, draft.question, draft.assumptions[0], goal.nextAction, 'Timetable', '第 3 页']) assert.ok(toolText.includes(value))
     assert.doesNotMatch(toolText, /PRIVATE_FULL_SOURCE|OLD_DRAFT|UNRELATED_DRAFT/)
     assert.equal((await readState()).preparations[1].delivery.status, 'pending')
@@ -65,11 +70,15 @@ try {
       [goal, { ...draft, delivery: { status: 'superseded' } }],
     ]) {
       await writeState({ commitments: [savedGoal], preparations: [savedDraft] })
-      assert.doesNotMatch((await read({ id: goal.id })).text, /09:00|Timetable/)
+      const result = await read({ id: goal.id })
+      assert.doesNotMatch(result.text, /09:00|Timetable/)
+      assert.equal(result.preparation, undefined)
     }
     await writeState({ commitments: [goal], preparations: [draft] })
     await saveConfig({ proactive: { research: { enabled: false } } })
-    assert.doesNotMatch((await read({ id: goal.id })).text, /09:00|Timetable/)
+    const revoked = await read({ id: goal.id })
+    assert.doesNotMatch(revoked.text, /09:00|Timetable/)
+    assert.equal(revoked.preparation, undefined)
     await assert.rejects(read({ id: 'goal_missing' }), /目标不存在/)
   })
 

@@ -25,11 +25,12 @@ const mock = http.createServer(async (req, res) => {
       res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Let us prepare the proposal.' } }] })}\n\ndata: [DONE]\n\n`)
       return
     }
+    const previousAnswer = JSON.parse(body.messages[1].content).evidence.find((item) => item.id === 'answer1')
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
       title: 'Proposal preparation',
-      content: '## Reviewable outline\n\n- Explain the audience and intended decision. [goal1]\n- Suggested next step: add the missing project detail.',
-      evidenceIds: ['goal1'], assumptions: ['The audience is still to be confirmed.'], question: 'Who will review the proposal?',
+      content: previousAnswer ? 'The audience is the design lead. [answer1]' : '## Reviewable outline\n\n- Explain the audience and intended decision. [goal1]\n- Suggested next step: add the missing project detail.',
+      evidenceIds: [previousAnswer ? 'answer1' : 'goal1'], assumptions: [], question: previousAnswer ? 'Which format?' : 'Who will review the proposal?',
     }) } }] }))
   } catch (error) {
     res.writeHead(500, { 'content-type': 'application/json' })
@@ -109,6 +110,8 @@ let conversationId
 let userMessageId
 let goal
 let artifact
+let revisedDraft
+const answerText = 'The design lead.'
 const request = (extra = {}) => ({
   title: 'Finish the proposal',
   successCriteria: 'A reviewable proposal with an audience, decision and next action',
@@ -174,6 +177,41 @@ try {
     assert.equal(disk.preparations.find((p) => p.id === artifact.id).content, artifact.content)
   })
 
+  await test('answering the current question once revises the goal and automatically prepares from the saved reply', async () => {
+    const route = `commitments/${goal.id}/answer`
+    const body = { preparationId: artifact.id, expectedRevision: goal.revision, answer: answerText }
+    for (const patch of [{ answer: ' ' }, { answer: 'x'.repeat(1601) }, { expectedRevision: null }, { preparationId: '../bad' }]) {
+      assert.equal((await api(route, { method: 'POST', body: { ...body, ...patch } })).status, 400)
+    }
+    for (const patch of [{ expectedRevision: goal.revision + 1 }, { preparationId: 'prep_missing' }]) {
+      assert.equal((await api(route, { method: 'POST', body: { ...body, ...patch } })).status, 409)
+    }
+    const submit = () => api(route, { method: 'POST', body })
+    const results = await Promise.all([submit(), submit()])
+    assert.deepEqual(results.map((r) => r.status), [200, 200])
+    assert.deepEqual(results.map((r) => r.body.duplicate).sort(), [false, true])
+    assert.deepEqual(results[0].body.answer, results[1].body.answer)
+    assert.equal(results[0].body.answer.text, answerText)
+    assert.equal(results[0].body.commitment.revision, goal.revision + 1)
+    const updated = await waitUntil(async () => {
+      const state = (await api('commitments')).body
+      return state.commitments[0].preparation.state === 'ready' && state
+    }, 'resumed preparation')
+    const original = updated.preparations.find((p) => p.id === artifact.id)
+    assert.equal(original.delivery.status, 'superseded')
+    assert.equal(original.answer.text, answerText)
+    assert.deepEqual(updated.commitments[0].source, goal.source)
+    revisedDraft = updated.preparations.find((p) => p.id === updated.commitments[0].preparation.artifactId)
+    assert.equal(revisedDraft.revision, goal.revision + 1)
+    assert.equal(revisedDraft.trigger, 'answered')
+    assert.equal(revisedDraft.evidence[0].source, `preparation:${artifact.id}`)
+    assert.ok(revisedDraft.evidence[0].excerpt.includes(artifact.question) && revisedDraft.evidence[0].excerpt.includes(answerText))
+    assert.equal((await submit()).body.duplicate, true)
+    assert.equal((await api(route, { method: 'POST', body: { ...body, answer: 'Different answer' } })).status, 409)
+    assert.equal(modelRequests.filter((r) => !r.stream).length, 2)
+    assert.equal((await api('conversations/main')).body.messages.length, 0)
+  })
+
   await test('outcome feedback requires matching identity and corrections replace the current vote', async () => {
     const mismatched = await api('feedback', { method: 'POST', body: { preparationId: artifact.id, commitmentId: 'goal_wrong', signal: 'accepted' } })
     assert.equal(mismatched.body.ignored, 'mismatched_commitment')
@@ -201,6 +239,9 @@ try {
     const paused = await api(`commitments/${goal.id}`, { method: 'PATCH', body: { status: 'paused' } })
     assert.equal(paused.status, 200)
     assert.equal(paused.body.commitment.status, 'paused')
+    assert.equal((await api(`commitments/${goal.id}/answer`, { method: 'POST', body: {
+      preparationId: revisedDraft.id, expectedRevision: revisedDraft.revision, answer: 'slides',
+    } })).status, 409, 'a question in a paused or changed goal cannot resume work')
     assert.equal((await api(`commitments/${goal.id}/prepare`, { method: 'POST', body: {} })).status, 409)
     assert.equal((await api(`commitments/${goal.id}`, { method: 'PATCH', body: { status: 'done' } })).status, 400)
     const completed = await api(`commitments/${goal.id}`, { method: 'PATCH', body: {
@@ -208,7 +249,7 @@ try {
     } })
     assert.equal(completed.status, 200)
     assert.equal(completed.body.commitment.completionEvidence, 'The proposal was reviewed and approved.')
-    assert.equal(modelRequests.filter((r) => !r.stream).length, 1)
+    assert.equal(modelRequests.filter((r) => !r.stream).length, 2)
   })
 
   await test('backup includes entrusted goals, artifacts and budget accounting without credentials', async () => {
@@ -216,7 +257,8 @@ try {
     assert.equal(backup.status, 200)
     assert.equal(backup.body.commitments.find((c) => c.id === goal.id).status, 'done')
     assert.equal(backup.body.preparations.find((p) => p.id === artifact.id).content, artifact.content)
-    assert.equal(backup.body.commitmentWork.runs.length, 1)
+    assert.equal(backup.body.preparations.find((p) => p.id === artifact.id).answer.text, answerText)
+    assert.equal(backup.body.commitmentWork.runs.length, 2)
     assert.equal(backup.body.agencyOutcomes[`preparation:${artifact.id}`].utility, 'accepted')
     assert.equal(JSON.stringify(backup.body).includes('local-api-test-key'), false)
   })

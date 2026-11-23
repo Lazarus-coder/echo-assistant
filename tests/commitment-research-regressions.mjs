@@ -40,7 +40,7 @@ const mock = http.createServer(async (req, res) => {
     if (streamTools === 'both') calls.push({ index: 1, id: 'call_file', type: 'function', function: { name: 'file_read', arguments: JSON.stringify({ path: 'allowed/notes.txt' }) } })
     res.write(`data: ${JSON.stringify({ choices: [{ delta: { tool_calls: calls } }] })}\n\n`)
   } else {
-    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(output()) } }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(output(body)) } }] })}\n\n`)
   }
   res.end('data: [DONE]\n\n')
 })
@@ -328,6 +328,51 @@ try {
     await engine.updateCommitment(goal.id, { situation: identity })
     assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
     assert.equal(requests, 2)
+  })
+
+  await test('research resumes from attributed answers over multiple rounds, within permissions and the original budget', async () => {
+    await reset()
+    const source = await sourceMessage('Please follow up on registration.')
+    const goal = await engine.createCommitment(goalInput({ source, scope: { research: true }, watch: { type: 'combined' } }))
+    output = () => ({ ...modelOutput(), question: 'Which program?' })
+    await engine.prepareDueCommitments()
+    const respond = async (answer) => {
+      const { commitments: [current], preparations } = await engine.listCommitments()
+      const draft = preparations.find((item) => item.id === current.preparation.artifactId)
+      return engine.answerPreparation(goal.id, { preparationId: draft.id, expectedRevision: current.revision, answer })
+    }
+    await config.saveConfig({ proactive: { research: { enabled: false } } })
+    await respond('MSc Computing')
+    assert.deepEqual((await engine.prepareDueCommitments()).prepared, [])
+    assert.equal(requests, 1, 'answering does not grant research permission')
+    await config.saveConfig({ proactive: { research: { enabled: true } } })
+    let supplied
+    output = (body) => {
+      supplied = JSON.parse(body.messages.find((m) => m.role === 'user').content).evidence
+      return { ...modelOutput(), content: 'Unverified research conclusion [answer1]', evidenceIds: ['answer1'], question: 'Which cycle?' }
+    }
+    assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
+    assert.equal(supplied.find((e) => e.id === 'answer1').excerpt, '问题：Which program?\n用户答复：MSc Computing')
+    assert.equal(supplied.find((e) => e.id === 'message1').excerpt, 'Please follow up on registration.')
+    const [second] = await engine.pendingPreparations()
+    assert.equal(second.resultKind, 'clarification', 'a user answer alone cannot substantiate a research finding')
+    assert.doesNotMatch(second.content, /Unverified research conclusion/)
+    await respond('2027')
+    assert.equal((await engine.prepareDueCommitments()).budgetDeferred, 1)
+    assert.equal(requests, 2, 'answering never resets the daily research budget')
+    await store.mutateState((state) => { state.commitmentWork.runs[0].at = '2000-01-01T00:00:00Z' })
+    streamTools = true
+    output = (body) => {
+      supplied = JSON.parse(body.messages.find((m) => m.role === 'user').content).evidence
+      return { ...modelOutput(), content: 'Review this program [answer1], cycle [answer2], and published page [web1].', evidenceIds: ['answer1', 'answer2', 'web1'] }
+    }
+    assert.equal((await engine.prepareDueCommitments()).prepared.length, 1)
+    const [third] = await engine.pendingPreparations()
+    assert.match(third.content, /published page \[web1\]/)
+    assert.equal(third.evidence.find((e) => e.id === 'web1').source, pageUrl)
+    assert.equal(third.evidence.find((e) => e.id === 'answer2').source, `preparation:${second.id}`)
+    assert.ok(supplied.some((e) => e.id === 'answer1') && supplied.some((e) => e.id === 'answer2'))
+    assert.equal((await engine.listCommitments()).commitments[0].source.messageId, source.messageId)
   })
 
   await test('requested work is prepared before older routine refreshes when the daily budget is limited', async () => {

@@ -70,7 +70,7 @@ final class OverlayController: NSObject, WKUIDelegate {
         w.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
     }
 
-    func present(_ bubbles: [Bubble], onOpen: @escaping (Bubble) -> Void, onDismiss: @escaping (Bubble) -> Void, onExpire: @escaping (Bubble) -> Void) {
+    func present(_ bubbles: [Bubble], onOpen: @escaping (Bubble) -> Void, onDismiss: @escaping (Bubble, String) -> Void, onExpire: @escaping (Bubble) -> Void) {
         guard !bubbles.isEmpty else { return }
         ensureWindow()
         guard let stack = stack, let w = window else { return }
@@ -80,9 +80,9 @@ final class OverlayController: NSObject, WKUIDelegate {
                 self?.remove(b.id)
                 onOpen(b)
             }
-            card.onDismiss = { [weak self] in
+            card.onDismiss = { [weak self] reason in
                 self?.remove(b.id)
-                onDismiss(b)
+                onDismiss(b, reason)
             }
             card.onSelfDismiss = { [weak self] in
                 onExpire(b)
@@ -187,9 +187,9 @@ final class OverlayController: NSObject, WKUIDelegate {
 }
 
 /// 单张气泡：图标 + 一句话 + 悬停显示的按钮；12 秒自动淡出（鼠标停在上面就不走）
-final class BubbleCard: NSView {
+final class BubbleCard: NSView, NSGestureRecognizerDelegate {
     var onOpen: (() -> Void)?
-    var onDismiss: (() -> Void)?
+    var onDismiss: ((String) -> Void)?
     var onSelfDismiss: (() -> Void)?
     private var tracking: NSTrackingArea?
     private var timer: Timer?
@@ -221,12 +221,17 @@ final class BubbleCard: NSView {
         dismiss.isBordered = false
         dismiss.font = NSFont.systemFont(ofSize: 11)
         dismiss.contentTintColor = .tertiaryLabelColor
+        dismiss.setAccessibilityLabel("收起气泡")
+        let wrongTime = NSButton(title: "时机不合适", target: self, action: #selector(wrongTimeTapped))
+        wrongTime.isBordered = false
+        wrongTime.font = NSFont.systemFont(ofSize: 11)
+        wrongTime.toolTip = "暂缓打扰 30 分钟，并记住这次气泡出现的时段"
 
         let top = NSStackView(views: [icon, text])
         top.orientation = .horizontal
         top.alignment = .top
         top.spacing = 6
-        let bottom = NSStackView(views: [hint, NSView(), dismiss])
+        let bottom = NSStackView(views: [hint, NSView(), wrongTime, dismiss])
         bottom.orientation = .horizontal
         bottom.spacing = 6
         let outer = NSStackView(views: [top, bottom])
@@ -244,12 +249,23 @@ final class BubbleCard: NSView {
         ])
 
         let click = NSClickGestureRecognizer(target: self, action: #selector(openTapped))
+        click.delegate = self
         addGestureRecognizer(click)
 
         scheduleAutoDismiss()
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer, shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        guard let parent = superview else { return false }
+        var target = hitTest(parent.convert(event.locationInWindow, from: nil))
+        while let view = target, view !== self {
+            if view is NSButton { return false }
+            target = view.superview
+        }
+        return true
+    }
 
     deinit { timer?.invalidate() }
 
@@ -300,6 +316,10 @@ final class BubbleCard: NSView {
     }
     @objc private func dismissTapped() {
         guard finish() else { return }
-        onDismiss?()
+        onDismiss?("menu_bubble")
+    }
+    @objc private func wrongTimeTapped() {
+        guard finish() else { return }
+        onDismiss?("wrong_time")
     }
 }

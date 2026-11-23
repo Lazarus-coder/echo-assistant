@@ -154,6 +154,23 @@ try {
   const loop = { id: 'loop_test', topic: 'Project proposal', why: 'User mentioned a project deadline', status: 'open', confidence: 0.8 }
   const goodDecision = { act: true, confidence: 0.99, kind: 'follow_up', anchor_id: loop.id, evidence_ids: [loop.id], message: 'The proposal deadline is approaching; the checklist can help.', reason: 'User project evidence' }
   await reset({ dream: { loops: [loop] } })
+  answer = async () => ({ act: false, confidence: 0.8, reason: 'No actionable change yet.' })
+  const beforeQuiet = calls
+  assert.equal((await proactiveTick()).skipped, 'below_threshold')
+  assert.equal((await proactiveTick()).skipped, 'unchanged_context')
+  assert.equal(calls, beforeQuiet + 1, 'unchanged polling after an explicit no-op makes no model request')
+  await mutateState((s) => { s.dream.loops[0].due = '2026-12-01' })
+  assert.equal((await proactiveTick()).skipped, 'below_threshold')
+  assert.equal(calls, beforeQuiet + 2, 'a changed deadline is new evidence')
+  await reset({ dream: { loops: [loop] } })
+  answer = async (body) => {
+    const suggested = /建议类型 (\w+)/.exec(body.messages.at(-1).content)[1]
+    const kind = suggested === 'ask' ? 'guide' : 'ask'
+    await mutateState((s) => { s.agency = { learningVersion: 2, kinds: { [kind]: { a: 1.6, b: 10.6 } } } })
+    return { ...goodDecision, kind, confidence: 0.70 }
+  }
+  assert.equal((await proactiveTick()).skipped, 'below_threshold', 'the proposed content must clear the threshold for its actual kind')
+  await reset({ dream: { loops: [loop] } })
   await screen('normal')
   answer = async () => { await screen('deep'); return goodDecision }
   const deferred = await proactiveTick()

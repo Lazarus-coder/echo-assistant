@@ -86,12 +86,21 @@ struct CompanionUITest {
 
         let dismissed = BubbleCard(bubble: bubble)
         var dismissals = 0
-        dismissed.onDismiss = { dismissals += 1 }
+        dismissed.onDismiss = { reason in precondition(reason == "menu_bubble"); dismissals += 1 }
         dismissed.onSelfDismiss = { expires += 1 }
         dismissed.perform(NSSelectorFromString("dismissTapped"))
         dismissed.perform(NSSelectorFromString("dismissTapped"))
         dismissed.expire()
         precondition(dismissals == 1 && expires == 0, "Dismissing a card must resolve it once and prevent expiry")
+
+        let mistimed = BubbleCard(bubble: bubble)
+        var reasons = [String]()
+        mistimed.onDismiss = { reasons.append($0) }
+        mistimed.onSelfDismiss = { expires += 1 }
+        mistimed.perform(NSSelectorFromString("wrongTimeTapped"))
+        mistimed.perform(NSSelectorFromString("dismissTapped"))
+        mistimed.expire()
+        precondition(reasons == ["wrong_time"] && expires == 0)
 
         let hovered = BubbleCard(bubble: bubble)
         hovered.onSelfDismiss = { expires += 1 }

@@ -56,7 +56,7 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try { const error = await res.json(); msg = error.message ?? (typeof error.error === 'string' ? error.error : msg) } catch {}
-    throw new Error(msg)
+    throw Object.assign(new Error(msg), { status: res.status })
   }
   return raw ? res : res.json()
 }
@@ -304,6 +304,20 @@ async function refreshList() {
 
 /* --------------------------------- thread ---------------------------------- */
 
+const MESSAGE_FEEDBACK_LABELS = {
+  good: ['有用', '这条提醒的内容有用'],
+  bad: ['没用', '这条提醒的内容没用'],
+  wrong_time: ['时机不合适', '这条提醒的时机不合适，暂停打扰 30 分钟'],
+}
+
+function messageFeedbackHtml(m) {
+  if (!m.id || (!m.proactive && !m.companion)) return ''
+  return Object.entries(MESSAGE_FEEDBACK_LABELS).map(([signal, [label, description]]) => {
+    const selected = m.feedback === signal || signal === 'wrong_time' && m.feedbackTiming === signal
+    return `<button type="button" data-action="fb" data-signal="${signal}" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" aria-label="${description}" title="${description}" aria-pressed="${selected}">${label}</button>`
+  }).join('')
+}
+
 function messageNode(m) {
   const wrap = document.createElement('div')
   wrap.className = `msg ${m.role === 'user' ? 'user' : 'assistant'}${m.proactive ? ' proactive' : ''}`
@@ -324,8 +338,7 @@ function messageNode(m) {
         <span class="msg-actions">
           <button data-action="copy-msg">复制</button>
           ${m.proactive ? '' : '<button data-action="regen">重新生成</button>'}
-          ${m.proactive || m.companion ? `<button data-action="fb" data-signal="good" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="明确反馈这条内容有帮助">有用</button>
-          <button data-action="fb" data-signal="bad" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" title="明确反馈这条内容没有帮助">没用</button>` : ''}
+          ${messageFeedbackHtml(m)}
         </span>
       </div>
       ${m.reasoning ? `<details class="fold reasoning"><summary>思考过程 · ${m.reasoning.length} 字</summary><div class="fold-body">${esc(m.reasoning)}</div></details>` : ''}
@@ -540,7 +553,35 @@ function renderTail(node, m) {
   }
   if (m.finishReason === 'length') parts.push('被长度截断，可说"继续"')
   if (m.aborted) parts.push('已停止')
-  tail.innerHTML = `${parts.length ? `<div class="usage">${esc(parts.join(' · '))}</div>` : ''}${sourceHtml(m.sources)}`
+  const drafts = new Map()
+  for (const step of m.tools ?? []) {
+    const draft = step.preparation
+    if (step.name === 'follow_up_list' && step.ok === true && draft?.preparationId && draft.commitmentId) drafts.set(draft.preparationId, draft)
+  }
+  const draftLinks = [...drafts.values()].map((draft) => `<button type="button" class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(draft.preparationId)}" data-commitment-id="${esc(draft.commitmentId)}">打开草稿《${esc(draft.title || '准备结果')}》</button>`).join(' ')
+  const hasRecall = m.id && Array.isArray(m.recalled) && m.recalled.length > 0
+  tail.innerHTML = `${draftLinks}${parts.length ? `<div class="usage">${esc(parts.join(' · '))}</div>` : ''}${sourceHtml(m.sources)}${hasRecall ? `<details class="fold recalled-facts"><summary>为这条回复检索的记忆 · ${m.recalled.length} 条</summary><div class="fold-body"></div></details>` : ''}`
+  if (hasRecall) {
+    const detail = $('.recalled-facts', tail)
+    const conversationId = S.current
+    detail.addEventListener('toggle', () => showRecalledFacts(detail, conversationId, m.id))
+  }
+}
+
+async function showRecalledFacts(detail, conversationId, messageId) {
+  const panel = $('.fold-body', detail)
+  if (!detail.open) { panel.replaceChildren(); return }
+  // Each opening gets its own status node so a late response cannot repopulate a closed or reopened panel.
+  const status = document.createElement('div')
+  status.setAttribute('role', 'status')
+  status.textContent = '正在核对当前记忆…'
+  panel.replaceChildren(status)
+  try {
+    const { facts, unavailableCount } = await api(`conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/recalled-facts`)
+    status.innerHTML = `${facts.length ? `<ul>${facts.map((fact) => `<li>${esc(fact.text)}</li>`).join('')}</ul>` : ''}${unavailableCount ? `<p class="muted small">${esc(unavailableCount)} 条记忆已变更或当前不可用。</p>` : ''}<button type="button" class="btn small ghost" data-action="open-panel" data-panel="memory">管理记忆</button>`
+  } catch (error) {
+    status.textContent = `读取失败：${error.message}。收起后重新展开可重试。`
+  }
 }
 
 function sourceHtml(sources) {
@@ -1287,9 +1328,6 @@ async function startStream({ userText, regenerate = false, editId }) {
         node.dataset.id = d.messageId
         if (d.runId) st.runId = d.runId
         if (userNode && d.userMessageId) userNode.dataset.id = d.userMessageId
-        if (d.memory?.length) {
-          $('.meta', node).insertAdjacentHTML('beforeend', `<span title="注入了 ${d.memory.length} 条记忆">记忆×${d.memory.length}</span>`)
-        }
         break
       case 'reasoning':
         st.phase = '正在思考下一步'
@@ -2034,6 +2072,7 @@ function obsHtml(o) {
 }
 
 const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, loading: false, version: 0, proactiveEnabled: null, research: null, researchRevision: 0 }
+const answerDrafts = new Map()
 const GOAL_STATUS = { active: '进行中', paused: '已暂停', done: '已完成', cancelled: '已取消' }
 const PREPARATION_STATUS = { idle: '尚未准备', queued: '等待准备', running: '正在准备', ready: '已有准备结果', failed: '准备失败' }
 const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
@@ -2149,7 +2188,31 @@ function preparationExpired(preparation) {
   return preparation.delivery?.status === 'expired' || preparation.delivery?.status === 'pending' && Date.parse(preparation.delivery.expiresAt) <= Date.now()
 }
 
-function preparationHtml(preparation) {
+function canAnswerPreparation(goal, preparation) {
+  return goal?.status === 'active' && goal.preparation?.state === 'ready' && goal.preparation.artifactId === preparation.id &&
+    !(goal.discovery && !goal.discovery.adopted && Date.parse(goal.discovery.expiresAt) <= Date.now()) &&
+    Number.isInteger(goal.revision) && goal.revision === preparation.revision && Boolean(preparation.question?.trim()) && !preparation.answer
+}
+
+function preparationQuestionHtml(preparation, goal) {
+  if (!preparation.question) return ''
+  const draft = answerDrafts.get(preparation.id)
+  const actionable = canAnswerPreparation(goal, preparation) && !draft?.stale
+  const id = esc(preparation.id)
+  const answered = preparation.answer
+  const question = `<p class="preparation-question" id="question-${id}"><b>${actionable ? '待你确认' : '当时的问题'}：</b>${esc(preparation.question)}</p>`
+  const saved = answered ? `<p class="preparation-question"><b>你的回答：</b>${esc(answered.text)} · <small>${esc(agencyTime(answered.answeredAt))}</small></p>` : ''
+  if (!actionable && !draft?.text) return question + saved
+  const latest = goal?.preparation?.artifactId
+  return `${question}${saved}<form data-answer-preparation="${id}" data-goal="${esc(goal.id)}" data-revision="${esc(preparation.revision)}">
+    <div class="field"><label for="answer-${id}">${actionable ? '你的回答' : '未提交的草稿'}</label>
+      <textarea id="answer-${id}" name="answer" rows="2" maxlength="1600" required aria-describedby="question-${id}" ${!actionable || draft?.saving ? 'readonly' : ''}>${esc(draft?.text ?? '')}</textarea></div>
+    ${actionable ? `<button class="btn small primary" type="submit" aria-disabled="${Boolean(draft?.saving)}">回答并继续准备</button>`
+      : `<button class="btn small" type="button" data-action="view-preparation" data-preparation-id="${esc(latest !== preparation.id ? latest ?? '' : '')}" data-commitment-id="${esc(goal.id)}">${latest && latest !== preparation.id ? '查看最新结果' : '查看当前目标'}</button>`}
+    <p class="form-status small" role="status">${esc(draft?.message || (!actionable ? '这个问题已更新。草稿保留在这里，供你核对。' : ''))}</p></form>`
+}
+
+function preparationHtml(preparation, goal) {
   const rawOutcome = typeof preparation.outcome === 'string' ? preparation.outcome : preparation.outcome?.signal
   const outcome = OUTCOME_LABEL[rawOutcome] ? rawOutcome : null
   const wrongTime = preparation.outcome?.timing === 'wrong_time'
@@ -2175,7 +2238,7 @@ function preparationHtml(preparation) {
       ${deadlineAssessmentHtml(preparation.deadlineAssessment, preparation.evidence)}
       ${preparation.error ? `<p class="small needs-check">这次研究未完成：${esc(preparation.error)}${preparation.failedAt ? ` · ${esc(agencyTime(preparation.failedAt))}` : ''}${preparation.retryAt && !goalStopped && !preparation.researchStopped ? ` · 计划重试 ${esc(agencyTime(preparation.retryAt))}` : ''}</p>` : ''}
       ${preparation.assumptions?.length ? `<div class="preparation-assumptions"><b>仍需确认的假设</b><ul>${preparation.assumptions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
-      ${preparation.question ? `<p class="preparation-question"><b>待你确认：</b>${esc(preparation.question)}</p>` : ''}
+      ${preparationQuestionHtml(preparation, goal)}
       <p class="verification ${verified ? '' : 'needs-check'}">${verified ? '生成时的来源引用已检查；这不等于事实已经证实。' : '来源引用尚未通过检查，请先核对。'}${checkText ? `<br><span class="small">${esc(checkText)}</span>` : ''}</p>
       <details class="evidence" data-detail-key="evidence-${esc(preparation.id)}"><summary>查看依据 · ${(preparation.evidence ?? []).length} 条</summary>
         <ol>${(preparation.evidence ?? []).map((item) => evidenceHtml({ ...item, discovered: preparation.goalOrigin === 'discovered' })).join('') || '<li>没有可展示的来源。</li>'}</ol>
@@ -2195,9 +2258,12 @@ function commitmentHtml(goal, preparations) {
   const discoverySource = goal.discovery?.source ?? goal.source
   const unadopted = discovered && !goal.discovery?.adopted
   const situation = Object.entries({ institution: '机构', program: '项目', cycle: '届次', category: '类别', stage: '阶段' }).filter(([key]) => goal.situation?.[key])
+  const answered = goal.preparation?.reason === 'answered'
   const progress = goal.status === 'done' ? '目标已完成，不再准备'
     : goal.status === 'cancelled' ? '目标已取消，不再准备'
-    : goal.status === 'paused' ? '已暂停准备和提醒' : PREPARATION_STATUS[goal.preparation?.state] || '尚未准备'
+    : goal.status === 'paused' ? '已暂停准备和提醒'
+    : answered && goal.preparation.state === 'queued' ? researchStopped ? '回答已保存；开启后台研究后可继续准备' : '回答已保存，下一版已加入准备队列'
+    : answered && goal.preparation.state === 'running' ? '正在根据你的回答准备下一版' : PREPARATION_STATUS[goal.preparation?.state] || '尚未准备'
   return `<div class="goal-heading"><h4>${esc(goal.title)}</h4><span class="goal-status">${esc(GOAL_STATUS[goal.status] || goal.status)}</span></div>
     ${discovered ? `<div class="goal-discovery"><p class="small">${unadopted ? '从对话发现 · 事项待你核实' : '从对话发现 · 你已选择继续跟进'}${unadopted && goal.discovery?.expiresAt && !stopped ? ` · 临时跟进至 ${esc(agencyTime(goal.discovery.expiresAt))}` : ''}</p>
       ${goal.discovery?.quote ? `<blockquote class="goal-source">${esc(goal.discovery.quote)}</blockquote>` : ''}
@@ -2220,7 +2286,7 @@ function commitmentHtml(goal, preparations) {
       <button class="btn small ghost" data-action="goal-complete" data-id="${esc(goal.id)}">完成目标</button>
       <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">${discovered ? '停止这项研究' : '取消目标'}</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">重新开启</button>`}
     </div>
-    ${preparations.length ? `<div class="goal-results">${preparations.map((item, index) => preparationHtml({ ...item, latest: index === 0, goalOrigin: goal.origin, goalStatus: goal.status, researchStopped, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision })).join('')}</div>` : ''}`
+    ${preparations.length ? `<div class="goal-results">${preparations.map((item, index) => preparationHtml({ ...item, latest: index === 0, goalOrigin: goal.origin, goalStatus: goal.status, researchStopped, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision }, goal)).join('')}</div>` : ''}`
 }
 
 function syncCommitmentCards({ force = false } = {}) {
@@ -2232,10 +2298,14 @@ function syncCommitmentCards({ force = false } = {}) {
   for (const goal of COMMITMENTS.items) {
     const preparations = COMMITMENTS.preparations.filter((item) => item.commitmentId === goal.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
     let card = $$('[data-goal-id]', list).find((node) => node.dataset.goalId === goal.id)
-    const signature = JSON.stringify([goal, preparations, COMMITMENTS.proactiveEnabled, COMMITMENTS.research?.enabled, preparations.map(preparationExpired)])
+    const signature = JSON.stringify([goal, preparations, COMMITMENTS.proactiveEnabled, COMMITMENTS.research?.enabled, preparations.map((item) => [preparationExpired(item), canAnswerPreparation(goal, item)])])
     if (card?.dataset.signature === signature) continue
     const focused = card?.contains(document.activeElement) ? document.activeElement : null
-    if (focused && !force) continue
+    const summaryKey = focused?.tagName === 'SUMMARY' ? focused.parentElement?.dataset.detailKey : null
+    const answerForm = focused?.closest?.('form[data-answer-preparation]')
+    const preparationId = answerForm?.dataset.answerPreparation
+    const focusedPreparation = preparationId && preparations.find((item) => item.id === preparationId)
+    if (focused && focused !== card && !summaryKey && !force && (!answerForm || focusedPreparation && canAnswerPreparation(goal, focusedPreparation))) continue
     const previousDetails = new Set(card ? $$('details[data-detail-key]', card).map((node) => node.dataset.detailKey) : [])
     const opened = new Set(card ? $$('details[open][data-detail-key]', card).map((node) => node.dataset.detailKey) : [])
     const focusAction = focused?.dataset.action
@@ -2251,7 +2321,16 @@ function syncCommitmentCards({ force = false } = {}) {
     card.innerHTML = commitmentHtml(goal, preparations)
     card.dataset.signature = signature
     for (const detail of $$('details[data-detail-key]', card)) if (previousDetails.has(detail.dataset.detailKey)) detail.open = opened.has(detail.dataset.detailKey)
-    if (focused) ($$('[data-action]', card).find((node) => node.dataset.action === focusAction && node.dataset.signal === focusSignal && node.dataset.preparationId === focusPreparation && !node.disabled) ?? card).focus()
+    if (answerForm) {
+      const next = $$('form[data-answer-preparation]', card).find((form) => form.dataset.answerPreparation === preparationId)
+      const detail = $$('details[data-preparation-id]', card).find((node) => node.dataset.preparationId === preparationId)
+      const control = next && $(focused.tagName === 'TEXTAREA' ? 'textarea' : 'button', next)
+      ;(control || detail && $('summary', detail) || card).focus({ preventScroll: true })
+      if (control?.tagName === 'TEXTAREA') control.setSelectionRange(focused.selectionStart, focused.selectionEnd)
+    } else if (summaryKey) {
+      const detail = $$('details[data-detail-key]', card).find((node) => node.dataset.detailKey === summaryKey)
+      ;(detail && $('summary', detail) || card).focus({ preventScroll: true })
+    } else if (focused) ($$('[data-action]', card).find((node) => node.dataset.action === focusAction && node.dataset.signal === focusSignal && node.dataset.preparationId === focusPreparation && !node.disabled) ?? card).focus()
   }
 }
 
@@ -2473,7 +2552,58 @@ async function saveCommitmentForm(form) {
   }
 }
 
+document.addEventListener('input', (event) => {
+  const id = event.target.form?.dataset.answerPreparation
+  if (!id || event.target.name !== 'answer' || event.target.readOnly) return
+  if (event.target.value) answerDrafts.set(id, { text: event.target.value })
+  else answerDrafts.delete(id)
+})
+
+async function submitPreparationAnswer(form) {
+  const { answerPreparation: preparationId, goal: goalId, revision } = form.dataset
+  const existing = answerDrafts.get(preparationId)
+  if (existing?.saving || existing?.stale || !form.reportValidity()) return
+  const input = $('textarea', form), submit = $('button[type="submit"]', form), status = $('[role="status"]', form)
+  if (!submit) return
+  const answer = input.value.trim()
+  if (!answer || answer.length > 1600) { status.textContent = '请输入 1 到 1600 字的回答。'; input.focus(); return }
+  const draft = { text: input.value, saving: true, message: '正在保存回答…' }
+  answerDrafts.set(preparationId, draft)
+  input.readOnly = true
+  submit.setAttribute('aria-disabled', 'true')
+  status.textContent = draft.message
+  try {
+    const result = await api(`commitments/${encodeURIComponent(goalId)}/answer`, {
+      method: 'POST', body: { preparationId, expectedRevision: Number(revision), answer },
+    })
+    if (answerDrafts.get(preparationId) !== draft) return
+    const index = COMMITMENTS.items.findIndex((goal) => goal.id === goalId)
+    if (index >= 0 && result.commitment.revision >= COMMITMENTS.items[index].revision) COMMITMENTS.items[index] = result.commitment
+    const preparation = COMMITMENTS.preparations.find((item) => item.id === preparationId)
+    if (preparation) preparation.answer = result.answer
+    answerDrafts.delete(preparationId)
+    COMMITMENTS.version++
+    toast('回答已保存')
+  } catch (err) {
+    if (answerDrafts.get(preparationId) !== draft) return
+    draft.saving = false
+    draft.stale = err.status === 409
+    draft.message = draft.stale ? `${err.message}。请查看当前目标和最新结果。` : `回答未确认保存：${err.message}。你可以重试。`
+    const card = form.closest('[data-goal-id]')
+    if (card) delete card.dataset.signature
+    syncCommitmentCards({ force: true })
+    if (!draft.stale) return
+  }
+  syncCommitmentCards({ force: true })
+  await renderProactivePanel({ force: true, poll: true })
+}
+
 document.addEventListener('submit', (event) => {
+  if (event.target.dataset.answerPreparation) {
+    event.preventDefault()
+    submitPreparationAnswer(event.target).catch((err) => toast(err.message, true))
+    return
+  }
   if (event.target.id === 'researchSettingsForm') {
     event.preventDefault()
     saveResearchSettings(event.target).catch((err) => toast(err.message, true))
@@ -2484,8 +2614,41 @@ document.addEventListener('submit', (event) => {
   saveCommitmentForm(event.target).catch((err) => toast(err.message, true))
 })
 
+const ATTENTION_STYLE_LABELS = { quiet: '安静', balanced: '均衡', engaged: '积极' }
+const ATTENTION_STYLE_HINTS = {
+  quiet: '一般建议至少间隔 2 小时',
+  balanced: '临近常聊时段时稍等',
+  engaged: '按现有间隔提醒',
+}
+const PROACTIVE_REASON_LABELS = {
+  sparse_history: '聊天记录还不足以判断常聊时段。',
+  usual_chat_window: '现在是你常跟 Echo 聊天的时段。',
+  outside_usual_window: '当前在常聊时段之外。',
+  waiting_for_usual_window: '常聊的时段快到了，提醒暂缓。',
+  repeated_wrong_time: '你在这个时段多次反馈过时机不合适，提醒暂缓。',
+  quiet_style_gap: '安静风格会在一般建议与上次打扰之间留出至少两小时。',
+  requested_goal: '这是你要求跟进的事项，可以在常聊时段之外提醒。',
+  quiet_hours: '现在是你设置的静默时段。', wrong_time_pause: '你反馈过时机不合适，提醒正在暂停。',
+  recent_chat_activity: '你刚发过消息，稍后再提醒。', user_active: '对话正在进行中。',
+  focus_deep: '屏幕状态显示你正在专注。', focus_meeting: '屏幕状态显示你正在开会。',
+  shared_daily_budget: '今天各渠道合计的提醒次数已用完。', daily_budget: '今天的主动消息次数已用完。',
+  shared_min_gap: '距上一次提醒的时间还太短。', min_gap: '距上一次主动消息的时间还太短。',
+  delivery_in_progress: '已有一条提醒正在送达。', disabled: '主动提醒已关闭。',
+  no_material: '目前没有可跟进的内容。', duplicate: '已提醒过相同内容。', unchanged_evidence: '同一事项还没有新依据。',
+  unchanged_context: '提醒依据和上次评估时相同，这次无需再次询问模型。',
+  expired: '这条提醒已经过期。', stale_preparation: '准备结果已经更新或失效。', stale_evidence: '提醒依据已经变化或失效。',
+  already_delivered: '这条提醒已送达。', tick_running: '另一次检查正在进行。',
+  below_threshold: '这次内容评估没有达到提醒条件。', empty_message: '这次没有生成可发送的提醒。',
+  unsupported_evidence: '这次提醒缺少可用依据。', bad_json: '未能读取这次内容评估。', error: '这次检查未完成。',
+}
+
 function renderProactiveOverview(p, dream, agency) {
   const el = $('#proactiveOverview')
+  const timing = p.nextGate?.timing ?? p.attention?.timing
+  const style = timing?.style ?? S.boot?.config?.attention?.style ?? 'balanced'
+  const gate = p.nextGate
+  const gateSummary = gate?.allow ? '当前条件允许主动提醒。' : PROACTIVE_REASON_LABELS[gate?.reason] ?? '暂未取得判断结果。'
+  const usualHours = (timing?.usualStartHours ?? []).map((hour) => `${String(hour).padStart(2, '0')}:00–${String(hour + 3).padStart(2, '0')}:00`).join('、')
   const nudgeHtml = (dream.nudges ?? [])
     .map((n) => `<div class="mem-item"><div class="txt">${esc(n.topic)}<div class="muted small">${esc(n.angle ?? '')} · 急迫度 ${n.urgency}</div></div></div>`)
     .join('')
@@ -2508,16 +2671,28 @@ function renderProactiveOverview(p, dream, agency) {
     <label class="switch"><span>启用主动提醒</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
     <div class="row">
       <button class="btn small" data-action="pro-run">现在检查一次</button>
-      <span class="muted small">上次检查：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
+      <span class="muted small">上次内容评估：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
     </div>
     <div class="sect">
-      <h4>最近一次判断</h4>
-      <div class="kv">
-        <dt>是否开口</dt><dd>${p.lastDecision ? (p.lastDecision.act ? '是' : '否') : '—'}</dd>
-        <dt>置信度</dt><dd>${p.lastDecision?.confidence != null ? p.lastDecision.confidence.toFixed(2) : '—'}</dd>
-        <dt>理由</dt><dd style="text-align:left">${esc(p.lastDecision?.reason ?? '—')}</dd>
+      <h4>当前提醒时机（本机判断）</h4>
+      <dl class="kv">
+        <dt>提醒风格</dt><dd>${esc(ATTENTION_STYLE_LABELS[style] ?? ATTENTION_STYLE_LABELS.balanced)}</dd>
+        ${timing?.trigger ? `<dt>提醒类型</dt><dd>${esc(({ requested_goal: '你要求跟进的事项', suggestion: '一般建议', companion: '伴随气泡' })[timing.trigger] ?? '主动提醒')}</dd>` : ''}
+        <dt>当前判断</dt><dd>${esc(gateSummary)}</dd>
+        ${timing && timing.reason !== gate?.reason && PROACTIVE_REASON_LABELS[timing.reason] ? `<dt>时段依据</dt><dd>${esc(PROACTIVE_REASON_LABELS[timing.reason])}</dd>` : ''}
+        ${usualHours ? `<dt>常聊时段（Echo 本地时间）</dt><dd>${esc(usualHours)}</dd>` : ''}
+        ${timing?.reason === 'sparse_history' && Number.isInteger(timing.observedDays) ? `<dt>近两周已有记录的聊天日</dt><dd>${timing.observedDays} 天（截至昨天）</dd>` : ''}
+        ${timing?.reason === 'repeated_wrong_time' && Number.isInteger(timing.wrongTimeDays) ? `<dt>同类提醒时机不合适</dt><dd>近两周的 ${timing.wrongTimeDays} 天</dd>` : ''}
+        ${timing?.nextEligibleAt && timing.reason === gate?.reason ? `<dt>按此规则最早可提醒</dt><dd>${esc(agencyTime(timing.nextEligibleAt))}</dd>` : ''}
         <dt>静默时段</dt><dd>${esc(p.quietHours?.start ?? '—')} → ${esc(p.quietHours?.end ?? '—')}</dd>
-        <dt>当前门禁</dt><dd>${esc(p.nextGate?.allow ? '可开口' : `拦截：${p.nextGate?.reason ?? '?'}`)}</dd>
+      </dl>
+    </div>
+    <div class="sect">
+      <h4>最近一次内容评估（模型判断）</h4>
+      <div class="kv">
+        <dt>是否建议提醒</dt><dd>${p.lastDecision ? (p.lastDecision.act ? '是' : '否') : '尚无评估'}</dd>
+        <dt>置信度</dt><dd>${p.lastDecision?.confidence != null ? p.lastDecision.confidence.toFixed(2) : '—'}</dd>
+        <dt>模型给出的理由</dt><dd style="text-align:left">${esc(p.lastDecision?.reason ?? '—')}</dd>
       </div>
     </div>
     <div class="sect">
@@ -2562,10 +2737,22 @@ function renderProactiveOverview(p, dream, agency) {
   })
 }
 
+let settingsRequest = 0
+
 async function renderSettingsPanel() {
   const el = $('#panelSettings')
-  const c = S.boot.config
-  const [mcp, screen, providers, perms, companion] = await Promise.all([api('mcp'), api('screen'), api('providers'), api('permissions').catch(() => null), api('companion').catch(() => null)])
+  const request = ++settingsRequest
+  el.innerHTML = '<p class="muted small" role="status">正在读取设置…</p>'
+  let response
+  try {
+    response = await Promise.all([api('settings'), api('screen'), api('providers'), api('permissions').catch(() => null), api('companion').catch(() => null)])
+  } catch (err) {
+    if (request === settingsRequest) el.innerHTML = `<p role="alert">未能读取设置：${esc(err.message)}</p><button class="btn small" data-action="open-panel" data-panel="settings">重新读取设置</button>`
+    return
+  }
+  if (request !== settingsRequest) return
+  const [{ config: c, mcp }, screen, providers, perms, companion] = response
+  S.boot.config = c
   S.companion = companion
   S.screen = screen
   W.catalog = providers
@@ -2719,7 +2906,11 @@ async function renderSettingsPanel() {
       <div class="switch"><span>主动消息弹 macOS 通知</span><input type="checkbox" id="setNotify" ${c.proactive.notify ? 'checked' : ''} /></div>
     </div>
     <div class="sect">
-      <h4>共同打扰预算</h4>
+      <h4>提醒时机与共同打扰预算</h4>
+      <div class="field"><label for="setAttentionStyle">提醒风格</label>
+        <select id="setAttentionStyle" aria-describedby="attentionStyleHelp">${Object.entries(ATTENTION_STYLE_LABELS).map(([value, label]) =>
+          `<option value="${value}" ${value === (c.attention?.style ?? 'balanced') ? 'selected' : ''}>${label} · ${ATTENTION_STYLE_HINTS[value]}</option>`).join('')}</select></div>
+      <p class="muted small" id="attentionStyleHelp">Echo 在本机参考聊天时段和你给的时机反馈。所有风格都遵守静默时段和次数上限。</p>
       <p class="muted small">主动消息、伴随气泡和准备结果共用此预算，也保留各自的频率上限。安静准备不占打扰次数。</p>
       <div class="field"><label for="setAttentionBudget">每天合计最多打扰几次</label><input id="setAttentionBudget" type="number" min="0" max="100" step="1" required value="${c.attention?.dailyBudget ?? 20}" /></div>
       <div class="field"><label for="setAttentionGap">不同渠道之间至少间隔（秒）</label><input id="setAttentionGap" type="number" min="0" max="3600" step="5" required value="${c.attention?.minGapSeconds ?? 75}" /></div>
@@ -2727,8 +2918,8 @@ async function renderSettingsPanel() {
     <div class="sect">
       <h4>MCP 服务</h4>
       <div class="list">${
-        mcp.servers.length
-          ? mcp.servers.map((s) => `<div class="mem-item"><div class="txt">${esc(s.name)}<div class="muted small">${s.state} · ${s.tools} 个工具${s.error ? ` · ${esc(s.error)}` : ''}</div></div></div>`).join('')
+        mcp.length
+          ? mcp.map((s) => `<div class="mem-item"><div class="txt">${esc(s.name)}<div class="muted small">${s.state} · ${s.tools} 个工具${s.error ? ` · ${esc(s.error)}` : ''}</div></div></div>`).join('')
           : '<div class="muted small">没有配置 MCP。在 config.json 的 mcpServers 里加 stdio 或 http 服务后点重新加载。</div>'
       }</div>
       <div class="row" style="margin-top:8px"><button class="btn small" data-action="mcp-reload">重新加载 MCP</button>
@@ -2794,7 +2985,7 @@ async function saveSettings() {
         scenarios: $$('#panelSettings [data-cscenario]').filter((cb) => cb.checked).map((cb) => cb.dataset.cscenario),
       },
       dream: { enabled: $('#setDreamOn').checked, intervalHours: Number($('#setDreamGap').value) },
-      attention: { dailyBudget: Number($('#setAttentionBudget').value), minGapSeconds: Number($('#setAttentionGap').value) },
+      attention: { style: $('#setAttentionStyle').value, dailyBudget: Number($('#setAttentionBudget').value), minGapSeconds: Number($('#setAttentionGap').value) },
       proactive: {
         dailyBudget: Number($('#setBudget').value),
         minGapMinutes: Number($('#setMinGap').value),
@@ -3144,12 +3335,18 @@ async function handleAction(e) {
   if (act === 'stop') return stopReply()
   if (act === 'fb') {
     const signal = btn.dataset.signal
-    const r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId: S.current, messageId: btn.dataset.id } })
+    const conversationId = S.current
+    const r = await api('feedback', { method: 'POST', body: { signal, kind: btn.dataset.kind, conversationId, messageId: btn.dataset.id } })
     if (r.ignored) return toast('这条反馈未能关联到原消息，请刷新后重试', true)
-    btn.parentElement.querySelectorAll('button[data-action="fb"]').forEach((b) => (b.style.color = ''))
-    btn.style.color = signal === 'good' ? 'var(--accent)' : 'var(--danger)'
-    toast(signal === 'more' ? '已增加主动服务频率' : signal === 'less' ? '已减少主动服务频率' : signal === 'good' ? '已记录：这条内容有用' : '已记录：这条内容没用')
-    void r
+    if (r.outcome) {
+      const message = S.conv?.id === conversationId && S.conv.messages.find((m) => m.id === btn.dataset.id)
+      if (message) Object.assign(message, { feedback: r.outcome.utility, feedbackTiming: r.outcome.timing })
+      btn.parentElement?.querySelectorAll('button[data-action="fb"]').forEach((b) =>
+        b.setAttribute('aria-pressed', String([r.outcome.utility, r.outcome.timing].includes(b.dataset.signal))))
+    }
+    const confirmations = { more: '已增加主动服务频率', less: '已减少主动服务频率', good: '已记录：这条内容有用', bad: '已记录：这条内容没用',
+      wrong_time: r.duplicate ? '已记录过这条提醒的时机反馈' : '已记录时机反馈，暂停打扰 30 分钟' }
+    toast(confirmations[signal])
     return
   }
   if (act === 'sug') {
@@ -3315,7 +3512,7 @@ async function handleAction(e) {
     toast('正在判断该不该开口…')
     const r = await api('proactive/run', { method: 'POST', body: {} })
     if (r.result?.acted) { toast(`已发一条：${KIND_LABEL[r.result.message.kind] ?? ''}`); await selectConv('main') }
-    else toast(`这次没开口（${r.result?.skipped}${r.result?.confidence ? ` / ${r.result.confidence.toFixed(2)}` : ''}）`)
+    else toast(PROACTIVE_REASON_LABELS[r.result?.skipped] ?? '这次没有发送提醒。')
     return renderProactivePanel()
   }
   if (act === 'load-diag') {
@@ -3354,6 +3551,7 @@ async function handleAction(e) {
     COMMITMENTS.editor = null
     COMMITMENTS.items = []
     COMMITMENTS.preparations = []
+    answerDrafts.clear()
     COMMITMENTS.version++
     $('#panelProactive').innerHTML = ''
     RELATIONSHIPS.version++
