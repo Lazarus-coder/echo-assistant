@@ -14,13 +14,17 @@ Download from the [v0.1.0-alpha.6 release](https://github.com/Lazarus-coder/echo
 
 1. Open the DMG or unpack the ZIP, then run **Install Echo.command**.
 2. Follow the installer and open the chat window. Enter your endpoint, API key, default model, and utility model in the wizard. Image features need a model that supports them.
+
+   In the current source, enter a known chat model ID to finish setup without a provider request. **测试连接并拉取模型** optionally reads the provider’s model catalog. A chat reply verifies generation with the selected model. Memory extraction and research use your utility model, falling back to your default model. Echo uses your default model to word a proactive chat reminder.
+
+   If your installation uses a named key variable, set its name in `config.json` and its value in the environment or setup wizard. Switching a model endpoint in setup or through the settings API requires the key for the new destination.
 3. Choose a memory level. Background research, workspace tools, screen awareness, and companion mode have their own controls. Selecting the deep memory profile enables screen awareness, which also needs macOS Screen Recording permission.
 
 The installer places Echo and its data under `~/Library/Application Support/Echo` and registers the service and menu-bar app to start at login. The app uses ad-hoc signing rather than an Apple Developer ID signature; do not expect a notarized distribution. macOS may require you to approve opening it. Use the downloaded release's installation instructions and verify its origin before opening it.
 
 ### Choose your access and data settings
 
-- **Network:** chat listens on the local network by default and does not require a password. In Settings, enable password protection and set a password before using a shared network. For local access only, configure `bind: "local"` and restart Echo; source launches can use `ECHO_BIND=local`. See [the detailed controls](permissions.md#5-network-exposure).
+- **Network access.** Fresh alpha.8 profiles use loopback. For phone access, set a password and enable authentication, then set `"bind": "all"` in `config.json` and restart. The public alpha.6 installer defaults to LAN access without a password. [Network controls](permissions.md#5-network-exposure)
 - **Model and search:** content used in answers goes to the endpoint you choose; search queries go to the configured search provider. Review their data terms and usage charges. Local record storage does not mean every request stays on your device.
 - **Research:** enable it in **主动服务**, choose sources per goal, and review the results. Research and notification controls are independent. Checks pause when the Mac sleeps or Echo stops.
 - **Follow-ups.** In the public alpha.6 package, open **主动服务** to create a goal, set its date and choose its sources. With the current source, try “Track my proposal until Friday” in chat. Check the saved date, then ask “Show me the proposal draft.” You can read the draft and its sources with proactive messages off. If the draft asks a question, open it in **主动服务**, enter your answer and choose **回答并继续准备**. Your answer stays beside the original question. The goal shows when the next draft is ready.
@@ -33,7 +37,7 @@ For a goal saved by an earlier checkout, open its editor and check **后续何�
 
 ### Confirm setup or find help
 
-Open the chat window from the Echo menu-bar icon. Complete the model connection check in the setup wizard, then send a short message. An open window confirms that the interface is available; a successful reply also checks your configured model connection.
+Open the chat window from the Echo menu-bar icon. Save your provider and model in the setup wizard, then send a short message. An open window confirms that the interface is available; a successful reply also checks your configured model connection.
 
 If the window does not open or replies fail, open Terminal in `~/Library/Application Support/Echo` and run `./bin/echo status` for service information or `./bin/echo logs` to follow the logs. Stop following logs with Ctrl+C. When [reporting an issue](https://github.com/Lazarus-coder/echo-assistant/issues), include the Echo version, macOS version, steps to reproduce, and a relevant error with credentials and personal content removed.
 
@@ -59,13 +63,15 @@ Echo 目前是 alpha 产品，面向 macOS 13 或更高版本，安装包支持 
 
 1. 打开 DMG 或解压 ZIP，运行 **Install Echo.command**。
 2. 按安装器提示打开对话窗口，在引导中填写端点、API Key、默认模型和后台模型。图片能力需要相应模型支持。
+
+   当前源码支持直接输入已知的聊天模型 ID，保存时无需请求服务商。「测试连接并拉取模型」用于读取模型列表。发送一条消息并收到回复即可确认所选模型支持对话。记忆提取和研究使用后台模型，留空时使用默认模型。主动聊天提醒由默认模型组织措辞。
 3. 选择记忆档位。后台研究、工作区工具、屏幕感知和伴随模式分别控制；选择深度记忆档会开启屏幕感知，并需要 macOS 屏幕录制授权。
 
 程序与数据默认放在 `~/Library/Application Support/Echo`，服务及状态栏应用会在登录时启动。当前应用采用 ad-hoc 签名，并非 Apple Developer ID 签名；不要将它视为已公证的发行包。macOS 可能要求你确认打开，请按该发行包说明操作并核对下载来源。
 
 ### 选择访问与数据设置
 
-- **网络：**默认向局域网开放对话且不要求口令。在共享网络使用前，请在设置中启用口令保护并设置口令；若只需本机访问，将 `bind` 配置为 `"local"` 并重启 Echo。源码启动也可使用 `ECHO_BIND=local`。详细操作见[网络访问说明](permissions.md#5-network-exposure)。
+- **网络访问。** alpha.8 新资料默认仅在本机监听。手机访问可先设置并启用口令，再配置 `"bind": "all"` 并重启。公开的 alpha.6 安装包默认向局域网开放且免登录。[网络访问说明](permissions.md#5-network-exposure)
 - **模型与搜索：**回答所需内容会发送到你选择的模型端点，搜索词会发送到所配置的搜索提供方。请了解提供方的数据条款与计费；记录存在本机不代表所有请求都留在本机。
 - **研究：**在 **主动服务** 开启，为每个目标选择来源，并复核结果。研究与通知分别控制；Mac 睡眠或 Echo 停止时暂停检查。
 - **跟进。** 公开的 alpha.6 安装包可在「主动服务」面板中创建目标、设定日期并选择来源。使用当前源码时，也可以在对话里说“帮我跟进提案，周五截止”。核对日期后，再问“给我看看提案草稿”，就能读到当前草稿及其来源。关闭主动消息也能查。如果草稿里有待确认问题，在「主动服务」打开它，填好回答并点「回答并继续准备」。回答会保留在原问题下，回到目标即可查看下一版的进度。
@@ -78,7 +84,7 @@ Echo 目前是 alpha 产品，面向 macOS 13 或更高版本，安装包支持 
 
 ### 确认安装成功与排错
 
-从 Echo 状态栏图标打开对话窗口，在设置引导中完成模型连接检查，再发送一条简短消息。窗口能打开说明界面已可访问；收到正常回复也验证了你配置的模型连接。
+从 Echo 状态栏图标打开对话窗口，在设置引导中保存模型端点和模型，再发送一条简短消息。窗口能打开说明界面已可访问；收到正常回复也验证了你配置的模型连接。
 
 若窗口无法打开或回复失败，在终端进入 `~/Library/Application Support/Echo`，运行 `./bin/echo status` 查看服务信息，或用 `./bin/echo logs` 跟踪日志；按 Ctrl+C 停止查看日志。[反馈问题](https://github.com/Lazarus-coder/echo-assistant/issues)时，请附 Echo 版本、macOS 版本、复现步骤，以及去除凭据和个人内容后的相关错误信息。
 

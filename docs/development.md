@@ -22,7 +22,7 @@ For a foreground development instance:
 ECHO_BIND=local npm start
 ```
 
-This uses the checkout's `config.json` and `data/`, binds to loopback, and runs until stopped. It does not register a login service. Use a separate checkout and the environment overrides below when you need separate development data. Starting any server also runs storage maintenance, including the shared capture directory described under [test isolation](#test-isolation).
+This uses the checkout's `config.json` and `data/`, binds to loopback, and runs until stopped. Use the environment overrides below for a separate development profile. Startup maintenance runs inside the selected data directory.
 
 To install a persistent source instance, run `./install.sh`. It installs locked dependencies, offers credential setup, registers `com.echo.chat` and `com.echo.menubar` with launchd, and builds the menu-bar app when available. These labels are shared with the packaged installation: running the installer or service controls can affect an existing instance. Rebuilding the app can require a new Screen Recording grant.
 
@@ -32,7 +32,7 @@ To install a persistent source instance, run `./install.sh`. It installs locked 
 |---|---|
 | `ECHO_DATA_DIR` | Override the runtime data directory; defaults to `data/` in this checkout. |
 | `ECHO_CONFIG` | Override the config file; defaults to `config.json` in this checkout. |
-| `ECHO_BIND=local` | Listen only on loopback. |
+| `ECHO_BIND` | New profiles listen on loopback. `all` selects LAN listening on restart. `local` forces loopback. |
 | `ECHO_PORT` | Override the configured port. |
 | `ECHO_LOG_LEVEL` | Set `debug`, `info`, `warn`, or `error`. |
 
@@ -56,7 +56,7 @@ Run `./bin/echo` from the installation you intend to control. These commands tar
 | `./bin/echo forget` | Inspect the forgetting log. |
 | `./bin/echo auth on`, `./bin/echo passwd` | Enable password protection and set its password. |
 
-The default configuration permits LAN chat without a password. Use loopback for development or configure authentication before exposing a shared instance. Workspace execution, approvals, and artifacts remain restricted to host connections.
+New profiles listen on the Mac's loopback interface. To share Echo on your network, configure password protection and explicitly select `bind: "all"` in the config file or set `ECHO_BIND=all` before restart. If a password is required but has not been set yet, the service starts on loopback. After setting the password, restart to apply the requested LAN binding. Settings and `./bin/echo status` show the running listener. Workspace execution, approvals, and artifacts remain restricted to host connections.
 
 ## Tests
 
@@ -75,11 +75,9 @@ The HTTP parsing and cleanup-accounting fixes in current source were added after
 
 ### Test isolation
 
-`ECHO_DATA_DIR` and `ECHO_CONFIG` isolate data and configuration, but **do not redirect `/tmp/echo-capture`**. Server startup and maintenance sweep that shared directory. The dedicated server regression mocks it; several existing API suites still start servers that perform this cleanup.
+Set `ECHO_DATA_DIR` and `ECHO_CONFIG` on each test server. The menu-bar app uses the same data directory for its local token, logs shortcut and capture spool. Both screen capture and the permission probe write temporary JPEGs under `spool/` with directory permissions of `0700`. Successful captures remove their JPEG after local processing. Startup, scheduled and manual maintenance clear recognized capture files older than one hour in this profile.
 
-Run the full suite in a disposable environment, or apply a test-only filesystem mock to every spawned server before it imports `server.mjs`. A preload on the parent test runner alone is insufficient when child processes replace their environment. The fixture in [server-regressions.mjs](../tests/server-regressions.mjs) shows the required ordering. Do not use a running user's captures as test data or restart their installed service to run tests.
-
-The offline evaluator, `npm run selftest`, creates its own configuration and does not read real credentials. Its server startup mocks access to the shared capture directory before importing the server. It also writes the untracked `tests/last-report.json`. `npm run selftest:live` explicitly reads the checkout's configuration and credentials and calls real model/search services. It is outside the offline regression workflow.
+The offline evaluator, `npm run selftest`, uses a temporary profile and writes its report to the untracked `tests/last-report.json`. `npm run selftest:live` reads the checkout's configuration and credentials and calls the configured model and search services.
 
 Use the current command output for pass/fail counts. Historical release notes and development logs describe their own revisions, not today's test coverage.
 
@@ -93,7 +91,8 @@ data/
   state.json            Goals, follow-up state, and response preferences
   research/documents/   Explicitly attached research documents
   runs/                 Execution records, command output, and edit snapshots
-  screenshots/          Retained screen images, when enabled
+  screenshots/          Existing screen images covered by storage cleanup
+  spool/                Temporary native captures and permission probes
   uploads/              Uploaded and generated images
   logs/                 Service logs
   metrics.jsonl         Runtime and outcome metrics
@@ -132,6 +131,6 @@ Open [the Chinese page](http://127.0.0.1:4173/) or [the English page](http://127
 
 ## Packaging
 
-`npm run package` produces a source archive from tracked files at `HEAD`; it does not publish a release. The script requires a clean working tree by default, checks that [product-journey.md](product-journey.md) covers the package version, and verifies version consistency and the dependency lock file. Verification is on by default: it extracts the archive, installs dependencies, and runs the offline evaluator, so the shared capture-directory caveat still applies. `npm run package -- --no-verify` skips that execution check and produces an unverified archive.
+`npm run package` produces a source archive from tracked files at `HEAD`. The script requires a clean working tree by default, checks that [product-journey.md](product-journey.md) covers the package version, and verifies version consistency and the dependency lock file. Package verification extracts the archive, installs dependencies and runs the offline evaluator in a temporary profile. `npm run package -- --no-verify` produces an unverified archive.
 
 Keep release notes tied to the revision being packaged. Document actual validation and remaining limitations without reusing historical test totals. Packaging, signing, and publishing are separate actions.

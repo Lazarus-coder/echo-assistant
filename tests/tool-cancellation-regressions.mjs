@@ -185,6 +185,39 @@ try {
     assert.ok(urls[0].endsWith('/responses'))
   })
 
+  await test('a fallback keeps search keys and custom headers bound to their original destination', async () => {
+    for (const provider of ['tavily', 'custom']) {
+      const marker = 'ECHO_SEARCH_BINDING_' + provider.toUpperCase()
+      const keyName = 'ECHO_ROTATED_SEARCH_TEST_KEY'
+      process.env[keyName] = 'fixture-first'
+      const old = { endpoint: 'https://first-search.invalid', ...(provider === 'tavily'
+        ? { envVar: keyName } : { headers: { authorization: 'env:' + keyName } }) }
+      const configFor = (record) => ({ search: { order: ['gateway', provider], providers: { [provider]: record } } })
+      let calls = 0
+      globalThis.fetch = async (url, init) => {
+        calls++
+        assert.equal(url, 'https://second-search.invalid')
+        assert.equal(init.headers.authorization, provider === 'tavily' ? 'Bearer fixture-second' : 'fixture-second')
+        return Response.json({ results: [{ title: 'Fixture', url: 'https://result.invalid' }] })
+      }
+      try {
+        const rotateDuringFallback = async () => {
+          process.env[keyName] = 'fixture-second'
+          process.env[marker] = 'fixture-new-revision'
+          throw new Error('first provider unavailable')
+        }
+        await assert.rejects(searchWithFallback({ query: 'fixture', cfg: configFor(old), nativeSearch: rotateDuringFallback }), /设置已更新/)
+        assert.equal(calls, 0, 'the old destination cannot consume the newly published credential')
+        const updated = { ...old, endpoint: 'https://second-search.invalid', credentialRevision: 'fixture-new-revision' }
+        assert.equal((await searchWithFallback({ query: 'fixture', cfg: configFor(updated) })).provider, provider)
+        assert.equal(calls, 1)
+      } finally {
+        delete process.env[keyName]
+        delete process.env[marker]
+      }
+    }
+  })
+
   await test('cancelling image generation stops the response body before any asset download', async () => {
     const controller = new AbortController()
     const entered = deferred()

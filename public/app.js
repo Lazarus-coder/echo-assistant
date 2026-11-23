@@ -244,7 +244,7 @@ function showGate(mode) {
   $('#app').hidden = true
   $('#gate').hidden = false
   $('#gateTitle').textContent = gateMode === 'first' ? '设置访问口令' : 'Echo'
-  $('#gateHint').textContent = gateMode === 'first' ? '这个窗口会被局域网访问，先定一个口令（≥6 位）' : '输入访问口令'
+  $('#gateHint').textContent = gateMode === 'first' ? '在本机设置访问口令（至少 6 位）' : '输入访问口令'
   $('#gateSubmit').textContent = gateMode === 'first' ? '创建并进入' : '进入'
   $('#gateInput').value = ''
   setTimeout(() => $('#gateInput').focus(), 60)
@@ -316,7 +316,38 @@ function messageFeedbackHtml(m) {
   return Object.entries(MESSAGE_FEEDBACK_LABELS).map(([signal, [label, description]]) => {
     const selected = signal.endsWith('_time') ? (m.feedbackTiming ?? m.feedback) === signal : m.feedback === signal
     return `<button type="button" data-action="fb" data-signal="${signal}" data-kind="${esc(m.kind ?? 'chat')}" data-id="${esc(m.id)}" aria-label="${description}" title="${description}" aria-pressed="${selected}">${label}</button>`
+  }).join('') + (typeof m.topicMuted === 'boolean'
+    ? topicMuteButton((m.companion?.selection ?? m.selection).topicKey, m.topicMuted, m.id) : '')
+}
+
+function topicMuteButton(key, muted, messageId) {
+  return `<button type="button" class="btn small" data-action="topic-mute" data-topic-key="${esc(key)}" data-muted="${muted}"${messageId ? ` data-id="${esc(messageId)}"` : ''}>${muted ? '取消静音' : key.startsWith('companion:') ? '静音这类气泡' : '静音此话题'}</button>`
+}
+
+function previewHtml(result) {
+  const items = result.items.map((item) => {
+    const why = item.reason === 'ok' ? '当前可提醒' : PROACTIVE_REASON_LABELS[item.reason] ?? '暂缓提醒'
+    return `<li><b>${esc(item.label)}</b><p>${esc(why)} · 本地评分 ${Number(item.score).toFixed(2)}</p>
+      <p class="muted small">${esc(item.reasons.join('；'))}</p>${item.topicKey && !item.requested && item.reason !== 'topic_muted' ? topicMuteButton(item.topicKey, false) : ''}</li>`
   }).join('')
+  const muted = result.muted.map((m) => `<li><span>${esc(m.label)} <small class="muted">${esc(agencyTime(m.addedAt))}</small></span> ${topicMuteButton(m.topicKey, true)}</li>`).join('')
+  return `${items ? `<ol class="preview-items">${items}</ol>` : `<p class="muted small">${result.enabled ? '当前没有符合来源条件的候选提醒。' : '主动提醒已关闭。'}</p>`}
+    ${muted ? `<h4>已静音的话题</h4><ul class="preview-mutes">${muted}</ul>` : ''}`
+}
+
+let previewRevision = 0
+function clearReminderPreview() {
+  previewRevision++
+  const node = $('#reminderPreview')
+  if (node) node.innerHTML = ''
+}
+
+async function refreshReminderPreview() {
+  const node = $('#reminderPreview')
+  if (!node) return
+  const version = ++previewRevision
+  const result = await api('proactive/preview')
+  if (version === previewRevision) node.innerHTML = previewHtml(result)
 }
 
 function selectionDetails(selection) {
@@ -691,9 +722,14 @@ function saveDraft() {
   S.attachmentDrafts.set(S.current, S.att.slice())
 }
 
+function chatReady() {
+  const cfg = S.boot?.config
+  return cfg?.onboarding?.usable ?? (cfg?.upstreamConfigured === true)
+}
+
 function updateComposer() {
   const cfg = S.boot?.config ?? {}
-  const ready = cfg.upstreamConfigured === true
+  const ready = chatReady()
   const drawing = Boolean(S.drawing && S.drawing === S.current)
   const busy = Boolean(S.stream || S.selecting || S.preparing || S.uploading || drawing)
   const text = $('#input').value.trim()
@@ -702,10 +738,10 @@ function updateComposer() {
   $('[data-action="attach"]').hidden = cfg.media?.imageInput === false
   const draw = $('[data-action="draw"]')
   draw.hidden = cfg.media?.imageOutput === false || !cfg.defaultImageModel
-  draw.disabled = !ready || busy || Boolean(S.drawing)
+  draw.disabled = !cfg.upstreamConfigured || busy || Boolean(S.drawing)
   draw.textContent = drawing ? '正在画…' : '画图'
   $('#connectionNotice').hidden = ready
-  $('#connectionText').textContent = '连接你的模型后即可开始。你可以先写下草稿。'
+  $('#connectionText').textContent = cfg.upstreamConfigured ? '在引导中选择默认模型即可开始。草稿已保留。' : '连接你的模型后即可开始。你可以先写下草稿。'
   $('#composerHint').textContent = matchMedia('(pointer: coarse)').matches
     ? '回车换行 · 点「发送」开始'
     : 'Enter 发送 · Shift+Enter 换行'
@@ -835,12 +871,13 @@ async function openWizard() {
   const config = S.boot?.config
   W.baseUrl = cat.onboarding.baseUrl || ''
   W.models = config?.models?.map((m) => m.id) ?? []
+  W.discovered = false
   W.defaultModel = config?.defaultModel ?? ''
   W.utilityModel = config?.utilityModel ?? ''
   W.imageModel = config?.defaultImageModel ?? ''
   W.profile = cat.onboarding.profile || 'standard'
   W.order = (cat.onboarding.searchOrder ?? ['scrape', 'gateway']).filter((id) => id !== 'none')
-  W.providerCfg = config?.search?.providers ?? {}
+  W.providerCfg = { ...config?.search?.providers }
   W.step = 0
   W.test = W.perms = W.permTest = null
   $('#wizard').hidden = false
@@ -895,16 +932,18 @@ function renderWizard() {
 }
 
 function stepEndpoint() {
-  const presets = W.catalog.upstream.map((p) => `<option value="${esc(p.baseUrl)}" ${p.baseUrl === W.baseUrl ? 'selected' : ''}>${esc(p.label)}${p.baseUrl ? '' : '（手动填）'}</option>`).join('')
+  const preset = W.catalog.upstream.find((p) => p.baseUrl === W.baseUrl)?.baseUrl ?? ''
+  const presets = W.catalog.upstream.map((p) => `<option value="${esc(p.baseUrl)}" ${p.baseUrl === preset ? 'selected' : ''}>${esc(p.label)}${p.baseUrl ? '' : '（手动填）'}</option>`).join('')
+  const savedKey = W.catalog.onboarding.hasKey && W.baseUrl === W.catalog.onboarding.baseUrl
   return `
-    <div class="field"><label>服务商预设</label><select id="wPreset">${presets}</select></div>
-    <div class="field"><label>端点 Base URL（OpenAI 兼容，通常以 /v1 结尾）</label>
+    <div class="field"><label for="wPreset">服务商预设</label><select id="wPreset">${presets}</select></div>
+    <div class="field"><label for="wBase">端点 Base URL（OpenAI 兼容，通常以 /v1 结尾）</label>
       <input type="text" id="wBase" placeholder="https://your-endpoint/v1" value="${esc(W.baseUrl)}" /></div>
-    <div class="field"><label>API Key（只写入本机 data/echo.env，600 权限，不进仓库）</label>
-      <input type="password" id="wKey" placeholder="sk-…" value="${esc(W.apiKey)}" /></div>
+    <div class="field"><label for="wKey">API Key（保存在本机）</label>
+      <input type="password" id="wKey" placeholder="${savedKey ? '留空沿用此端点已配置的密钥' : '输入此端点的密钥'}" value="${esc(W.apiKey)}" /></div>
     <div class="row">
       <button class="btn small" data-w="test">测试连接并拉取模型</button>
-      <span class="muted small" id="wTestOut">${W.test ? (W.test.ok ? `✓ 连通，发现 ${W.test.count} 个模型` : `✗ ${esc(W.test.error ?? '')}`) : ''}</span>
+      <span class="muted small" role="status" id="wTestOut">${W.test ? (W.test.ok ? `✓ 读到 ${W.test.count} 个模型 ID` : `✗ ${esc(W.test.error ?? '')}`) : '知道模型 ID 可以直接继续。'}</span>
     </div>`
 }
 
@@ -970,10 +1009,10 @@ function stepPermissions() {
   if (!p) return '<p class="muted small">正在检查…</p>'
   const row = (ok, text) => `<div class="chain-row"><span class="idx">${ok ? '✓' : '!'}</span><span style="flex:1">${text}</span></div>`
   return `
-    ${row(p.configured, p.configured ? '模型端点已配置' : '模型端点未配置（第 1 步可以回头补）')}
+    ${row(true, '模型设置已填写，点「完成」后保存。')}
     ${row(p.runningUnderLaunchd, p.runningUnderLaunchd ? '已由 launchd 常驻（登录自启、崩溃自动拉起）' : '当前是手动启动的；要常驻请跑 ./install.sh')}
     ${row(p.tools.swiftc, p.tools.swiftc ? 'swiftc 可用（能编译状态栏图标）' : '缺少 swiftc：xcode-select --install')}
-    ${row(true, `服务地址：${esc(p.bind)} :${p.port}${p.lanAddresses?.length ? ` · 局域网 ${esc(p.lanAddresses[0].split(' ')[0])}` : ''}`)}
+    ${row(true, `监听：${esc(p.bind)} :${p.port}${p.lanUrl ? ` · 同一网络 ${esc(p.lanUrl)}` : ''}`)}
     ${row(p.authRequired, p.authRequired ? '已开启口令验证' : '尚未要求访问口令')}
     <div class="field" style="margin-top:12px"><label>屏幕录制权限（只有开启屏幕感知才需要）</label>
       <div class="row"><button class="btn small" data-w="perm-test">测试一次</button>
@@ -1005,6 +1044,7 @@ function bindWizard() {
     W.test = null
     W.apiKey = $('#wKey').value = ''
     W.models = []
+    W.discovered = false
     W.defaultModel = W.utilityModel = W.imageModel = ''
     $('#wTestOut').textContent = ''
   }
@@ -1025,7 +1065,8 @@ function bindWizard() {
         W.test = r
         if (r.ok) {
           W.models = r.models
-          W.defaultModel = W.defaultModel || r.models[0] || ''
+          W.discovered = true
+          if (!W.defaultModel && r.models.length === 1) W.defaultModel = r.models[0]
         }
         return renderWizard()
       }
@@ -1039,10 +1080,12 @@ function bindWizard() {
         if (W.step === 0) {
           syncEndpoint()
           W.apiKey = ($('#wKey')?.value ?? W.apiKey).trim()
-          if (W.baseUrl !== W.catalog.onboarding.baseUrl && !W.apiKey) return toast('更换模型端点时，请输入该端点的 API Key', true)
+          if (!W.baseUrl) return toast('请填写模型端点地址', true)
+          if ((!W.catalog.onboarding.hasKey || W.baseUrl !== W.catalog.onboarding.baseUrl) && !W.apiKey) return toast('请输入该端点的 API Key', true)
         } else if (W.step === 1) {
           if ($('#wModel')?.reportValidity() === false) return
           W.defaultModel = ($('#wModel')?.value ?? '').trim()
+          if (!W.defaultModel) return toast('请选择或输入一个默认模型', true)
           W.utilityModel = ($('#wUtility')?.value ?? '').trim()
           W.imageModel = ($('#wImage')?.value ?? '').trim()
         } else if (W.step === 4) {
@@ -1064,11 +1107,13 @@ function bindWizard() {
         const body = {
           baseUrl: W.baseUrl,
           apiKey: W.apiKey,
-          models: W.models,
+          ...(W.discovered ? { models: W.models } : {}),
           defaultModel: W.defaultModel,
-          utilityModel: W.utilityModel || W.defaultModel,
-          imageModels: W.imageModel ? [{ id: W.imageModel, label: W.imageModel, group: '出图' }] : [],
-          defaultImageModel: W.imageModel,
+          utilityModel: W.utilityModel,
+          ...(W.imageModel !== (S.boot?.config?.defaultImageModel ?? '') || W.baseUrl !== W.catalog.onboarding.baseUrl ? {
+            imageModels: W.imageModel ? [{ id: W.imageModel, label: W.imageModel, group: '出图' }] : [],
+            defaultImageModel: W.imageModel,
+          } : {}),
           profile: W.profile,
           search: { order: W.order, providers: W.providerCfg },
           keys: W.keys,
@@ -1103,12 +1148,13 @@ function bindWizard() {
   )
   el.querySelectorAll('[data-order]').forEach((cb) =>
     cb.addEventListener('change', () => {
+      el.querySelectorAll('[data-pcfg]').forEach((i) => (W.providerCfg[i.dataset.pcfg] = { endpoint: i.value.trim() }))
+      el.querySelectorAll('[data-pkey]').forEach((i) => (W.keys[i.dataset.pkey] = i.value.trim()))
       const id = cb.dataset.order
       const set = new Set(W.order)
       if (cb.checked) set.add(id)
       else set.delete(id)
-      // 保持目录顺序，避免顺序跳来跳去
-      W.order = W.catalog.search.map((p) => p.id).filter((x) => set.has(x))
+      W.order = [...set]
       renderWizard()
     }),
   )
@@ -1122,6 +1168,7 @@ async function runPolish({ mode } = {}) {
   const input = $('#input')
   const text = input.value.trim()
   if (!text) return toast('输入框是空的', true)
+  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
   if (POLISH.running) return
   if (mode) {
     POLISH.mode = mode
@@ -1220,7 +1267,7 @@ function renderPolishBox() {
 
 async function startStream({ userText, regenerate = false, editId }) {
   if (S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return toast('请稍候…', true)
-  if (!S.boot?.config?.upstreamConfigured) return toast('先连接模型，草稿会保留在这里', true)
+  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
   const conversationId = S.current
   if (editId) {
     S.preparing = true
@@ -1541,6 +1588,7 @@ async function stopReply() {
 /* --------------------------------- panels ---------------------------------- */
 
 async function openPanel(name) {
+  clearReminderPreview()
   if ($('#drawer').hidden) S.returnFocus = document.activeElement
   S.panel = name
   if (!matchMedia('(min-width: 861px)').matches) $('#app').dataset.sidebar = 'closed'
@@ -1767,6 +1815,7 @@ document.addEventListener('submit', (event) => {
 })
 
 function closeDrawer() {
+  clearReminderPreview()
   $('#drawer').hidden = true
   syncScrim()
   restoreFocus(S.returnFocus)
@@ -2048,9 +2097,10 @@ function screenBlock(screen) {
   const s = screen.screen
   const ev = (s.events ?? []).slice(0, 5)
   const st = screen.storage
-  return `<div class="sect">
-    <h4>此刻在做什么 <span class="muted small">· 本地 OCR，原始截图不保留</span></h4>
-    ${s.lastAt ? `<div class="muted small">上次感知 ${ago(s.lastAt)} · 今天 ${s.todayCount} 次 · 工作记忆 ${s.workingCount} 条</div>` : '<div class="muted small">还没感知过。点下面的按钮试一次。</div>'}
+  return `<div class="sect" data-screen-capture="${s.captureRequested ? 'pending' : 'ready'}">
+    <h4>此刻在做什么 <span class="muted small">· ${s.mode === 'image' ? '截图发送给模型' : '本地 OCR'}，本机暂存图像处理后删除</span></h4>
+    ${s.lastAt ? `<div class="muted small">${s.lastOk === false ? '上次感知未完成' : '上次感知'} ${ago(s.lastAt)} · 今天 ${s.todayCount} 次 · 工作记忆 ${s.workingCount} 条</div>` : '<div class="muted small">还没感知过。点下面的按钮试一次。</div>'}
+    <div class="muted small" role="status">${s.captureRequested ? '等待状态栏 App 采集。' : s.captureExpired ? '这次请求已过期。请确认状态栏 App 正在运行，然后重试。' : s.permissionMissing ? '请在 macOS 系统设置中为状态栏 App 开启屏幕录制权限。' : ''}</div>
     <div class="list" style="margin-top:8px">${ev
       .map(
         (e) => `<div class="mem-item"><div class="txt">${esc(e.activity || '(未识别)')}
@@ -2058,7 +2108,7 @@ function screenBlock(screen) {
       )
       .join('')}</div>
     <div class="row" style="margin-top:8px">
-      <button class="btn small" data-action="look-now">现在看一眼</button>
+      <button class="btn small" data-action="look-now" ${s.captureRequested ? 'disabled' : ''}>现在看一眼</button>
       <button class="btn small" data-action="screen-digest">沉淀成记忆</button>
       <span class="muted small">磁盘：截图 ${st.screenshots.mb}MB / ${st.screenshots.budgetMB}MB · 图片 ${st.uploads.mb}MB / ${st.uploads.budgetMB}MB</span>
     </div>
@@ -2359,7 +2409,9 @@ function restoreGoalActionFocus(button) {
 async function renderProactivePanel({ poll = false, force = false } = {}) {
   const el = $('#panelProactive')
   if (!$('#commitmentList', el)) {
-    el.innerHTML = `<section class="sect"><h3 class="agency-title">让 Echo 先做一点功课</h3><div id="researchSettings"></div><div id="researchStatus"></div></section>
+    el.innerHTML = `<section class="sect"><div class="row"><h3 class="agency-title">提醒预览</h3><button class="btn small right" data-action="preview-reminders">预览候选提醒</button></div>
+      <p class="muted small">查看本机排序、暂缓原因和静音话题。预览不会调用模型或发送通知。</p><div id="reminderPreview" aria-live="polite"></div></section>
+      <section class="sect"><h3 class="agency-title">让 Echo 先做一点功课</h3><div id="researchSettings"></div><div id="researchStatus"></div></section>
       <section class="sect"><div class="row"><h3 class="agency-title">持续推进的目标</h3><button class="btn small primary right" data-action="goal-new">新增目标</button></div>
       <p class="muted small">Echo 准备下一步，保留依据。自动发现的事项会标明出处与待核实信息，你可以随时停止。</p>
       <p class="muted small">准备上限：24 小时内每个目标 2 次，全部目标 5 次。只读取目标授权的范围。</p>
@@ -2631,6 +2683,7 @@ const ATTENTION_STYLE_HINTS = {
   engaged: '较短等待，较低筛选门槛',
 }
 const PROACTIVE_REASON_LABELS = {
+  topic_muted: '这个话题已静音。',
   sparse_history: '聊天记录还不足以判断常聊时段。',
   usual_chat_window: '现在是你常跟 Echo 聊天的时段。',
   outside_usual_window: '当前在常聊时段之外。',
@@ -2825,7 +2878,7 @@ async function renderSettingsPanel() {
               <div class="chain-row"><span class="idx">${perms.configured ? '✓' : '!'}</span><span style="flex:1">模型端点${perms.configured ? '已配置' : '未配置'}</span></div>
               <div class="chain-row"><span class="idx">${perms.runningUnderLaunchd ? '✓' : '!'}</span><span style="flex:1">${perms.runningUnderLaunchd ? 'launchd 常驻中（登录自启）' : '手动启动：跑 ./install.sh 让它常驻'}</span></div>
               <div class="chain-row"><span class="idx">${perms.tools.swiftc ? '✓' : '!'}</span><span style="flex:1">swiftc ${perms.tools.swiftc ? '可用' : '缺失（xcode-select --install）'}</span></div>
-              <div class="chain-row"><span class="idx">${perms.authRequired ? '✓' : '·'}</span><span style="flex:1">${perms.authRequired ? '已开启口令验证' : '免登录（本机自用）'} · ${esc(perms.bind)} :${perms.port}</span></div>
+              <div class="chain-row"><span class="idx">${perms.authRequired ? '✓' : '·'}</span><span style="flex:1">${perms.authRequired ? '已开启口令验证' : '免登录'} · ${esc(perms.bind)} :${perms.port}</span></div>
               <div class="chain-row"><span class="idx">·</span><span style="flex:1">数据目录：${esc(perms.dataDir)}</span></div>
             </div>
             <div class="row" style="margin-top:8px"><button class="btn small" data-action="perm-test">测试屏幕录制权限</button>
@@ -2859,7 +2912,7 @@ async function renderSettingsPanel() {
           .join('')}</select></div>
       <div class="field"><label>发图前压缩最长边 <b>${c.media?.maxEdge ?? 1536}</b> px</label>
         <input type="range" id="setMaxEdge" min="768" max="2048" step="128" value="${c.media?.maxEdge ?? 1536}" /></div>
-      <p class="muted small">实测这个网关开放的模态：文本/推理、视觉理解、图片生成。未开放：视频（wan3.0-video、happyhorse-1.1-* 返回 url error）、语音 ASR（空响应）、TTS（InternalError）、decision-model-preview（未路由）。</p>
+      <p class="muted small">图片输入需要支持视觉的聊天模型。画图使用上方选择的出图模型，具体能力与费用取决于你的服务商。</p>
     </div>
     <div class="sect">
       <h4>屏幕感知</h4>
@@ -2871,13 +2924,8 @@ async function renderSettingsPanel() {
           <option value="ocr" ${c.screen?.mode !== 'image' ? 'selected' : ''}>本地 OCR 文字（推荐：原始截图不出本机）</option>
           <option value="image" ${c.screen?.mode === 'image' ? 'selected' : ''}>连截图一起发给模型（更准，图片会离开本机）</option>
         </select></div>
-      <div class="field"><label>原始截图</label>
-        <select id="setKeepImages">
-          <option value="0" ${!c.screen?.keepImages ? 'selected' : ''}>不保留（分析完立即删除）</option>
-          <option value="1" ${c.screen?.keepImages ? 'selected' : ''}>保留（受磁盘预算约束，超了从最旧删）</option>
-        </select></div>
-      <div class="field"><label>截图保留天数 <b>${c.screen?.retentionDays ?? 3}</b></label>
-        <input type="range" id="setScreenDays" min="0" max="14" step="1" value="${c.screen?.retentionDays ?? 3}" /></div>
+      <div class="field"><label>屏幕会话摘要保留天数 <b>${c.screen?.retentionDays ?? 7}</b></label>
+        <input type="range" id="setScreenDays" min="0" max="14" step="1" value="${c.screen?.retentionDays ?? 7}" /></div>
       <div class="field"><label>屏蔽应用（命中完全不采集，逗号分隔；默认空）</label>
         <input type="text" id="setBlocklist" placeholder="例如：1Password、Alipay、Terminal" value="${esc((c.screen?.blocklist ?? []).join('、'))}" /></div>
       <div class="field"><label>屏蔽关键词正则（命中跳过，逗号分隔；默认空）</label>
@@ -2963,16 +3011,17 @@ async function renderSettingsPanel() {
     </div>
     <div class="sect">
       <h4>访问控制</h4>
-      <div class="switch"><span>要求访问口令（关掉后同 WiFi 的设备都能直接用，不推荐在公共网络下关闭）</span>
+      <div class="switch"><span>要求访问口令${c.listener?.bind === 'all' ? '（当前监听局域网）' : ''}</span>
         <input type="checkbox" id="setAuthRequired" ${c.auth?.required ? 'checked' : ''} /></div>
       <div class="row" style="margin-top:6px">
         <button class="btn small" data-action="set-passwd">${c.auth?.passwordSet ? '修改口令' : '设置口令'}</button>
-        <span class="muted small">${c.auth?.required ? '当前：需要登录' : '当前：本机自用（免登录）'}</span>
+        <span class="muted small">${c.auth?.required ? '当前：需要登录' : '当前：免登录'}</span>
       </div>
     </div>
     <div class="sect">
       <h4>服务</h4>
-      <div class="kv"><dt>监听</dt><dd>${c.bind === 'all' ? '局域网 0.0.0.0' : '仅本机'}:${c.port}</dd>
+      <div class="kv"><dt>监听</dt><dd>${c.listener ? `${c.listener.bind === 'all' ? '局域网' : '仅本机'} · ${esc(c.listener.address)}:${esc(c.listener.port)}` : '未取得监听信息'}</dd>
+      ${c.listener?.lanUrl ? `<dt>同一网络访问</dt><dd>${esc(c.listener.lanUrl)}</dd>` : ''}
       <dt>数据目录</dt><dd style="text-align:left;font:11px var(--mono)">data/</dd></div>
       <div class="row" style="margin-top:8px"><button class="btn small" data-action="change-passwd">改访问口令</button></div>
       <div class="row"><button class="btn small primary" data-action="save-settings">保存设置</button><span id="setSaved" class="muted small"></span></div>
@@ -3007,7 +3056,6 @@ async function saveSettings() {
         enabled: $('#setScreenOn').checked,
         intervalMinutes: Number($('#setScreenGap').value),
         mode: $('#setScreenMode').value,
-        keepImages: $('#setKeepImages').value === '1',
         retentionDays: Number($('#setScreenDays').value),
         blocklist: $('#setBlocklist').value.split(/[、,]/).map((s) => s.trim()).filter(Boolean),
         excludeTitlePatterns: $('#setExcludes').value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
@@ -3126,6 +3174,13 @@ async function boot({ keep = false } = {}) {
 function startPolling() {
   clearInterval(S.poll)
   S.poll = setInterval(async () => {
+    const capture = S.panel === 'memory' && !document.hidden && !$('#drawer').hidden && $('[data-screen-capture]')
+    if (capture && capture.dataset.screenCapture === 'pending') {
+      try {
+        const snapshot = await api('screen')
+        if (capture.isConnected && !snapshot.screen.captureRequested) capture.outerHTML = snapshot.screen.enabled ? screenBlock(snapshot) : ''
+      } catch {}
+    }
     if (!document.hidden && !$('#drawer').hidden && S.panel === 'proactive') await renderProactivePanel({ poll: true })
     if (!document.hidden && !$('#drawer').hidden && S.panel === 'workspace') await refreshRuns()
     if (S.stream || S.selecting || S.preparing || $('.edit-box') || document.hidden) return
@@ -3369,6 +3424,34 @@ async function handleAction(e) {
   }
   if (act === 'regen') return startStream({ regenerate: true })
   if (act === 'stop') return stopReply()
+  if (act === 'preview-reminders') {
+    btn.disabled = true
+    try { await refreshReminderPreview() } finally { btn.disabled = false }
+    return
+  }
+  if (act === 'topic-mute') {
+    const { topicKey } = btn.dataset
+    const conversationId = S.current
+    btn.disabled = true
+    try {
+      const result = await api('proactive/topic-mutes', { method: btn.dataset.muted === 'true' ? 'DELETE' : 'PUT',
+        body: { topicKey, ...(id ? { conversationId, messageId: id } : {}) } })
+      for (const m of S.conv?.messages ?? []) {
+        if (typeof m.topicMuted === 'boolean' && (m.companion?.selection ?? m.selection)?.topicKey === topicKey) m.topicMuted = result.muted
+      }
+      for (const b of $$('button[data-action="topic-mute"][data-id]')) {
+        if (b.dataset.topicKey !== topicKey) continue
+        b.dataset.muted = String(result.muted)
+        b.textContent = result.muted ? '取消静音' : topicKey.startsWith('companion:') ? '静音这类气泡' : '静音此话题'
+      }
+      toast(result.muted ? '话题已静音。你要求的目标仍会跟进。' : '已取消话题静音')
+      if (S.panel === 'proactive' && !$('#drawer').hidden) {
+        await refreshReminderPreview()
+        if (!id) $('[data-action="preview-reminders"]')?.focus()
+      }
+    } finally { btn.disabled = false }
+    return
+  }
   if (act === 'fb') {
     const signal = btn.dataset.signal
     const conversationId = S.current
@@ -3527,9 +3610,14 @@ async function handleAction(e) {
     return
   }
   if (act === 'look-now') {
-    await api('screen/capture', { method: 'POST', body: { reason: 'ui' } })
-    toast('已请求状态栏 App 立即感知一次（约 3–10 秒）')
-    setTimeout(() => renderMemoryPanel().catch(() => {}), 9000)
+    const result = await api('screen/capture', { method: 'POST', body: { reason: 'ui' } })
+    if (!result.requested) return toast('请先在设置中开启屏幕感知')
+    const capture = btn.closest('[data-screen-capture]')
+    if (capture) {
+      capture.dataset.screenCapture = 'pending'
+      btn.disabled = true
+      $('[role="status"]', capture).textContent = '等待状态栏 App 采集。'
+    }
     return
   }
   if (act === 'screen-digest') {
@@ -3694,7 +3782,7 @@ $('#composer').addEventListener('submit', (e) => {
   e.preventDefault()
   const text = $('#input').value.trim()
   if ((!text && !S.att.length) || S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return
-  if (!S.boot?.config?.upstreamConfigured) return toast('先连接模型，草稿会保留在这里', true)
+  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
   $('#input').value = ''
   localStorage.removeItem(`echo.draft.${S.current}`)
   autogrow()

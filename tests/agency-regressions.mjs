@@ -276,7 +276,20 @@ try {
   const persisted = (await getConversation('main')).messages.find((message) => message.id === suggestion.message.id)
   assert.equal(persisted.followUp.candidateLoopId, 'loop_visa')
 
-  const { contentFeedback, contentTopicKey } = await import('../lib/agency.mjs')
+  const { contentFeedback, contentTopicKey, setTopicMute } = await import('../lib/agency.mjs')
+  await reset({ dream: { at: now(), loops: [loop] } })
+  const mutedKey = contentTopicKey('proactive', loop.topic)
+  answer = async () => {
+    await setTopicMute(mutedKey, { label: loop.topic })
+    return goodDecision
+  }
+  assert.equal((await proactiveTick()).skipped, 'topic_muted', 'muting an in-flight topic prevents publication')
+  assert.equal((await readJSON(P.state)).proactive.queue.length, 0)
+  const requestedDraft = { ...preparation, trigger: 'requested' }
+  await reset({ commitments: [{ ...goal, title: loop.topic }], preparations: [requestedDraft], agency: { mutedTopics: { [mutedKey]: {} } } })
+  const callsBeforeDraft = calls
+  assert.equal((await proactiveTick()).message?.preparationId, preparation.id, 'requested work on a muted topic still delivers')
+  assert.equal(calls, callsBeforeDraft)
   const fixtureNow = Date.now()
   const oldVote = { reward: 0, kind: 'suggest', utilityAt: new Date(fixtureNow - 90 * 86400000).toISOString() }
   const aggregate = { agency: { learningVersion: 2, kinds: { suggest: { a: 1.6, b: 11.6 } }, outcomes: { oldVote } } }

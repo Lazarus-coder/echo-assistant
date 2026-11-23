@@ -10,7 +10,7 @@ Echo talks to whatever OpenAI-compatible endpoint you configure. There is no bun
 2. **Installer**: `./install.sh` asks for a base URL (with common presets) and reads `OPENAI_BASE_URL` / `OPENAI_API_KEY` from your login shell if present.
 3. **Manually**: put `OPENAI_API_KEY=…` and `OPENAI_BASE_URL=…` into `data/echo.env`, or export them in the environment that launches the service.
 
-Which endpoint works with what:
+A profile that names a custom key variable uses that variable exclusively. The wizard accepts a manual model ID when the endpoint cannot list models. Background work uses the configured utility model or the selected default.
 
 | Capability | Needs |
 |---|---|
@@ -27,7 +27,7 @@ What actually happens when it is on:
 
 - the menu-bar app (`EchoBar`) captures the screen on an interval;
 - **OCR runs on-device** (Apple Vision). By default only the *text* is sent to your model endpoint — the image never leaves the machine;
-- the camera-roll of screenshots is not kept: the temporary file is deleted right after the analysis;
+- the menu-bar app uses a unique temporary image inside the selected profile's private spool. It removes the image after processing. Maintenance can remove stale capture files left by an interruption.
 - capture is skipped while the screen is locked or the keyboard/mouse has been idle;
 - every capture path still has the same block-list you configure in *Settings → Screen awareness* (default: empty — your machine, your rules).
 
@@ -71,6 +71,8 @@ Rate a reminder's content with **有用** or **没用**, and its timing with **�
 
 When a suggestion is eligible, the local engine selects its topic and evidence. The wording request contains that selection and the communication preferences enabled for background use. Companion bubbles use one selected OCR excerpt. Proactive chat can use a recent activity summary from screen awareness when that feature is enabled. A saved preparation can be delivered directly. The decision uses no model calls when all candidates are held. The score expresses priority on a 0–1 scale.
 
+In **主动服务 → 预览候选提醒**, Echo shows up to three candidates using the same local ranking and timing checks as delivery. Viewing the preview makes no model request, consumes no notification budget and records no vote. A chat topic mute matches the normalized title, including across new source IDs. A companion mute matches a cue family, such as failed tests. You can undo either in the preview or on the original message. User-requested preparations retain their usual timing rules. Personal topic names come from currently available sources. An unavailable topic can still be unmuted by its saved entry and date.
+
 ## 4. Residency — `./install.sh`
 
 Echo is designed to stay running. `./install.sh` registers two launchd agents:
@@ -93,9 +95,9 @@ xcode-select --install      # only if you want the menu-bar app and lack swiftc
 
 ## 5. Network exposure
 
-- Default bind is `0.0.0.0:8787` so your phone on the same Wi-Fi can use it; **no password by default** (local personal use).
+- Fresh alpha.8 profiles listen on `127.0.0.1:8787`. The public alpha.6 installer defaults to all interfaces without a password.
 - On untrusted networks: `./bin/echo auth on` then `./bin/echo passwd`. Sessions are HttpOnly + SameSite=Strict; write requests additionally require a custom header that cross-site pages cannot forge.
-- To bind loopback only, set `bind: "local"` in `config.json` (or `ECHO_BIND=local`).
+- For phone access, enable password protection, set `"bind": "all"` in `config.json` and restart Echo. An explicit `ECHO_BIND` overrides the saved value.
 
 ## 6. Files on disk
 
@@ -131,7 +133,7 @@ User-confirmed official domains establish which sources may support a verified d
 - **屏幕录制**：默认不采集；只有 `deep` 档会开。开了以后本地 OCR、只发文字、截图即删、锁屏与空闲自动跳过、屏蔽名单你自己定。授权入口在状态栏图标的菜单里，授权后要重启一次图标进程。
 - **通知**：主动消息走 osascript，必要时在系统设置里允许。
 - **常驻**：`./install.sh` 注册 `com.echo.chat` + `com.echo.menubar` 两个 launchd 任务（登录自启、崩溃自动拉起）。
-- **网络**：默认监听 `0.0.0.0:8787` 且免登录；公共网络下用 `./bin/echo auth on` 开启口令。
+- **网络**：alpha.8 新资料默认仅在本机监听，公开的 alpha.6 默认监听所有接口。手机访问可先启用口令，再将 `bind` 设为 `all` 并重启。
 - **相处方式**：交流偏好与手动人物背景存在 `data/state.json`，随备份导出、“忘掉一切”清除。开启功能与记忆注入时，相关资料会发给所选模型；关闭或删除只影响后续请求，不抹去历史对话。此功能不增加通知，也不单独保存情绪档案。
 - **后台研究**：默认关闭，在本机单独开启。新对话与选定来源可能发给已配置的模型，搜索词发给搜索提供方；不自动读取邮箱或所有文件。只读工具不获得 Shell/MCP/外部写权限，通知仍受静默与预算控制。关闭会取消研究，“全部忘掉”清除文档和事务；睡眠期间不运行。
 - **工作区与 MCP**：本机显式开启；文件编辑检查哈希并保存前后快照；Shell/MCP 每次确认。Shell 以本机账号权限运行，并非操作系统沙箱。局域网对话不能调用本机工具。停止不等于撤销，重启不会重放；`data/runs/` 保存输出，“全部忘掉”会清除。

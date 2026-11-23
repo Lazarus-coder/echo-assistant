@@ -44,6 +44,7 @@ function renderMessage(m) {
         <button class="btn small ghost" data-signal="bad" aria-pressed="${m.feedback === 'bad'}">没用</button>
         <button class="btn small ghost" data-signal="good_time" aria-pressed="${timing === 'good_time'}">来得正好</button>
         <button class="btn small ghost" data-signal="wrong_time" aria-pressed="${timing === 'wrong_time'}">时机不合适</button>
+        ${typeof m.topicMuted === 'boolean' && m.companion.selection?.topicKey ? `<button class="btn small ghost" data-topic-key="${esc(m.companion.selection.topicKey)}" data-muted="${m.topicMuted}">${m.topicMuted ? '取消静音' : '静音这类气泡'}</button>` : ''}
         <span class="muted small" role="status"></span></fieldset>`
     }
   }
@@ -201,13 +202,21 @@ $('#input').addEventListener('keydown', (e) => {
   }
 })
 document.addEventListener('click', async (e) => {
-  const button = e.target.closest('button[data-signal]')
+  const button = e.target.closest('button[data-signal],button[data-topic-key]')
   const group = button?.closest('[data-feedback-message]')
   if (group && conversationId && !group.disabled && !button.disabled) {
     group.disabled = true
     const signal = button.dataset.signal
     const status = $('[role="status"]', group)
     try {
+      if (button.dataset.topicKey) {
+        const reply = await api('proactive/topic-mutes', { method: button.dataset.muted === 'true' ? 'DELETE' : 'PUT',
+          body: { topicKey: button.dataset.topicKey, conversationId, messageId: group.dataset.feedbackMessage } })
+        button.dataset.muted = String(reply.muted)
+        button.textContent = reply.muted ? '取消静音' : '静音这类气泡'
+        status.textContent = reply.muted ? '同类气泡已静音。' : '已取消静音。'
+        return
+      }
       const reply = await api('feedback', { method: 'POST', body: { signal, conversationId, messageId: group.dataset.feedbackMessage } })
       const saved = signal.endsWith('_time') ? reply.outcome?.timing : reply.outcome?.utility
       if (saved !== signal) throw new Error('无法确认反馈')

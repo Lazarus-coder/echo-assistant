@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,7 +10,7 @@ process.env.ECHO_DATA_DIR = sandbox
 process.env.ECHO_CONFIG = path.join(sandbox, 'config.json')
 process.env.ECHO_LOG_LEVEL = 'error'
 const { saveConfig, P } = await import('../lib/config.mjs')
-const { pruneStorage, storageStats } = await import('../lib/storage.mjs')
+const { privateCaptureSpool, pruneStorage, storageStats, sweepTempCaptures } = await import('../lib/storage.mjs')
 const shots = path.join(sandbox, 'screenshots')
 const MB = 1024 * 1024
 const originalRm = fs.rm
@@ -41,6 +42,43 @@ function failRemoval(t, paths) {
 }
 
 try {
+  await test('capture cleanup stays in its own profile and preserves active, unrelated and linked files', async (t) => {
+    const spool = path.join(sandbox, 'spool')
+    const peer = path.join(sandbox, 'other-profile', 'spool')
+    await fs.mkdir(peer, { recursive: true, mode: 0o750 })
+    await fs.mkdir(spool)
+    await fs.chmod(spool, 0o755)
+    assert.equal(await privateCaptureSpool(), spool)
+    assert.equal((await fs.stat(spool)).mode & 0o777, 0o700)
+    const name = 'capture-' + randomUUID() + '.jpg'
+    const peerFile = await file(peer, name, 2)
+    await file(spool, name, 2)
+    await file(spool, '.perm-probe-12345.jpg', 2)
+    await file(spool, '.perm-probe-' + randomUUID() + '.jpg', 2)
+    const active = await file(spool, 'capture-' + randomUUID() + '.jpg', 0)
+    const unknown = await file(spool, 'meeting-notes.jpg', 2)
+    const linked = path.join(spool, 'capture-' + randomUUID() + '.jpg')
+    await fs.symlink(peerFile, linked)
+    const read = fs.readdir, visits = []
+    t.mock.method(fs, 'readdir', async (dir, ...opts) => {
+      visits.push(dir)
+      assert.equal(dir, spool, 'maintenance must only enumerate the fixture profile')
+      return read(dir, ...opts)
+    })
+    assert.equal(await sweepTempCaptures(), 3)
+    assert.equal(await sweepTempCaptures(), 0)
+    assert.deepEqual(visits, [spool, spool])
+    await Promise.all([active, unknown, linked, peerFile].map((p) => fs.access(p)))
+    await fs.rename(spool, spool + '-saved')
+    await fs.symlink(peer, spool)
+    const before = (await fs.stat(peer)).mode
+    assert.equal(await sweepTempCaptures(), 0)
+    await assert.rejects(privateCaptureSpool)
+    assert.equal((await fs.stat(peer)).mode, before)
+    assert.deepEqual(visits, [spool, spool])
+    await fs.access(peerFile)
+  })
+
   for (const kind of ['screenshots', 'uploads']) {
     for (const phase of ['age', 'budget']) {
       await test(`${kind}: ${phase} cleanup counts only successful deletions and continues after failures`, async (t) => {

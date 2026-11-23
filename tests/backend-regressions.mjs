@@ -19,13 +19,30 @@ await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify({
 
 const { streamChat } = await import('../lib/upstream.mjs')
 const { loadConfig, saveConfig } = await import('../lib/config.mjs')
+const { bindAddress, describeListener } = await import('../lib/listener.mjs')
+await test('new profiles stay local and only an effective LAN listener advertises an address', async () => {
+  assert.equal((await loadConfig()).bind, 'local')
+  assert.equal(bindAddress('local', false, false), '127.0.0.1')
+  assert.equal(bindAddress('all', true, false), '127.0.0.1')
+  assert.equal(bindAddress('all', true, true), '0.0.0.0')
+  assert.equal(bindAddress('all', false, false), '0.0.0.0')
+  const port = 19444
+  const rows = (address) => [{ address, internal: false, family: 'IPv4' }]
+  const fixture = () => ({ en1: rows('192.0.2.3'), bridge0: rows('169.254.10.1'), en0: rows('192.0.2.2') })
+  assert.deepEqual(describeListener({ address: '0.0.0.0', port }, fixture), {
+    bind: 'all', address: '0.0.0.0', port, lanAddresses: ['192.0.2.2 (en0)', '192.0.2.3 (en1)'], lanUrl: 'http://192.0.2.2:19444',
+  })
+  assert.equal(describeListener({ address: '0.0.0.0', port }, () => ({})).lanUrl, null)
+  assert.equal(describeListener({ address: '127.0.0.1', port }, () => assert.fail('loopback needs no interface discovery')).lanUrl, null)
+})
+const { jsonTask, nativeSearch, upstreamChatWithImage } = await import('../lib/native.mjs')
 const store = await import('../lib/store.mjs')
 const { updateDigest } = await import('../lib/context.mjs')
 const { runTurn } = await import('../lib/chat.mjs')
 const { getRun } = await import('../lib/harness.mjs')
 const { webFetch } = await import('../lib/search.mjs')
 const { appendObservation, retrieve, readObservations } = await import('../lib/memory.mjs')
-const { ingestScreenEvent, setScreenConfig } = await import('../lib/screen.mjs')
+const { ingestScreenEvent, setScreenConfig, screenStatus, pruneScreenData, workingContext } = await import('../lib/screen.mjs')
 const { returnBrief } = await import('../lib/brief.mjs')
 const cfg = await loadConfig()
 const originalFetch = globalThis.fetch
@@ -60,6 +77,35 @@ async function seededConversation() {
 }
 
 try {
+  await test('background tasks use the configured provider, base path and model', async () => {
+    const requests = []
+    const oldFetch = globalThis.fetch
+    try {
+      await saveConfig({ upstream: { utilityModel: '' } })
+      globalThis.fetch = async (url, options) => {
+        const body = JSON.parse(options.body)
+        assert.equal(options.headers.authorization, 'Bearer local-test-only')
+        assert.equal(Object.hasOwn(body, 'enable_thinking'), false)
+        requests.push([url, body.model])
+        if (url.endsWith('/responses')) return Response.json({ output: [{ type: 'output_text', text: 'Fixture result' }] })
+        return Response.json({ choices: [{ message: { content: '{"ok":true}' } }] })
+      }
+      assert.equal((await jsonTask({ system: 'test', user: 'test' })).json.ok, true)
+      assert.equal((await nativeSearch('test')).answer, 'Fixture result')
+      assert.equal((await upstreamChatWithImage({ model: 'chosen-image', prompt: 'test', imageDataUrl: 'data:image/png;base64,YQ==' })).ok, true)
+      assert.deepEqual(requests, [
+        ['http://127.0.0.1:1/v1/chat/completions', 'test'],
+        ['http://127.0.0.1:1/v1/responses', 'test'],
+        ['http://127.0.0.1:1/v1/chat/completions', 'chosen-image'],
+      ])
+      await saveConfig({ upstream: { defaultModel: '' } })
+      await assert.rejects(jsonTask({ system: 'test', user: 'test' }), /模型 ID/)
+      assert.equal(requests.length, 3)
+    } finally {
+      await saveConfig({ upstream: { utilityModel: 'test', defaultModel: 'test' } })
+      globalThis.fetch = oldFetch
+    }
+  })
   await test('concurrent settings saves cannot undo a workspace permission revocation', async () => {
     await saveConfig({ harness: { enabled: true, allowShell: true } })
     await Promise.all([
@@ -366,6 +412,32 @@ try {
     assert.deepEqual(normalized.blocklist, [])
     assert.deepEqual(normalized.excludeTitlePatterns, [])
     await saveConfig({ screen: { enabled: false } })
+  })
+
+  await test('sensitive classifications mask provider text at ingestion, on legacy reads and on disk', async () => {
+    const secret = 'SYNTHETIC-PRIVATE-CUE'
+    const output = { sensitive: true, activity: secret, app: secret, topic: secret, progress: secret, note: secret,
+      extra: secret, signals: [{ text: secret, importance: 5 }] }
+    globalThis.fetch = async () => Response.json({ choices: [{ message: { content: JSON.stringify(output) } }] })
+    await setScreenConfig({ enabled: true, keepImages: true })
+    const file = path.join(sandbox, 'memory', 'working.jsonl')
+    try {
+      const result = await ingestScreenEvent({ text: secret, app: secret, title: secret })
+      assert.equal(result.event.activity, '处理敏感信息')
+      assert.deepEqual(result.written, [])
+      assert.equal(JSON.stringify(result).includes(secret), false)
+      assert.equal((await fs.readFile(file, 'utf8')).includes(secret), false)
+      await fs.appendFile(file, JSON.stringify({ ...output, id: 'legacy', ts: new Date().toISOString(), image: secret }) + '\n')
+      const status = await screenStatus()
+      assert.equal(status.keepImages, false)
+      assert.equal(status.events[0].id, 'legacy')
+      assert.equal(JSON.stringify(status).includes(secret), false)
+      assert.equal(JSON.stringify(await workingContext()).includes(secret), false)
+      await pruneScreenData()
+      assert.equal((await fs.readFile(file, 'utf8')).includes(secret), false)
+    } finally {
+      await setScreenConfig({ enabled: false, keepImages: false })
+    }
   })
 
   await test('return brief aggregates what happened while the user was away', async () => {

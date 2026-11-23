@@ -121,13 +121,7 @@ async function bootSandbox() {
     await fs.writeFile(path.join(sandbox, 'echo.env'), raw, { mode: 0o600 })
   } catch {}
   baselineEnvRaw = await fs.readFile(path.join(sandbox, 'echo.env'), 'utf8').catch(() => '')
-  child = spawn(process.execPath, ['--input-type=module', '-e', `
-    import { promises as fs } from 'node:fs'
-    const readdir = fs.readdir
-    // ECHO_DATA_DIR does not redirect the installed app's shared captures.
-    fs.readdir = (dir, ...args) => dir === '/tmp/echo-capture' ? Promise.resolve([]) : readdir(dir, ...args)
-    await import(${JSON.stringify(new URL('../server.mjs', import.meta.url).href)})
-  `], {
+  child = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], {
     cwd: ROOT,
     env: {
       ...(LIVE ? process.env : { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, ECHO_CONFIG: process.env.ECHO_CONFIG }),
@@ -942,13 +936,17 @@ async function trackCompanion() {
   const conv = opened.json?.conversationId ? await req(`/api/conversations/${opened.json.conversationId}`) : null
   check('J', '点开气泡会建一个聚焦该话题的小会话', Boolean(opened.json?.conversationId) && /伴随/.test(conv?.json?.title ?? '') && (conv?.json?.messages?.[0]?.content ?? '').includes('桩气泡'), `标题=${conv?.json?.title}`)
 
-  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 0 } }, null, 2))
-  const b2 = await req('/api/companion/frame', { method: 'POST', body: { text: '另一个场景的内容：VS Code 里 deploy.sh 的 timeout 30 太短，日志显示 step 3 直接 exit 124，需要改成 60。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
-  for (let i = 0; i < 3; i++) await req(`/api/companion/${b2.json?.bubble?.id}/dismiss`, { method: 'POST', body: { reason: 'selftest' } })
-  await fs.writeFile(path.join(sandbox, 'state.json'), JSON.stringify({ companion: { lastFrameText: '', lastBubbleAt: null, dismissStreak: 3 } }, null, 2))
+  const dismissIds = []
+  for (let i = 1; i <= 3; i++) {
+    await fs.writeFile(path.join(sandbox, 'state.json'), '{}')
+    const frame = await req('/api/companion/frame', { method: 'POST', body: { text: `另一个场景的内容：VS Code 里 deploy.sh 的 timeout 太短，日志显示 step ${i} 直接 exit 124，需要核对。 `, app: 'X', title: 'Y', hidIdleSeconds: 1 } })
+    dismissIds.push(frame.json?.bubble?.id)
+  }
+  await fs.writeFile(path.join(sandbox, 'state.json'), '{}')
+  for (const id of dismissIds) await req(`/api/companion/${id}/dismiss`, { method: 'POST', body: { reason: 'selftest' } })
   const backedOff = await req('/api/companion/frame', { method: 'POST', body: { text: '他连续忽略了三次气泡，这时候应该安静下来而不是继续冒泡，哪怕屏幕内容又变了也不该开口。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })
   const st = await req('/api/companion')
-  check('J', '连续被忽略后自动进入冷却（不再冒泡）', backedOff.json?.skipped === 'dismiss_backoff' && Boolean(st.json?.pausedUntil), `skipped=${backedOff.json?.skipped}`)
+  check('J', '连续被忽略后自动进入冷却（不再冒泡）', new Set(dismissIds).size === 3 && backedOff.json?.skipped === 'dismiss_backoff' && Boolean(st.json?.pausedUntil), `skipped=${backedOff.json?.skipped}`)
 
   const paused = await req('/api/companion/pause', { method: 'POST', body: { minutes: 15 } })
   const pausedFrame = await req('/api/companion/frame', { method: 'POST', body: { text: '暂停期间不应该有任何动作：这段文字足够长，确保不是被长度门槛挡下的，而是真的因为暂停。', app: 'X', title: 'Y', hidIdleSeconds: 1 } })

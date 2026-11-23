@@ -227,6 +227,19 @@ test('timing status explains local rules separately from model content and honor
   assert.match(render(), /常聊的时段快到了/)
 })
 
+test('a read-only preview explains holds and offers reversible optional topics', () => {
+  const h = harness()
+  h.context.sample = { enabled: true, items: [
+    { topicKey: 'proactive:one', label: 'Draft <rent>', reasons: ['Due soon'], score: 0.86, requested: false, reason: 'quiet_hours' },
+    { topicKey: 'proactive:two', label: 'Requested', reasons: [], score: 0.96, requested: true, reason: 'ok' },
+  ], muted: [{ topicKey: 'companion:three', label: 'Code <example>', addedAt: '2026-11-01' }] }
+  const html = h.run('previewHtml(sample)')
+  assert.match(html, /Draft &lt;rent&gt;[\s\S]*静默时段[\s\S]*Due soon/)
+  assert.match(html, /data-topic-key="proactive:one" data-muted="false"/)
+  assert.doesNotMatch(html, /data-topic-key="proactive:two"|<example>/)
+  assert.match(html, /data-topic-key="companion:three" data-muted="true"/)
+})
+
 test('a local selection shows preset and effective parameters, its evidence and the separate wording outcome', () => {
   const h = harness()
   h.context.state = {
@@ -361,6 +374,27 @@ test('changing wizard endpoints clears credentials and discards pending discover
   assert.equal(h.run('W.test'), null)
   assert.equal(h.run('W.models.length'), 0)
   assert.equal(h.run('W.defaultModel'), '')
+})
+
+test('BYOK discovery keeps the choice open when the account has several models', async () => {
+  const h = harness()
+  const wizard = h.get('#wizard')
+  const button = element()
+  button.dataset.w = 'test'
+  wizard.querySelectorAll = (selector) => selector === '[data-w]' ? [button] : []
+  wizard.querySelector = h.get
+  h.get('#wBase').value = 'https://custom.invalid/team/v1'
+  h.get('#wKey').value = ''
+  h.run(`Object.assign(W, { open: true, step: 0, baseUrl: 'https://custom.invalid/team/v1', defaultModel: '',
+    catalog: { upstream: [{baseUrl:'https://preset.invalid/v1',label:'Preset'}, {baseUrl:'',label:'Custom'}],
+    onboarding: { hasKey: true, baseUrl: 'https://custom.invalid/team/v1' } } });
+    api = async () => ({ok:true,count:2,models:['embedding','chat']}); renderWizard = () => {}; bindWizard()`)
+  assert.match(h.run('stepEndpoint()'), /<option value="" selected>Custom/)
+  assert.match(h.run('stepEndpoint()'), /沿用此端点已配置的密钥/)
+  await button.dispatch('click')
+  assert.equal(h.run('W.discovered'), true)
+  assert.equal(h.run('W.defaultModel'), '')
+  assert.match(h.run('stepModels()'), /value="chat"/)
 })
 
 test('polish controls do not implicitly submit the composer', () => {
@@ -746,6 +780,7 @@ test('composer enables sending only when a configured conversation has content a
   for (const [change, restore, reason] of [
     ['S.current = null', 'S.current = "current"', 'No selected conversation'],
     ['S.boot.config.upstreamConfigured = false', 'S.boot.config.upstreamConfigured = true', 'Model endpoint needs setup'],
+    ['S.boot.config.onboarding = { usable: false }', 'S.boot.config.onboarding = { usable: true }', 'A credential alone does not supply a default chat model'],
     ['S.stream = {}', 'S.stream = null', 'Reply is streaming'],
     ['S.selecting = Symbol()', 'S.selecting = null', 'Conversation is loading'],
     ['S.preparing = true', 'S.preparing = false', 'Another message is being prepared'],
@@ -1074,6 +1109,14 @@ test('an image that finishes processing after switching stays with its original 
   await h.run('selectConv("original")')
   assert.equal(h.get('#input').value, 'Original draft')
   assert.equal(h.run('S.att[0].name'), 'original.png', 'The completed image is available when returning to its draft')
+})
+
+test('screen status distinguishes a pending request, source mode, missing permission and an expired request', () => {
+  const h = harness()
+  const render = (screen) => h.run(`screenBlock(${JSON.stringify({ screen, storage: { screenshots: {}, uploads: {} } })})`)
+  assert.match(render({ mode: 'image', captureRequested: true }), /截图发送给模型[\s\S]*等待状态栏 App 采集[\s\S]*data-action="look-now" disabled/)
+  assert.match(render({ lastOk: false, permissionMissing: true }), /开启屏幕录制权限/)
+  assert.match(render({ captureExpired: true }), /这次请求已过期/)
 })
 
 test('background polling preserves inline edits before and during each network request', async () => {

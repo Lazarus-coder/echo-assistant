@@ -25,12 +25,21 @@ private final class BubblePollFixture: URLProtocol {
 struct CompanionUITest {
     static func main() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let data = root.appendingPathComponent("data")
+        let data = root.appendingPathComponent("custom profile")
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try "native-test-token\n".write(to: data.appendingPathComponent("local.token"), atomically: true, encoding: .utf8)
         setenv("ECHO_ROOT", root.path, 1)
+        setenv("ECHO_DATA_DIR", data.path, 1)
         setenv("ECHO_PORT", "1", 1)
+        let first = try temporaryCaptureFile(), second = try temporaryCaptureFile()
+        let spool = data.appendingPathComponent("spool", isDirectory: true)
+        precondition(first.deletingLastPathComponent().path == spool.path && first != second)
+        let permissions = try FileManager.default.attributesOfItem(atPath: spool.path)[.posixPermissions] as? NSNumber
+        precondition(permissions?.intValue == 0o700)
+        try FileManager.default.removeItem(at: spool)
+        try FileManager.default.createSymbolicLink(at: spool, withDestinationURL: root)
+        precondition((try? temporaryCaptureFile()) == nil, "Capture directories must stay within this profile")
         let controller = Controller()
         precondition(URLProtocol.registerClass(BubblePollFixture.self))
         BubblePollFixture.expectedSince = controller.bubbleSince

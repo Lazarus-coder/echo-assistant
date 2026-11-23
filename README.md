@@ -19,7 +19,7 @@ research you choose to enable, and tools for the work in front of you.
 
 Echo brings conversations, personal context, and ongoing goals into one place. Start with a question, keep what matters, and return to a clear next step. Choose your own compatible model endpoint and API key; Echo runs on your Mac and stores its records there.
 
-**Which version has follow-ups?** The public alpha.6 installer supports goals through the **主动服务** panel. Chat-created goals, one-click adoption and the return brief are available in the current source. [Source setup](docs/development.md#requirements-and-source-setup)
+**Which version has these features?** The public alpha.6 installer supports goals through the **主动服务** panel. The alpha.8 source and local Mac build also include chat-created goals, one-click adoption, the return brief and the reminder preview. [Alpha.8 notes](docs/release-notes-0.1.0-alpha.8.md) · [Source setup](docs/development.md#requirements-and-source-setup)
 
 ## Made for work that continues
 
@@ -39,6 +39,8 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 
 **Teach Echo what to bring up, and when.** In the current source, Quiet, Balanced and Engaged set starting values for spacing, waiting for a usual chat window, and the minimum content score. Each personal profile adapts from actual chats and explicit feedback. **有用 / 没用** rates the content. **来得正好 / 时机不合适** rates its timing. Before any wording request, a local engine picks one eligible topic and its evidence. You can inspect the reasons on the message and the starting and effective parameters in **主动服务 → 打扰时机与反馈学习**.
 
+**Preview what Echo would send.** Open **主动服务 → 预览候选提醒** to see up to three candidates, their ranking, and anything delaying them. Mute a topic there or on a delivered suggestion. Other topics can still surface, and a draft you explicitly requested retains its priority. Companion mini-chat offers the same control for a particular kind of screen cue. Previewing uses no model calls.
+
 **Optional screen context.** Screen awareness and companion mode start off. If you enable them and grant macOS Screen Recording permission, Echo can use recent screen context and offer brief suggestions. Selecting the deep memory profile also enables screen awareness. Capture can be paused from the menu bar.
 
 ## Know what you are sharing
@@ -52,7 +54,7 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 
 Screen capture uses on-device OCR by default; extracted text can be sent to your model. Image mode can send screenshots. Local workspace execution and approvals are available only on the host Mac.
 
-Echo can also expose chat to your local network, with no password by default. Enable password protection or restrict access to this Mac before using it on a shared network. See the [permissions and data guide](docs/permissions.md) for the full controls.
+New alpha.8 profiles listen on this Mac by default. The public alpha.6 installer defaults to LAN access without a password. Explicit network settings carry over on upgrade. [Network controls](docs/permissions.md#5-network-exposure)
 
 ## Start with Echo
 

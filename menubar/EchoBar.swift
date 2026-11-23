@@ -7,14 +7,29 @@ import Vision
 
 let env = ProcessInfo.processInfo.environment
 let rootPath = env["ECHO_ROOT"] ?? FileManager.default.currentDirectoryPath
+let profileData = URL(fileURLWithPath: env["ECHO_DATA_DIR"].flatMap { $0.isEmpty ? nil : $0 } ?? rootPath + "/data",
+                      isDirectory: true).standardizedFileURL
 let port = env["ECHO_PORT"] ?? "8787"
 let base = URL(string: "http://127.0.0.1:\(port)")!
 let serviceLabel = env["ECHO_SERVICE"] ?? "com.echo.chat"
 
 func localToken() -> String {
-    let path = rootPath + "/data/local.token"
-    return (try? String(contentsOfFile: path, encoding: .utf8))?
+    return (try? String(contentsOf: profileData.appendingPathComponent("local.token"), encoding: .utf8))?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+}
+
+func temporaryCaptureFile() throws -> URL {
+    let spool = profileData.appendingPathComponent("spool", isDirectory: true)
+    let fm = FileManager.default
+    do {
+        try fm.createDirectory(at: spool, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    } catch CocoaError.fileWriteFileExists { }
+    let attributes = try fm.attributesOfItem(atPath: spool.path)
+    guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw CocoaError(.fileWriteNoPermission) }
+    if (attributes[.posixPermissions] as? NSNumber)?.intValue != 0o700 {
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: spool.path)
+    }
+    return spool.appendingPathComponent("capture-\(UUID().uuidString).jpg")
 }
 
 struct Summary {
@@ -34,7 +49,6 @@ struct Summary {
     var screenInterval = 5
     var screenIdleSkip = 180
     var captureRequested = false
-    var captureReason: String?
     var screenActivity: String?
     var screenApp: String?
     var fading = 0
@@ -50,6 +64,7 @@ struct Summary {
         proactiveToday = j["proactiveToday"] as? Int ?? 0
         loops = j["loops"] as? Int ?? 0
         busy = j["busy"] as? Int ?? 0
+        if let listener = j["listener"] as? [String: Any] { lanURL = listener["lanUrl"] as? String ?? "" }
         dreamLastAt = j["dreamLastAt"] as? String
         lastPreview = (j["lastPreview"] as? String ?? "").replacingOccurrences(of: "\n", with: " ")
         if let m = j["memory"] as? [String: Any] { memoryCount = m["observations"] as? Int ?? 0 }
@@ -60,7 +75,6 @@ struct Summary {
             screenInterval = s["intervalMinutes"] as? Int ?? 5
             screenIdleSkip = s["idleSkipSeconds"] as? Int ?? 180
             captureRequested = s["captureRequested"] as? Bool ?? false
-            captureReason = s["captureReason"] as? String
             screenActivity = s["activity"] as? String
             screenApp = s["app"] as? String
         }
@@ -183,25 +197,6 @@ func request(_ path: String, query: [URLQueryItem] = [], method: String = "GET",
     }.resume()
 }
 
-func lanAddress() -> String {
-    var address = ""
-    var ifaddr: UnsafeMutablePointer<ifaddrs>?
-    guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return "" }
-    defer { freeifaddrs(ifaddr) }
-    for ptr in sequence(first: first, next: { $0.pointee.ifa_next }) {
-        let ifa = ptr.pointee
-        guard ifa.ifa_addr.pointee.sa_family == UInt8(AF_INET) else { continue }
-        let name = String(cString: ifa.ifa_name)
-        guard name == "en0" || name == "en1" else { continue }
-        var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        if getnameinfo(ifa.ifa_addr, socklen_t(ifa.ifa_addr.pointee.sa_len), &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 {
-            address = String(cString: buf)
-            break
-        }
-    }
-    return address
-}
-
 func glyph(unread: Int) -> NSImage {
     let size = NSSize(width: 21, height: 18)
     let img = NSImage(size: size)
@@ -266,14 +261,22 @@ final class Controller: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /** 定期（或被要求时）看一眼屏幕：本地 OCR，图片不落盘，删掉临时文件。 */
-    func maybeCapture(force: Bool, reason: String, companion: Bool = false) {
+    /** 按需截屏并在本机识别文字，处理完立即删除暂存图像。 */
+    func maybeCapture(force: Bool, companion: Bool = false) {
         if companion {
             guard summary.ok, summary.companionOn, !summary.companionPaused, !capturing else { return }
         } else {
             guard summary.ok, summary.screenOn, !capturing else { return }
         }
-        guard screenPermission() else { return }
+        guard screenPermission() else {
+            if force && !companion {
+                capturing = true
+                request("screen", method: "POST", body: ["fromCapture": true, "captureFailed": true, "captureIssue": "screen_permission_required"]) { [weak self] _ in
+                    DispatchQueue.main.async { self?.capturing = false }
+                }
+            }
+            return
+        }
         if sessionLocked() { return }
         let idle = hidIdleSeconds()
         if idle > summary.screenIdleSkip { return }
@@ -281,13 +284,22 @@ final class Controller: NSObject, NSApplicationDelegate {
         capturing = true
         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
         let title = frontmostWindowTitle()
+        let capturedAt = Date().ISO8601Format(.init(includingFractionalSeconds: true))
         let mode = summary.screenMode
-        let tmp = NSTemporaryDirectory() + "echo-capture-\(Int(Date().timeIntervalSince1970)).jpg"
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let ok = runSync("/usr/sbin/screencapture", ["-x", "-t", "jpg", tmp], timeout: 25)
-            defer { try? FileManager.default.removeItem(atPath: tmp) }
-            var body: [String: Any] = ["text": "", "app": appName, "title": title, "hidIdleSeconds": idle, "fromCapture": true]
-            if ok, let img = NSImage(contentsOfFile: tmp) {
+            let tmp = try? temporaryCaptureFile()
+            defer { if let tmp { try? FileManager.default.removeItem(at: tmp) } }
+            let img = tmp.flatMap { file -> NSImage? in
+                guard runSync("/usr/sbin/screencapture", ["-x", "-t", "jpg", file.path], timeout: 25) else { return nil }
+                return NSImage(contentsOf: file)
+            }
+            let ok = img != nil
+            var body: [String: Any] = ["fromCapture": true, "captureFailed": !ok]
+            if companion { body["ts"] = capturedAt }
+            if let img {
+                body["app"] = appName
+                body["title"] = title
+                body["hidIdleSeconds"] = idle
                 body["text"] = String(ocr(downscale(img, maxEdge: 2200)).prefix(8000))
                 if !companion, mode == "image", let b64 = jpegBase64(img) { body["image"] = "data:image/jpeg;base64," + b64 }
             }
@@ -295,11 +307,10 @@ final class Controller: NSObject, NSApplicationDelegate {
             request(endpoint, method: "POST", body: body, timeout: 240) { json in
                 DispatchQueue.main.async {
                     self?.capturing = false
-                    let activity = ((json?["event"] as? [String: Any])?["activity"] as? String) ?? ""
-                    let skipped = json?["skipped"] as? String
-                    let bubble = (json?["bubble"] as? [String: Any])?["bubble"] as? String
-                    print("[capture:\(endpoint)] \(reason) ok=\(ok) activity=\(activity) skipped=\(skipped ?? "-") bubble=\(bubble ?? "-")")
-                    if force || bubble != nil { self?.refresh() }
+                    let skipped = (json?["skipped"] as? String)?.components(separatedBy: ":").first
+                    let hasBubble = json?["bubble"] is [String: Any]
+                    print("[capture:\(endpoint)] ok=\(ok) skipped=\(skipped ?? "-") bubble=\(hasBubble)")
+                    if force || hasBubble { self?.refresh() }
                 }
             }
         }
@@ -332,17 +343,17 @@ final class Controller: NSObject, NSApplicationDelegate {
                 ? "Echo 运行中 · 未读 \(self.summary.unread) · 今日主动 \(self.summary.proactiveToday)"
                 : "Echo 未运行（点菜单里的重启服务）"
             if self.summary.unread > prev.unread, self.summary.ok {
-                print("[menubar] 新主动消息：\(self.summary.lastPreview)")
+                print("[menubar] 未读消息：\(self.summary.unread)")
             }
             self.rebuildMenu()
             if self.summary.companionOn, !self.summary.companionPaused { self.pollBubbles() }
             if self.summary.captureRequested {
-                self.maybeCapture(force: true, reason: self.summary.captureReason ?? "requested")
+                self.maybeCapture(force: true)
             } else {
-                self.maybeCapture(force: false, reason: "interval")
+                self.maybeCapture(force: false)
             }
             if self.summary.companionOn, !self.summary.companionPaused {
-                self.maybeCapture(force: false, reason: "companion", companion: true)
+                self.maybeCapture(force: false, companion: true)
             }
         }
     }
@@ -370,7 +381,7 @@ final class Controller: NSObject, NSApplicationDelegate {
                     why: item["why"] as? String ?? ""
                 )
             }.filter { !$0.id.isEmpty }
-            print("[companion] presenting \(bubbles.count) bubble(s): \(bubbles.map { $0.text }.joined(separator: " | "))")
+            print("[companion] presenting \(bubbles.count) bubble(s)")
             self.overlay.present(
                 bubbles,
                 onOpen: { b in
@@ -424,7 +435,7 @@ final class Controller: NSObject, NSApplicationDelegate {
             line.isEnabled = false
             menu.addItem(line)
         }
-        menu.addItem(mk("现在看一眼（立即感知一次）", #selector(lookNow)))
+        if s.screenOn { menu.addItem(mk("现在看一眼（立即感知一次）", #selector(lookNow))) }
         menu.addItem(.separator())
         menu.addItem(mk(summary.companionOn ? "伴随模式：开（每 \(summary.companionInterval) 秒看一眼）" : "伴随模式：关", #selector(toggleCompanion)))
         if summary.companionOn {
@@ -448,10 +459,9 @@ final class Controller: NSObject, NSApplicationDelegate {
         menu.addItem(mk(s.proactiveOn ? "暂停主动服务" : "恢复主动服务", #selector(toggleProactive)))
         menu.addItem(.separator())
 
-        let lan = lanAddress()
-        if !lan.isEmpty {
-            let copy = mk("复制手机访问地址（局域网 \(lan)）", #selector(copyLAN))
-            copy.representedObject = "http://\(lan):\(port)"
+        if !summary.lanURL.isEmpty {
+            let copy = mk("复制手机访问地址（\(summary.lanURL)）", #selector(copyLAN))
+            copy.representedObject = summary.lanURL
             menu.addItem(copy)
         }
         menu.addItem(mk("打开日志目录", #selector(openLogs)))
@@ -477,7 +487,7 @@ final class Controller: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func lookNow() { maybeCapture(force: true, reason: "manual") }
+    @objc func lookNow() { maybeCapture(force: true) }
 
     @objc func toggleCompanion() {
         let want = !summary.companionOn
@@ -535,7 +545,7 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     @objc func openLogs() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: rootPath + "/data/logs"))
+        NSWorkspace.shared.open(profileData.appendingPathComponent("logs", isDirectory: true))
     }
 
     @objc func restartService() {

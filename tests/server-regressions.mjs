@@ -51,10 +51,10 @@ try {
     await fs.cp(path.join(root, entry), path.join(install, entry), { recursive: true })
   }
   await fs.symlink(path.join(root, 'node_modules'), path.join(install, 'node_modules'), 'dir')
-  await fs.writeFile(path.join(dataDir, 'echo.env'), 'OPENAI_BASE_URL=https://model.invalid/v1\nECHO_SERVER_TEST_KEY=local-test-only\n', { mode: 0o600 })
+  await fs.writeFile(path.join(dataDir, 'echo.env'), '# User entry\nexport ECHO_OTHER_SERVICE="other-fixture"\nOPENAI_BASE_URL=https://model.invalid/v1\nECHO_SERVER_TEST_KEY=local-test-only\n', { mode: 0o600 })
   const config = path.join(install, 'config.json')
   await fs.writeFile(config, JSON.stringify({
-    requirePassword: false,
+    bind: 'all', requirePassword: false,
     dream: { enabled: false }, proactive: { enabled: false, research: { enabled: false } },
     memory: { enabled: true, inject: false, extract: true, extractMinChars: 1 },
     screen: { enabled: false }, companion: { enabled: false },
@@ -87,9 +87,6 @@ try {
   const base = `http://127.0.0.1:${port}`
   app = spawn(process.execPath, ['--input-type=module', '-e', `
     import { promises as fs } from 'node:fs'
-    const readdir = fs.readdir
-    // Startup cleanup must not inspect the running user's shared capture directory.
-    fs.readdir = (dir, ...args) => dir === '/tmp/echo-capture' ? Promise.resolve([]) : readdir(dir, ...args)
     globalThis.fetch = async (url, { body: raw, headers, signal }) => {
       const expectedKey = new URL(url).hostname === 'model.invalid' ? 'local-test-only' : 'new-fixture-key'
       if (headers.authorization !== 'Bearer ' + expectedKey) throw new Error('Wrong fixture credential for endpoint')
@@ -153,6 +150,21 @@ try {
     assert.ok((await fs.stat(path.join(dataDir, 'conversations', 'main.json'))).isFile())
   })
 
+  await test('settings, permissions, CLI health and menu summary report the loopback override and live port', async () => {
+    const runtime = { bind: 'local', address: '127.0.0.1', port, lanAddresses: [], lanUrl: null }
+    const get = async (route) => (await fetch(base + '/api/' + route)).json()
+    const { config } = await get('settings')
+    assert.equal(config.bind, 'all', 'the saved LAN preference survives a loopback-only launch')
+    assert.deepEqual(config.listener, runtime)
+    assert.deepEqual((await get('summary')).listener, runtime)
+    assert.deepEqual((await get('health')).listener, { address: '127.0.0.1', port })
+    const permissions = await get('permissions')
+    assert.match(permissions.bind, /127\.0\.0\.1/)
+    assert.equal(permissions.port, port)
+    assert.deepEqual(permissions.lanAddresses, [])
+    assert.equal(permissions.lanUrl, null)
+  })
+
   for (const host of ['[', 'localhost:invalid', 'bad%host']) {
     await test(`malformed Host ${host} returns 400 and leaves the server healthy`, async () => {
       const response = await rawRequest(port, '/api/health', host)
@@ -184,6 +196,43 @@ try {
     method: 'PATCH', headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
   })
+  await test('settings reject non-object JSON without updating the profile', async () => {
+    const before = await fs.readFile(config, 'utf8')
+    for (const value of [null, [], false, 'model']) {
+      assert.equal((await patch('settings', value)).status, 400)
+    }
+    assert.equal(await fs.readFile(config, 'utf8'), before)
+  })
+  await test('a failed native capture resolves the pending request without creating an event or invoking a provider', async () => {
+    const before = await jsonLines(requestsFile)
+    const status = async () => (await (await fetch(`${base}/api/screen`)).json()).screen
+    assert.equal((await (await post('screen/capture', { reason: 'fixture' })).json()).requested, false)
+    await patch('screen', { enabled: true })
+    try {
+      assert.equal((await (await post('screen/capture', { reason: 'fixture' })).json()).requested, true)
+      assert.equal((await status()).captureRequested, true)
+      const stateFile = path.join(dataDir, 'state.json')
+      const state = JSON.parse(await fs.readFile(stateFile))
+      state.screen.requestedAt = new Date(Date.now() - 180000).toISOString()
+      await fs.writeFile(stateFile, JSON.stringify(state))
+      assert.equal((await status()).captureExpired, true)
+      assert.equal((await status()).captureRequested, false)
+      for (const issue of ['screen_permission_required', 'capture_failed']) {
+        await post('screen/capture', { reason: 'fixture' })
+        const failed = await (await post('screen', { fromCapture: true, captureFailed: true, captureIssue: issue })).json()
+        assert.equal(failed.skipped, issue)
+        const screen = await status()
+        assert.equal(screen.captureRequested, false)
+        assert.equal(screen.permissionMissing, issue === 'screen_permission_required')
+        assert.equal(screen.lastOk, false)
+        assert.equal(screen.workingCount, 0)
+      }
+      assert.deepEqual(await jsonLines(requestsFile), before)
+    } finally {
+      await patch('screen', { enabled: false })
+    }
+  })
+
   await test('reply memory inspection resolves only unchanged active facts without model calls or memory writes', async () => {
     const conv = await (await post('conversations', {})).json()
     const recorded = ['kept', 'changed', 'deleted', 'faded', 'missing'].map((label) => ({ id: 'fact_' + label, kind: 'fact', text: label + ' at retrieval' }))
@@ -342,17 +391,72 @@ try {
     assert.equal((await discover({ baseUrl: oldBase })).ok, true)
     assert.equal((await discover({ baseUrl: newBase })).ok, false)
     assert.equal((await post('onboarding/complete', { baseUrl: newBase, defaultModel: 'manual-chat' })).status, 400)
+    const malformed = await post('onboarding/complete', { baseUrl: newBase, apiKey: 'new-fixture-key', defaultModel: 'manual-chat', models: [null] })
+    assert.equal(malformed.status, 400)
+    assert.equal((await (await fetch(base + '/api/providers')).json()).onboarding.baseUrl, oldBase)
     assert.deepEqual(await jsonLines(discoveryFile), [oldBase + '/models'])
     const connection = { baseUrl: newBase, apiKey: 'new-fixture-key', defaultModel: 'manual-chat', models: [] }
+    const conversation = await (await post('conversations', { model: 'retired-model' })).json()
     assert.equal((await discover(connection)).ok, true)
     const saved = await (await post('onboarding/complete', connection)).json()
     assert.equal(saved.onboarding.baseUrl, newBase)
     assert.deepEqual(saved.config.models.map((model) => model.id), ['manual-chat'])
-    const conversation = await (await post('conversations', {})).json()
     await (await post('chat', { conversationId: conversation.id, userText: 'provider switched' })).text()
     assert.ok((await jsonLines(requestsFile)).some((req) => req.stream && req.endpoint === newBase + '/chat/completions' && req.model === 'manual-chat'))
     const env = await fs.readFile(path.join(dataDir, 'echo.env'), 'utf8')
     assert.ok(env.includes('OPENAI_BASE_URL=' + newBase + '\n') && env.includes('ECHO_SERVER_TEST_KEY=new-fixture-key\n'))
+    assert.ok(env.includes('# User entry\nexport ECHO_OTHER_SERVICE="other-fixture"\n'))
+  })
+
+  await test('BYOK setup detects lost credentials and preserves custom choices on repair without probing a provider', async () => {
+    const initial = (await (await fetch(base + '/api/bootstrap')).json()).config
+    const discoveryCount = (await jsonLines(discoveryFile)).length
+    await patch('settings', { env: { OPENAI_API_KEY: 'unrelated-fixture-key', ECHO_SERVER_TEST_KEY: '' } })
+    const broken = (await (await fetch(base + '/api/providers')).json()).onboarding
+    assert.equal(broken.completed, true)
+    assert.equal(broken.hasKey, false, 'a named provider key must never borrow another credential')
+    assert.equal(broken.needed, true)
+    assert.equal((await post('onboarding/complete', { defaultModel: 'manual-chat' })).status, 400)
+    const repaired = await (await post('onboarding/complete', { apiKey: 'new-fixture-key', profile: initial.memory.profile })).json()
+    assert.equal(repaired.onboarding.usable, true)
+    assert.equal(repaired.config.proactive.enabled, initial.proactive.enabled)
+    assert.equal(repaired.config.memory.inject, initial.memory.inject)
+    assert.equal((await jsonLines(discoveryFile)).length, discoveryCount)
+    await patch('settings', { env: { OPENAI_API_KEY: '' } })
+  })
+
+  await test('settings pair model endpoint changes with provider keys and reject unrelated variables before saving', async () => {
+    const file = path.join(dataDir, 'echo.env')
+    const original = await fs.readFile(file, 'utf8')
+    const before = (await (await fetch(base + '/api/settings')).json()).config
+    const next = 'https://model.invalid/v1'
+    for (const changes of [
+      { config: { upstream: { baseUrl: next } } },
+      { env: { OPENAI_BASE_URL: next } },
+      { env: { ECHO_UNRELATED_TEST_OPTION: 'fixture' } },
+      { config: { upstream: { apiKeyEnv: 'ECHO_UNRELATED_TEST_KEY' } } },
+      { config: { search: { providers: { tavily: { endpoint: 'https://new-search.invalid/v1' } } } } },
+      { config: { upstream: { models: [null] } }, env: { ECHO_SERVER_TEST_KEY: 'temporary-test-value' } },
+    ]) {
+      const response = await patch('settings', { ...changes, config: { ...changes.config, systemPrompt: 'partial fixture' } })
+      assert.equal(response.status, 400)
+      assert.equal(await fs.readFile(file, 'utf8'), original)
+      assert.equal((await (await fetch(base + '/api/settings')).json()).config.systemPrompt, before.systemPrompt)
+    }
+    const saved = await patch('settings', { config: { upstream: { baseUrl: next } }, env: { ECHO_SERVER_TEST_KEY: 'local-test-only' } })
+    assert.equal(saved.status, 200)
+    assert.equal((await (await fetch(base + '/api/providers')).json()).onboarding.baseUrl, next)
+    assert.equal((await saved.json()).config.defaultModel, '', 'an endpoint-only change drops the previous provider’s models')
+    assert.equal((await (await post('onboarding/test', {})).json()).ok, true)
+    await patch('settings', { config: { upstream: { defaultModel: before.defaultModel, models: before.models, utilityModel: before.utilityModel } },
+      env: { OPENAI_BASE_URL: before.onboarding.baseUrl, ECHO_SERVER_TEST_KEY: 'new-fixture-key' } })
+    const custom = (value) => patch('settings', { config: { search: { providers: { custom: value } } } })
+    assert.equal((await custom({ endpoint: 'https://first-search.invalid', headers: { 'x-team': 'fixture' } })).status, 200)
+    const moved = await (await custom({ endpoint: 'https://other-search.invalid' })).json()
+    assert.equal(moved.config.search.providers.custom.headers, null)
+    const binding = moved.config.search.providers.custom.credentialRevision
+    assert.ok(binding && (await fs.readFile(file, 'utf8')).includes('ECHO_SEARCH_BINDING_CUSTOM=' + binding + '\n'))
+    await custom({ endpoint: '' })
   })
 
   await test('legacy settings default to balanced and a valid interruption style survives profile changes', async () => {
@@ -527,6 +631,63 @@ try {
       await patch('settings', { config: { proactive: cfg.proactive, attention: cfg.attention } })
       await fs.writeFile(stateFile, originalState)
       await fs.writeFile(conversationFile, originalChat)
+    }
+  })
+
+  await test('preview and topic mutes steer actual delivery without generating or rating content', async () => {
+    const stateFile = path.join(dataDir, 'state.json')
+    const chatFile = path.join(dataDir, 'conversations', 'main.json')
+    const originals = await Promise.all([fs.readFile(stateFile), fs.readFile(chatFile)])
+    const cfg = (await (await fetch(base + '/api/settings')).json()).config
+    const now = new Date().toISOString()
+    const top = { id: 'loop_rent', topic: 'Policy fixture rent', why: 'Review two options.', status: 'open', confidence: 0.99, touched_at: now }
+    const other = { ...top, id: 'loop_trip', topic: 'Policy fixture trip', confidence: 0.8 }
+    const preview = async () => (await fetch(base + '/api/proactive/preview')).json()
+    const change = (method, body) => fetch(base + '/api/proactive/topic-mutes', { method,
+      headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' }, body: JSON.stringify(body) })
+    const calls = async () => (await jsonLines(requestsFile)).length
+    const beforeCalls = await calls()
+    try {
+      await patch('settings', { config: { attention: { style: 'balanced', minGapSeconds: 0 },
+        proactive: { enabled: true, notify: false, minGapMinutes: 0, quietHours: { start: '00:00', end: '00:00' } } } })
+      const state = { lastUserMessageAt: now, dream: { loops: [top, other] } }
+      await fs.writeFile(stateFile, JSON.stringify(state))
+      const snapshot = await preview()
+      assert.deepEqual(snapshot.items.map((item) => [item.label, item.reason]), [[top.topic, 'recent_chat_activity'], [other.topic, 'recent_chat_activity']])
+      assert.equal(await fs.readFile(stateFile, 'utf8'), JSON.stringify(state))
+      assert.deepEqual(await fs.readFile(chatFile), originals[1])
+      const topicKey = snapshot.items[0].topicKey
+      assert.equal((await change('PUT', { topicKey: 'proactive:' + '0'.repeat(24), label: 'arbitrary' })).status, 409)
+      assert.equal((await change('PUT', null)).status, 400)
+      for (let i = 0; i < 2; i++) assert.equal((await change('PUT', { topicKey })).status, 200)
+      const muted = JSON.parse(await fs.readFile(stateFile, 'utf8'))
+      assert.equal(muted.agency.outcomes, undefined)
+      assert.doesNotMatch(JSON.stringify(muted.agency), /fixture rent/i)
+      delete muted.lastUserMessageAt
+      muted.dream.loops[0].id = 'loop_new_rent'
+      muted.dream.loops[0].topic = 'POLICY fixture rent!'
+      await fs.writeFile(stateFile, JSON.stringify(muted))
+      const active = await preview()
+      assert.deepEqual(active.items.map((i) => i.reason), ['ok', 'topic_muted'])
+      assert.equal(active.muted.length, 1)
+      assert.equal(await calls(), beforeCalls)
+      const sent = (await (await post('proactive/run', {})).json()).result.message
+      assert.equal(sent.selection.label, other.topic)
+      const request = (await jsonLines(requestsFile)).at(-1)
+      assert.ok(!JSON.stringify(request.messages).toLowerCase().includes('fixture rent'))
+      const originalMessage = { topicKey: sent.selection.topicKey, conversationId: 'main', messageId: sent.id }
+      assert.equal((await change('PUT', { ...originalMessage, topicKey: 'proactive:' + 'f'.repeat(24) })).status, 409)
+      assert.equal((await change('PUT', originalMessage)).status, 200)
+      const chat = await (await fetch(base + '/api/conversations/main')).json()
+      assert.equal(chat.messages.find((m) => m.id === sent.id).topicMuted, true)
+      assert.equal((await (await post('proactive/run', {})).json()).result.acted, false)
+      assert.equal(await calls(), beforeCalls + 1)
+      assert.equal((await change('DELETE', { topicKey })).status, 200)
+      assert.equal((await preview()).items[0].topicKey, topicKey)
+    } finally {
+      await patch('settings', { config: { proactive: cfg.proactive, attention: cfg.attention } })
+      await fs.writeFile(stateFile, originals[0])
+      await fs.writeFile(chatFile, originals[1])
     }
   })
 

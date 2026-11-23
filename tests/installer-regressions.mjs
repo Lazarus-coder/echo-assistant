@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -75,7 +75,37 @@ ${credentials}`], {
     assert.equal((await stat(envFile)).mode & 0o777, 0o600)
     console.log(`✓ UTF-8 installer credentials (${key === 'fixture-first-key' ? 'first install' : 'upgrade preserves existing key'})`)
   }
+  for (const installer of [source, await readFile(new URL('../install.sh', import.meta.url), 'utf8')]) {
+    const pref = installer.match(/^ *SAVED_BIND=.*\n[\s\S]*?case "\$SAVED_BIND" in [^\n]+/m)?.[0]
+    assert.ok(pref && installer.includes('$BIND_XML'), 'preserve the launchd override in the installed plist')
+    for (const [saved, override, expected] of [['', undefined, ''], ['all', undefined, 'all'], ['all', 'local', 'local'], ['', 'all', 'all'], ['all', '', 'local']]) {
+      const result = spawnSync('/bin/bash', ['-c', `readSaved() { printf '%s' "$PREVIOUS_BIND"; }
+${pref.replace('/usr/libexec/PlistBuddy', 'readSaved')}
+printf '%s' "$BIND_XML"`], { encoding: 'utf8', env: { PLIST: 'fixture.plist', PREVIOUS_BIND: saved, ...(override === undefined ? {} : { ECHO_BIND: override }) } })
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, expected ? `<key>ECHO_BIND</key><string>${expected}</string>` : '')
+    }
+  }
+  console.log('✓ both installers preserve and override explicit launchd binding preferences')
+  await mkdir(path.join(target, 'bin'))
+  const cli = path.join(target, 'bin', 'echo')
+  await copyFile(new URL('../bin/echo', import.meta.url), cli)
+  const fixture = path.join(sandbox, 'listener-fixture.sh')
+  await writeFile(fixture, `pgrep() { return 1; }
+curl() { case "$*" in */api/health*) printf %s "$FAKE_HEALTH" ;; */api/summary*) printf %s "$FAKE_SUMMARY" ;; *) return 1 ;; esac; }`)
+  for (const [address, lanUrl] of [['127.0.0.1', null], ['0.0.0.0', 'http://192.0.2.2:19444']]) {
+    const result = spawnSync('/bin/bash', [cli, 'status'], { encoding: 'utf8', env: {
+      HOME: sandbox, PATH: path.dirname(process.execPath) + ':/usr/bin:/bin', BASH_ENV: fixture,
+      FAKE_HEALTH: JSON.stringify({ ok: true, listener: { address, port: 19444 } }),
+      FAKE_SUMMARY: JSON.stringify({ ok: true, listener: { lanUrl } }),
+    } })
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(result.stdout.includes(address + ':19444'))
+    if (lanUrl) assert.ok(result.stdout.includes(lanUrl))
+    else assert.doesNotMatch(result.stdout, /同一网络访问|192\.0\.2\./)
+  }
+  console.log('✓ installed CLI reports the real listener and only offers an active LAN address')
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }
-console.log('4/4 isolated installer checks passed')
+console.log('6/6 isolated installer checks passed')

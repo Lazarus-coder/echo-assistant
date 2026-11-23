@@ -29,6 +29,8 @@ Requirements
 
 Notes
 -----
+* New profiles listen only on this Mac. With LAN access explicitly enabled,
+  run "<target>/bin/echo status" to see the listening address.
 * Screen awareness (off by default) needs Screen Recording permission:
   menu-bar icon → the "⚠️ 屏幕感知需要「屏幕录制」权限" item.
 * Packaging and installation attempt ad-hoc signing. The app is not Developer ID

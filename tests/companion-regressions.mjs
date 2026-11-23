@@ -39,7 +39,7 @@ function miniWindow(response, token) {
         assert.equal(document.querySelector('#send').disabled, true, 'sending is disabled while a reply is pending')
         assert.equal(document.querySelector('#send').textContent, '回复中…')
       }
-      return response
+      return typeof response === 'function' ? response(url, options) : response
     },
     requestAnimationFrame: (callback) => { paints.set(++frameId, callback); return frameId },
     cancelAnimationFrame: (id) => paints.delete(id),
@@ -62,6 +62,28 @@ function events(...frames) {
   return new Response(frames.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(''), {
     headers: { 'content-type': 'text/event-stream' },
   })
+}
+
+{
+  const topicKey = 'companion:0123456789abcdef01234567'
+  const page = miniWindow((_url, { method }) => Response.json({ muted: method === 'PUT' }))
+  const tail = page.api(`renderMessage({role:"assistant", id:"intro", topicMuted:false, companion:{bubbleId:"test",selection:{topicKey:"${topicKey}"}}})`).querySelector('.tail')
+  assert.match(tail.innerHTML, /data-muted="false">静音这类气泡/)
+  const group = page.document.querySelector('fieldset')
+  group.dataset = { feedbackMessage: 'intro' }
+  const button = group.querySelector('button')
+  button.dataset = { topicKey, muted: 'false' }
+  button.closest = () => group
+  for (const [method, muted, label] of [['PUT', 'true', '取消静音'], ['DELETE', 'false', '静音这类气泡']]) {
+    await page.document.listeners.click({ target: { closest: () => button } })
+    const request = page.requests.at(-1)
+    assert.equal(request.url, '/api/proactive/topic-mutes')
+    assert.equal(request.method, method)
+    assert.deepEqual(JSON.parse(request.body), { topicKey, conversationId: 'test', messageId: 'intro' })
+    assert.equal(button.dataset.muted, muted)
+    assert.equal(button.textContent, label)
+    assert.equal(group.disabled, false)
+  }
 }
 
 {
@@ -152,13 +174,13 @@ process.env.ECHO_COMPANION_TEST_URL = 'https://model.invalid/v1'
 const originalFetch = globalThis.fetch
 try {
   const config = {
-    upstream: { apiKeyEnv: 'ECHO_COMPANION_TEST_KEY', baseUrlEnv: 'ECHO_COMPANION_TEST_URL' },
+    upstream: { apiKeyEnv: 'ECHO_COMPANION_TEST_KEY', baseUrlEnv: 'ECHO_COMPANION_TEST_URL', defaultModel: 'fixture' },
     companion: { enabled: true }, memory: { enabled: false },
     proactive: { quietHours: { start: '00:00', end: '00:00' } },
     screen: { enabled: false, blocklist: ['Vault'], excludeTitlePatterns: ['private.project'] },
   }
   await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify(config))
-  const { companionStatus, ingestFrame, setCompanion, pendingBubbles, openBubble } = await import('../lib/companion.mjs')
+  const { companionStatus, ingestFrame, setCompanion, pendingBubbles, openBubble, dismissBubble, expireBubble } = await import('../lib/companion.mjs')
   const { applyFeedback } = await import('../lib/agency.mjs')
   const { saveConfig } = await import('../lib/config.mjs')
   const { readState, writeState } = await import('../lib/store.mjs')
@@ -190,7 +212,8 @@ try {
   assert.equal(requests.length, 0, 'excluded frames never reach the model')
   assert.equal(await fs.readFile(path.join(sandbox, 'state.json'), 'utf8'), stateBefore, 'excluded frames cannot become the saved OCR baseline')
   assert.deepEqual((await fs.readdir(sandbox)).sort(), ['config.json', 'state.json'], 'excluded frames create no bubble or log files')
-  assert.equal((await ingestFrame(frame)).skipped, 'decided_quiet')
+  const quietFrame = await ingestFrame(frame)
+  assert.equal(quietFrame.skipped, 'decided_quiet', JSON.stringify(quietFrame))
   assert.equal(requests.length, 1, 'an allowed frame still reaches the fixture model')
   for (const speak of [false, true]) {
     for (const [reason, changePermission] of [
@@ -249,11 +272,20 @@ try {
   assert.equal(selected.excerpt, prompt.evidence)
   assert.doesNotMatch(JSON.stringify(selected), /UNRELATED_SIDEBAR|Invented/)
   assert.ok((await pendingBubbles()).some((b) => b.id === selected.id))
+  const { setTopicMute } = await import('../lib/agency.mjs')
+  await setTopicMute(selected.selection.topicKey, selected.selection)
+  assert.ok(!(await pendingBubbles()).some((b) => b.id === selected.id), 'mute applies to a pending overlay')
+  const callsBeforeMute = requests.length
+  assert.equal((await ingestFrame({ ...mixed, text: 'TypeError: a newly edited module cannot resolve the latest argument.' })).skipped, 'topic_muted')
+  assert.equal(requests.length, callsBeforeMute, 'a different error in the muted cue family skips wording')
+  await setTopicMute(selected.selection.topicKey, null)
   await saveConfig({ companion: { scenarios: ['work'] } })
   assert.ok(!(await pendingBubbles()).some((b) => b.id === selected.id), 'turning a scene off also holds its pending native overlay')
   await saveConfig({ companion: { scenarios: ['code', 'work', 'browse', 'video'] } })
   assert.ok((await pendingBubbles()).some((b) => b.id === selected.id))
-  const opened = await openBubble(selected.id)
+  const [opened, reopened] = await Promise.all([openBubble(selected.id), openBubble(selected.id)])
+  assert.equal(reopened.conversationId, opened.conversationId, 'two opens of the same bubble must share one chat')
+  assert.equal((await expireBubble(selected.id)).status, 'opened', 'a late auto-hide cannot overwrite an explicit open')
   const intro = opened.conversation.messages[0]
   assert.deepEqual(intro.companion.selection, selected.selection)
   let n = requests.length
@@ -323,6 +355,66 @@ try {
     assert.equal((await ingestFrame(mixed)).bubble?.scenario, 'code', 'the first cue recovers at the retry boundary')
     assert.equal((await ingestFrame(mixed)).skipped, 'unchanged')
     assert.equal(requests.length, n + 3, 'one failure and two distinct rendered cues consume three requests')
+
+    const task = { ...mixed, text: 'Meeting agenda: plan the new review for Monday.' }
+    wording = { speak: true, quote: 'Meeting agenda', bubble: 'Check the review agenda.' }
+    const taskBubble = (await ingestFrame(task)).bubble
+    assert.ok(taskBubble)
+    await Promise.all([dismissBubble(taskBubble.id, {}), dismissBubble(taskBubble.id, {}), dismissBubble(taskBubble.id, {})])
+    assert.equal((await readState()).companion.dismissStreak, 1, 'replayed dismissals count the explicit gesture once')
+    assert.equal((await expireBubble(taskBubble.id)).status, 'dismissed')
+    n = requests.length
+    assert.equal((await ingestFrame(failedCue)).skipped, 'unchanged')
+    assert.equal((await ingestFrame(failedCue)).skipped, 'unchanged')
+    assert.equal(requests.length, n, 'returning to delivered evidence after switching windows makes no wording request')
+    const changed = { ...mixed, text: prompt.evidence + '\nMeeting agenda: invite the new project owner for review.' }
+    wording = { speak: true, quote: 'Meeting agenda', bubble: 'Include the project owner in the review.' }
+    const live = (await ingestFrame(changed)).bubble
+    assert.equal(live?.scenario, 'work', 'a previously delivered issue yields to fresh evidence')
+    assert.equal(requests.length, n + 1)
+    assert.deepEqual((await companionStatus({ includeBubbles: 0 })).recent, [], 'a summary-only request omits screen history')
+    assert.ok((await pendingBubbles()).some((b) => b.id === live.id))
+    mock.timers.tick(60000)
+    assert.deepEqual(await pendingBubbles(), [], 'an unpresented screen cue expires while the Mac is away')
+    assert.equal((await companionStatus()).stats.pending, 0)
+    assert.equal((await ingestFrame({ ...changed, ts: live.ts })).skipped, 'expired')
+    assert.equal(requests.length, n + 1, 'expired captures are rejected locally')
+    await writeState({})
+    wording = { speak: false }
+    assert.equal((await ingestFrame(failedCue)).skipped, 'decided_quiet')
+    assert.equal((await ingestFrame(task)).skipped, 'decided_quiet')
+    assert.equal((await ingestFrame(failedCue)).skipped, 'wording_cooldown', 'switching between previously declined windows does not retry wording')
+    mock.timers.tick(3 * 3600000)
+    assert.equal((await ingestFrame(failedCue)).skipped, 'decided_quiet', 'a changed-away cue can be considered again once its hold expires')
+    assert.equal(requests.length, n + 4)
+    await writeState({})
+    wording = { speak: true, quote: 'TypeError', bubble: 'Review the issue with the project owner.' }
+    assert.ok((await ingestFrame(failedCue)).bubble)
+    wording = { ...wording, quote: 'Meeting agenda' }
+    assert.equal((await ingestFrame(task)).skipped, 'duplicate')
+    assert.equal((await ingestFrame(task)).skipped, 'wording_cooldown')
+    assert.equal(requests.length, n + 6, 'a duplicate generated sentence gets one wording request for the new cue')
+    await writeState({})
+    const beforeDeadline = new Date(Date.now() - 59000).toISOString()
+    globalThis.fetch = async (...args) => {
+      mock.timers.tick(1001)
+      return workingProvider(...args)
+    }
+    assert.equal((await ingestFrame({ ...task, ts: beforeDeadline })).skipped, 'expired')
+    assert.deepEqual((await readState()).attention?.history ?? [], [], 'a late wording result consumes no delivery budget')
+    await writeState({})
+    globalThis.fetch = workingProvider
+    wording = { speak: false }
+    assert.equal((await ingestFrame(task)).skipped, 'decided_quiet')
+    assert.equal((await companionStatus()).framesToday, 1)
+    const midnight = new Date()
+    midnight.setHours(24, 0, 0, 0)
+    mock.timers.setTime(midnight.getTime())
+    assert.equal((await companionStatus()).framesToday, 0, 'the frame count rolls over at local midnight')
+    assert.equal((await ingestFrame(task)).skipped, 'unchanged')
+    assert.equal((await companionStatus()).framesToday, 0, 'an unchanged frame cannot move yesterday’s count into today')
+    assert.equal((await ingestFrame(failedCue)).skipped, 'decided_quiet')
+    assert.equal((await companionStatus()).framesToday, 1)
   } finally { mock.timers.reset() }
 } finally {
   globalThis.fetch = originalFetch

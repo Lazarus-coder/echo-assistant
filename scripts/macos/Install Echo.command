@@ -129,6 +129,10 @@ if [ "$DO_LAUNCHD" = "1" ]; then
   MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
   NODE_BIN_DIR="$(dirname "$NODE")"
+  SAVED_BIND="${ECHO_BIND-$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:ECHO_BIND' "$PLIST" 2>/dev/null || true)}"
+  if [ "${ECHO_BIND+x}" ] && [ "$SAVED_BIND" != "all" ]; then SAVED_BIND=local; fi
+  BIND_XML=""
+  case "$SAVED_BIND" in all|local) BIND_XML="<key>ECHO_BIND</key><string>$SAVED_BIND</string>" ;; esac
   cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -147,6 +151,7 @@ if [ "$DO_LAUNCHD" = "1" ]; then
     <key>PATH</key><string>$NODE_BIN_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>ECHO_ROOT</key><string>$TARGET</string>
     <key>ECHO_PORT</key><string>$PORT</string>
+    $BIND_XML
   </dict>
 </dict>
 </plist>
@@ -205,13 +210,13 @@ fi
 
 # ── 7. 完成 ─────────────────────────────────────────────────────────
 echo
-if curl -sf -m 5 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
-  ok "服务在跑：http://127.0.0.1:$PORT"
+if [ "$DO_LAUNCHD" = "0" ]; then
+  info "本次安装未启动服务。"
+elif curl -sf -m 5 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+  PATH="$(dirname "$NODE"):$PATH" "$TARGET/bin/echo" status
 else
   warn "服务还没起来；看看 $TARGET/data/logs/echo.err.log"
 fi
-LAN="$(ipconfig getifaddr en0 2>/dev/null || true)"
-[ -n "$LAN" ] && info "同一 WiFi 下手机可访问：http://$LAN:$PORT"
 info "常用命令：$TARGET/bin/echo status | logs | dream | diag | selftest"
 if [ "$DO_OPEN" = "1" ]; then open "http://127.0.0.1:$PORT"; fi
 echo

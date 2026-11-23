@@ -2,10 +2,11 @@ import { spawn } from 'node:child_process'
 import http from 'node:http'
 import crypto from 'node:crypto'
 import path from 'node:path'
-import os from 'node:os'
+import { bindAddress, describeListener } from './lib/listener.mjs'
 import { promises as fs } from 'node:fs'
 import { loadConfig, saveConfig, upstreamCreds, deepMerge, checkLegacyProfile, ATTENTION_STYLES, P, DATA, ROOT } from './lib/config.mjs'
 import { loadEnvFile } from './lib/env.mjs'
+import { thinkingOptions } from './lib/upstream.mjs'
 import { log } from './lib/log.mjs'
 import { readJSON, writeJSON, nowIso, clip, assertId, newId } from './lib/util.mjs'
 import {
@@ -47,8 +48,8 @@ import {
 } from './lib/memory.mjs'
 import { runDream, dreamStatus, dreamRunning, updateLoop } from './lib/dream.mjs'
 import { returnBrief } from './lib/brief.mjs'
-import { proactiveTick, proactiveStatus } from './lib/proactive.mjs'
-import { applyFeedback, agencyStats, messageWithFeedback, settlePending } from './lib/agency.mjs'
+import { proactiveTick, proactiveStatus, proactivePreview } from './lib/proactive.mjs'
+import { applyFeedback, agencyStats, messageWithFeedback, optionalReminderTopic, setTopicMute, settlePending } from './lib/agency.mjs'
 import { listCommitments, createCommitment, updateCommitment, requestPreparation, answerPreparation, prepareDueCommitments, cancelCommitmentWork } from './lib/commitments.mjs'
 import { discoverNeeds, cancelDiscovery, researchStatus, validateResearchSettings } from './lib/discovery.mjs'
 import { cancelAndDrainResearch } from './lib/research.mjs'
@@ -68,12 +69,14 @@ import {
   pruneScreenData,
   workingContext,
 } from './lib/screen.mjs'
-import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs } from './lib/storage.mjs'
+import { pruneStorage, storageStats, sweepTempCaptures, ensureStorageDirs, privateCaptureSpool } from './lib/storage.mjs'
 import { record, metricsSummary } from './lib/metrics.mjs'
 import { polishText, MODES } from './lib/polish.mjs'
 import { ingestFrame, companionStatus, pendingBubbles, setCompanion, openBubble, dismissBubble, expireBubble } from './lib/companion.mjs'
 import {
   UPSTREAM_PRESETS,
+  SEARCH_PROVIDERS,
+  searchBindingEnv,
   MEMORY_PROFILES,
   DEFAULT_SEARCH_ORDER,
   searchProviderCatalog,
@@ -223,8 +226,12 @@ function publicChatMessage(message) {
 
 async function publicConversation(conv) {
   const messages = conv.messages ?? []
-  const outcomes = messages.some((m) => m?.proactive || m?.companion) ? (await readState()).agency?.outcomes : null
-  return { ...conv, messages: messages.map((m) => publicChatMessage(messageWithFeedback(m, conv.id, outcomes))) }
+  const agency = messages.some((m) => m?.proactive || m?.companion) ? (await readState()).agency : null
+  return { ...conv, messages: messages.map((m) => {
+    const message = publicChatMessage(messageWithFeedback(m, conv.id, agency?.outcomes))
+    const key = optionalReminderTopic(m)?.topicKey
+    return key ? { ...message, topicMuted: Boolean(agency?.mutedTopics?.[key]) } : message
+  }) }
 }
 
 function publicChatEvent(event) {
@@ -254,7 +261,11 @@ async function readBody(req, limit = MAX_BODY) {
       const raw = Buffer.concat(chunks).toString('utf8')
       if (!raw) return resolve({})
       try {
-        resolve(JSON.parse(raw))
+        const body = JSON.parse(raw)
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          return reject(Object.assign(new Error('请求体需要是 JSON 对象'), { status: 400 }))
+        }
+        resolve(body)
       } catch {
         reject(Object.assign(new Error('JSON 解析失败'), { status: 400 }))
       }
@@ -348,14 +359,14 @@ async function generateTitle(conversationId, userText, assistantText) {
       method: 'POST',
       headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: cfg.upstream.utilityModel,
+        model: cfg.upstream.utilityModel || cfg.upstream.defaultModel,
         messages: [
           { role: 'system', content: '给这段对话起一个 4-12 字的中文标题，只输出标题本身，不要引号、不要标点结尾。' },
           { role: 'user', content: `用户：${clip(userText, 600)}\n助手：${clip(assistantText, 400)}` },
         ],
         max_tokens: 40,
         temperature: 0.2,
-        enable_thinking: false,
+        ...thinkingOptions(baseUrl),
       }),
       signal: AbortSignal.timeout(20000),
     })
@@ -383,11 +394,9 @@ async function maybeExtractMemory(conv, assistant) {
 
 function onboardingState() {
   const creds = upstreamCreds()
-  const hasModels = (cfg.upstream?.models ?? []).length > 0
-  // 已经能用（有端点+密钥+模型清单）就不打扰；否则把引导推上来
-  const usable = creds.configured && hasModels
+  const usable = creds.configured && Boolean(cfg.upstream?.defaultModel?.trim())
   return {
-    needed: !usable && cfg.onboarding?.completed !== true,
+    needed: !usable,
     completed: cfg.onboarding?.completed === true,
     usable,
     hasKey: Boolean(creds.apiKey),
@@ -419,17 +428,7 @@ function writeEnvValues(values) {
 
 async function persistEnvValues(values) {
   const file = P.env
-  let lines = []
-  try {
-    lines = (await fs.readFile(file, 'utf8')).split('\n').filter((l) => l.trim() && !l.trim().startsWith('#'))
-  } catch {}
-  const keep = new Map()
-  for (const line of lines) {
-    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
-    if (m) keep.set(m[1], m[2])
-  }
-  let removed = 0
-  const applied = []
+  const applied = new Map()
   for (const [k, v] of Object.entries(values ?? {})) {
     if (v === undefined || v === null) continue
     // 键名不合法或值里带换行的条目直接拒收：写进文件会注入出别的环境变量
@@ -437,20 +436,24 @@ async function persistEnvValues(values) {
       log.warn(`已忽略可疑的 env 条目：${clip(k, 40)}`)
       continue
     }
-    if (String(v) === '') {
-      // 显式清空 = 删除该密钥（界面不会发空值，只有明确的"清除"才会走到这）
-      if (keep.delete(k)) removed++
-      applied.push([k, ''])
-      continue
-    }
-    keep.set(k, v)
-    applied.push([k, String(v)])
+    applied.set(k, String(v))
   }
-  if (removed) log.warn(`已从 echo.env 移除 ${removed} 个密钥`)
+  if (!applied.size) return []
+  let raw = ''
+  try {
+    raw = await fs.readFile(file, 'utf8')
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err
+  }
+  const lines = raw ? raw.replace(/\n$/, '').split('\n').filter((line) => {
+    const key = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line.trim())?.[1]
+    return !applied.has(key)
+  }) : []
+  for (const [key, value] of applied) if (value) lines.push(`${key}=${value}`)
   await fs.mkdir(path.dirname(file), { recursive: true })
   const temp = `${file}.${crypto.randomUUID()}.tmp`
   try {
-    await fs.writeFile(temp, `${[...keep.entries()].map(([k, v]) => `${k}=${v}`).join('\n')}${keep.size ? '\n' : ''}`, { mode: 0o600, flag: 'wx' })
+    await fs.writeFile(temp, lines.length ? lines.join('\n') + '\n' : '', { mode: 0o600, flag: 'wx' })
     await fs.rename(temp, file)
     for (const [key, value] of applied) {
       if (value) process.env[key] = value
@@ -459,7 +462,7 @@ async function persistEnvValues(values) {
   } finally {
     await fs.rm(temp, { force: true })
   }
-  return [...keep.keys()]
+  return [...applied.keys()]
 }
 
 function wizardConnection(body) {
@@ -468,13 +471,95 @@ function wizardConnection(body) {
   const apiKey = String(body.apiKey ?? '').trim()
   const changed = baseUrl !== current.baseUrl
   const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
-  if (baseUrl && (!URL.canParse(baseUrl) || !/^https?:\/\//.test(baseUrl) || /[\r\n]/.test(baseUrl))) fail('请输入完整的 HTTP 或 HTTPS 端点地址')
+  if (baseUrl) {
+    if (!URL.canParse(baseUrl) || !/^https?:\/\//.test(baseUrl) || /[\r\n]/.test(baseUrl)) fail('请输入完整的 HTTP 或 HTTPS 端点地址')
+    const parsed = new URL(baseUrl)
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) fail('端点地址只包含协议、主机和 API 路径；密钥请填入 API Key')
+  }
   if (apiKey && !baseUrl) fail('请先输入该 API Key 对应的模型端点')
   if (/[\r\n]/.test(apiKey)) fail('API Key 不能包含换行')
   if (changed && !apiKey) fail('更换模型端点时，请输入该端点的 API Key')
   if (changed && launchEnvNames.has(current.baseUrlEnv)) fail(`请先更新启动环境变量 ${current.baseUrlEnv} 并重启 Echo`)
   if (apiKey && apiKey !== current.apiKey && launchEnvNames.has(current.apiKeyEnv)) fail(`请先更新启动环境变量 ${current.apiKeyEnv} 并重启 Echo`)
   return { ...current, baseUrl, apiKey: apiKey || current.apiKey, changed }
+}
+
+// Credential names come from the installed profile. A settings request may change their values.
+function providerSettings(patch, supplied = {}) {
+  const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) fail('提供方环境设置必须为对象')
+  const env = { ...supplied }
+  const current = upstreamCreds(cfg)
+  const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  if (!object(patch) || ('upstream' in patch && !object(patch.upstream)) || ('search' in patch && !object(patch.search))) fail('模型与搜索设置必须为对象')
+  if (patch.search && 'providers' in patch.search && !object(patch.search.providers)) fail('搜索提供方设置必须为对象')
+  const up = patch.upstream ?? {}
+  if ('apiKey' in up) fail('模型密钥应填入环境变量')
+  for (const field of ['defaultModel', 'utilityModel', 'defaultImageModel']) {
+    if (field in up && typeof up[field] !== 'string') fail('模型 ID 需要是文本')
+  }
+  for (const field of ['models', 'imageModels']) {
+    if (field in up && (!Array.isArray(up[field]) || up[field].some((m) => typeof (m?.id ?? m) !== 'string' || !(m?.id ?? m).trim()))) fail('模型列表中的每一项都需要模型 ID')
+  }
+  const providers = searchProviderCatalog(cfg)
+  const names = new Set(['OPENAI_API_KEY', 'OPENAI_BASE_URL', current.apiKeyEnv, current.baseUrlEnv,
+    ...Object.values(SEARCH_PROVIDERS).map((p) => p.envVar), ...providers.map((p) => p.envVar)].filter(Boolean))
+  for (const [name, value] of Object.entries(env)) {
+    if (!names.has(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) fail('只能写入已配置的提供方环境变量')
+    if (typeof value !== 'string' || /[\r\n]/.test(value)) fail('提供方环境变量需要单行文本')
+    if (launchEnvNames.has(name) && value !== process.env[name]) fail(`请先更新启动环境变量 ${name} 并重启 Echo`)
+  }
+  for (const name of ['apiKeyEnv', 'baseUrlEnv']) {
+    if (name in up && up[name] !== current[name]) fail('请在本机 config.json 中配置环境变量名称')
+  }
+  if ('baseUrl' in up || current.baseUrlEnv in env) {
+    const clean = (v) => typeof v === 'string' ? v.trim().replace(/\/+$/, '') : fail('模型端点地址必须为文本')
+    const configBase = 'baseUrl' in up ? clean(up.baseUrl) : undefined
+    const envBase = current.baseUrlEnv in env ? clean(env[current.baseUrlEnv]) : undefined
+    if (envBase && configBase && envBase !== configBase) fail('配置与环境中的模型端点必须一致')
+    const baseUrl = envBase || configBase || ''
+    if (baseUrl) wizardConnection({ baseUrl, apiKey: env[current.apiKeyEnv] })
+    else if (env[current.apiKeyEnv]) fail('请先输入该 API Key 对应的模型端点')
+    else if (launchEnvNames.has(current.baseUrlEnv) && current.baseUrl) fail(`请先更新启动环境变量 ${current.baseUrlEnv} 并重启 Echo`)
+    if (!launchEnvNames.has(current.baseUrlEnv)) env[current.baseUrlEnv] = baseUrl
+    if (baseUrl && baseUrl !== current.baseUrl) {
+      patch.upstream = { models: [], defaultModel: '', utilityModel: '', imageModels: [], defaultImageModel: '', fallback: [], ...up, baseUrl, providerChangedAt: nowIso() }
+      patch.screen = { visionModel: '', ...patch.screen }
+      patch.companion = { model: '', ...patch.companion }
+    } else patch.upstream = { ...up, baseUrl }
+  }
+  for (const provider of providers) {
+    const next = patch.search?.providers?.[provider.id]
+    if (next === undefined) continue
+    if (!object(next)) fail('每个搜索提供方的设置必须为对象')
+    delete next.credentialRevision
+    if ('envVar' in next && next.envVar !== provider.envVar) fail('请在本机 config.json 中配置搜索提供方的环境变量名称')
+    if ('apiKey' in next) fail('搜索密钥应填入环境变量')
+    if (!Object.hasOwn(next, 'endpoint') || (next.endpoint || SEARCH_PROVIDERS[provider.id].endpoint) === provider.endpoint) continue
+    if (provider.needsKey && !env[provider.envVar]) fail(`更换 ${provider.label} 端点时，请输入该端点的密钥`)
+    if (provider.id === 'custom' && Object.keys(cfg.search.providers.custom?.headers ?? {}).length) {
+      // Deep-merge must not carry unmentioned authenticated headers to another server.
+      if (next.headers && Object.keys(cfg.search.providers.custom.headers).some((name) => !Object.hasOwn(next.headers, name))) fail('更换自定义搜索端点时，请完整指定新请求头或清空请求头')
+      next.headers ??= null
+    }
+  }
+  for (const provider of providers) {
+    const previous = cfg.search.providers[provider.id] ?? {}
+    const change = patch.search?.providers?.[provider.id] ?? {}
+    const headers = [...Object.values(previous.headers ?? {}), ...Object.values(change.headers ?? {})]
+    if (!provider.needsKey && !(provider.id === 'custom' && headers.length)) continue
+    const variables = headers.filter((v) => typeof v === 'string' && v.startsWith('env:')).map((v) => v.slice(4))
+    if (provider.needsKey) variables.push(provider.envVar)
+    const moved = 'endpoint' in change && (change.endpoint || SEARCH_PROVIDERS[provider.id].endpoint) !== provider.endpoint
+    if (!moved && !('headers' in change) && !variables.some((name) => Object.hasOwn(env, name))) continue
+    // Publish a matching ID in both files. A partial save or stale search cannot mix versions.
+    const revision = crypto.randomUUID()
+    patch.search ??= {}
+    patch.search.providers ??= {}
+    patch.search.providers[provider.id] = { ...change, credentialRevision: revision }
+    env[searchBindingEnv(provider.id)] = revision
+  }
+  return env
 }
 
 /** BYOK 引导页第二步用：拿 key 去问端点有哪些模型。 */
@@ -486,19 +571,25 @@ async function discoverModels({ baseUrl, apiKey }) {
     headers: { authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(20000),
   })
-  const text = await res.text()
-  if (!res.ok) throw new Error(`端点返回 HTTP ${res.status}：${text.slice(0, 160)}`)
+  if (!res.ok) {
+    await res.body?.cancel()
+    const hint = [401, 403].includes(res.status) ? '请检查此端点的 API Key 和模型列表权限' : '可检查端点地址，或直接输入已知的模型 ID'
+    throw new Error(`模型列表请求返回 HTTP ${res.status}，${hint}`)
+  }
   let data
   try {
-    data = JSON.parse(text)
+    data = await res.json()
   } catch {
     throw new Error('端点没有返回 JSON，请确认是 OpenAI 兼容的 /v1 地址')
   }
-  const models = (data.data ?? data.models ?? []).map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean)
+  const rows = data?.data ?? data?.models
+  if (!Array.isArray(rows)) throw new Error('此端点没有返回模型列表，可直接输入已知的模型 ID')
+  const models = [...new Set(rows.map((m) => typeof m === 'string' ? m : m?.id).filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()))]
   return { baseUrl: base, count: models.length, models: models.slice(0, 400) }
 }
 
 async function permissionsReport(req) {
+  const listener = describeListener(server.address())
   const { apiKey, baseUrl } = upstreamCreds()
   const has = (cmd, args = ['--version']) =>
     new Promise((resolve) => {
@@ -516,9 +607,9 @@ async function permissionsReport(req) {
   return {
     node: process.version,
     platform: process.platform,
-    port: Number(process.env.ECHO_PORT ?? cfg.port),
-    bind: (process.env.ECHO_BIND ?? cfg.bind) === 'all' ? '0.0.0.0（局域网可访问）' : '127.0.0.1（仅本机）',
-    lanAddresses: lanAddresses(),
+    port: listener.port,
+    bind: listener.bind === 'all' ? '0.0.0.0（局域网监听）' : '127.0.0.1（仅本机）',
+    lanAddresses: listener.lanAddresses, lanUrl: listener.lanUrl,
     authRequired: cfg.requirePassword === true,
     canSetInitialPassword: !authState.passwordSet && isLocalToolsRequest(req),
     configured: Boolean(apiKey && baseUrl),
@@ -537,8 +628,7 @@ async function permissionsReport(req) {
 
 /** 屏幕录制权限探测：真抓一张（会触发系统弹窗），据此判断是否授权。 */
 async function screenPermissionProbe() {
-  const file = path.join(DATA, 'spool', `.perm-probe-${Date.now()}.jpg`)
-  await fs.mkdir(path.dirname(file), { recursive: true })
+  const file = path.join(await privateCaptureSpool(), `.perm-probe-${crypto.randomUUID()}.jpg`)
   try {
     const ok = await new Promise((resolve) => {
       const p = spawn('/usr/sbin/screencapture', ['-x', '-t', 'jpg', file], { stdio: 'ignore' })
@@ -590,7 +680,9 @@ async function api(req, res, url) {
   cfg = await loadConfig()
 
   if (method === 'GET' && p === 'health') {
-    return send(res, 200, { ok: true, version: VERSION, uptime: Math.round((Date.now() - bootedAt) / 1000) })
+    const { address, port } = server.address()
+    return send(res, 200, { ok: true, version: VERSION, uptime: Math.round((Date.now() - bootedAt) / 1000),
+      ...(isLoopback(req) ? { listener: { address, port } } : {}) })
   }
 
   if (method === 'POST' && p === 'login') return doLogin(req, res)
@@ -606,7 +698,7 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'auth') {
     const body = await readBody(req)
     cfg = await saveConfig({ requirePassword: Boolean(body.required) })
-    log.warn(`访问控制：${cfg.requirePassword ? '已开启口令验证' : '已关闭口令验证（仅本机自用）'}`)
+    log.warn(`访问控制：${cfg.requirePassword ? '已开启口令验证' : '已关闭口令验证'}`)
     return send(res, 200, { required: cfg.requirePassword, passwordSet: authState.passwordSet })
   }
 
@@ -637,6 +729,7 @@ async function api(req, res, url) {
     const [storage, screen] = await Promise.all([storageStats(), screenStatus({ includeEvents: 4 })])
     return send(res, 200, {
       ok: true,
+      listener: describeListener(server.address()),
       version: VERSION,
       busy: inflight.size,
       unread: main?.unread ?? 0,
@@ -674,6 +767,7 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'settings') {
     const body = await readBody(req)
     let patch = body.config ?? {}
+    const env = providerSettings(patch, body.env)
     if (Object.hasOwn(patch, 'attention')) {
       const a = patch.attention
       if (!a || typeof a !== 'object' || Array.isArray(a)) return send(res, 400, { error: '提醒设置必须为对象' })
@@ -691,6 +785,7 @@ async function api(req, res, url) {
     }
     // 记忆档位是预设：选档就把具体旋钮一次性写实，避免"档位与数值打架"
     if (patch.memory?.profile) patch = applyProfilePatch(patch, patch.memory.profile)
+    const written = await writeEnvValues(env)
     cfg = await saveConfig(patch)
     if (patch.proactive?.research) {
       if (!cfg.proactive.research.enabled || !cfg.proactive.research.discoverChats) await cancelDiscovery('后台研究权限已改变')
@@ -701,10 +796,7 @@ async function api(req, res, url) {
       else kickPreparation()
     }
     if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns('工具权限已更改，请重新发起')
-    if (body.env && typeof body.env === 'object') {
-      const written = await writeEnvValues(body.env)
-      if (written.length) log.info(`设置页写入密钥：${written.join(',')}`)
-    }
+    if (written.length) log.info(`设置页写入提供方变量：${written.join(',')}`)
     if (patch.mcpServers !== undefined || body.restartMcp) await connectMcp()
     return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
   }
@@ -837,6 +929,11 @@ async function api(req, res, url) {
   /* ------------------------------ 屏幕感知 ------------------------------ */
   if (method === 'POST' && p === 'screen') {
     const body = await readBody(req)
+    if (body.fromCapture === true && body.captureFailed === true) {
+      const issue = body.captureIssue === 'screen_permission_required' ? body.captureIssue : 'capture_failed'
+      await markCaptureHandled({ ok: false, error: issue })
+      return send(res, 200, { skipped: issue })
+    }
     const result = await ingestScreenEvent({
       text: body.text,
       imageDataUrl: body.image,
@@ -859,8 +956,8 @@ async function api(req, res, url) {
   }
   if (method === 'POST' && p === 'screen/capture') {
     const body = await readBody(req)
-    await requestCapture(body.reason ?? 'manual')
-    return send(res, 200, { ok: true, requested: true })
+    const result = await requestCapture(body.reason ?? 'manual')
+    return send(res, 200, { ok: result.requested, ...result })
   }
   if (method === 'POST' && p === 'screen/digest') {
     const r = await digestScreenSession({ force: true })
@@ -871,7 +968,7 @@ async function api(req, res, url) {
   if (method === 'GET' && p === 'storage') return send(res, 200, await storageStats())
   if (method === 'POST' && p === 'storage/prune') {
     const report = await pruneStorage({ force: true })
-    const swept = await sweepTempCaptures({ olderThanMinutes: 0 })
+    const swept = await sweepTempCaptures()
     return send(res, 200, { report, swept, stats: await storageStats() })
   }
 
@@ -965,30 +1062,38 @@ async function api(req, res, url) {
       if (authState.passwordSet) return send(res, 409, { error: 'password_exists', message: '已有访问口令，请在设置中管理' })
     }
     const connection = wizardConnection(body)
-    if (connection.changed && !String(body.defaultModel ?? '').trim()) return send(res, 400, { error: 'missing_model', message: '请为新端点选择或输入一个默认模型' })
+    if (!connection.baseUrl || !connection.apiKey) return send(res, 400, { error: 'missing_connection', message: '请填写模型端点和该端点的 API Key' })
+    const defaultModel = body.defaultModel ?? (connection.changed ? '' : cfg.upstream.defaultModel)
+    if (typeof defaultModel !== 'string' || !defaultModel.trim()) return send(res, 400, { error: 'missing_model', message: '请选择或输入一个默认模型' })
+    for (const rows of [body.models, body.imageModels]) {
+      if (rows !== undefined && (!Array.isArray(rows) || rows.some((m) => typeof (m?.id ?? m) !== 'string' || !(m?.id ?? m).trim()))) {
+        return send(res, 400, { error: 'invalid_models', message: '模型列表中的每一项都需要模型 ID' })
+      }
+    }
+    if (body.search?.order !== undefined && !Array.isArray(body.search.order)) return send(res, 400, { error: 'invalid_search', message: '搜索顺序需要是列表' })
     const envValues = {}
     for (const p of searchProviderCatalog(cfg)) {
       if (p.needsKey && body.keys?.[p.envVar]) envValues[p.envVar] = String(body.keys[p.envVar]).trim()
     }
     if ((connection.changed || body.apiKey) && !launchEnvNames.has(connection.baseUrlEnv)) envValues[connection.baseUrlEnv] = connection.baseUrl
     if (body.apiKey) envValues[connection.apiKeyEnv] = connection.apiKey
-    const written = await writeEnvValues(envValues)
-
-    const upstream = connection.changed ? { models: [], imageModels: [], defaultImageModel: '', utilityModel: body.defaultModel, fallback: [] } : {}
+    const upstream = {}
     if (body.baseUrl) upstream.baseUrl = connection.baseUrl
     if (Array.isArray(body.models)) {
-      upstream.models = body.models.map((m) => (typeof m === 'string' ? { id: m, label: m, group: '已发现' } : m))
+      const previous = new Map((connection.changed ? [] : cfg.upstream.models).map((m) => [m.id, m]))
+      upstream.models = body.models.map((m) => typeof m === 'string' ? previous.get(m) ?? { id: m, label: m, group: '已发现' } : m)
     }
-    if (body.defaultModel) upstream.defaultModel = body.defaultModel
-    if (body.utilityModel) upstream.utilityModel = body.utilityModel
+    upstream.defaultModel = defaultModel.trim()
+    if (typeof body.utilityModel === 'string') upstream.utilityModel = body.utilityModel.trim()
     if (Array.isArray(body.imageModels)) {
       upstream.imageModels = body.imageModels
       upstream.defaultImageModel = body.defaultImageModel ?? body.imageModels[0]?.id ?? ''
     }
-    const patch = applyProfilePatch({ onboarding: { completed: true, at: nowIso() }, upstream }, body.profile)
+    const patch = applyProfilePatch({ onboarding: { completed: true, at: nowIso() }, upstream }, body.profile !== cfg.memory.profile ? body.profile : null)
     if (body.search?.order) patch.search = { order: body.search.order.filter((x) => typeof x === 'string') }
     if (body.search?.providers) patch.search = { ...(patch.search ?? {}), providers: body.search.providers }
     if (password) patch.requirePassword = true
+    const written = await writeEnvValues(providerSettings(patch, envValues))
     cfg = await saveConfig(patch)
     if (password) {
       await setPassword(password)
@@ -1225,6 +1330,28 @@ async function api(req, res, url) {
   }
 
   if (method === 'GET' && p === 'proactive') return send(res, 200, await proactiveStatus({ busyConversations }))
+  if (method === 'GET' && p === 'proactive/preview') return send(res, 200, await proactivePreview({ busyConversations }))
+  if ((method === 'PUT' || method === 'DELETE') && p === 'proactive/topic-mutes') {
+    const { topicKey, conversationId, messageId } = await readBody(req)
+    if (typeof topicKey !== 'string' || !/^(proactive|companion):[0-9a-f]{24}$/.test(topicKey)) return send(res, 400, { error: '无效的话题' })
+    const muted = method === 'PUT'
+    let selection
+    if (muted) {
+      if ((await readState()).agency?.mutedTopics?.[topicKey]) return send(res, 200, { topicKey, muted })
+      if (conversationId !== undefined || messageId !== undefined) {
+        const conv = await getConversation(assertId(conversationId))
+        const id = assertId(messageId)
+        selection = optionalReminderTopic(conv?.messages.find((m) => m.id === id))
+      } else {
+        const preview = await proactivePreview({ busyConversations })
+        selection = preview.items.find((row) => !row.requested && row.topicKey === topicKey)
+      }
+      if (selection?.topicKey !== topicKey) return send(res, 409, { error: '候选话题已变化，请刷新预览或从原提醒操作。' })
+    }
+    if (backgroundSuspended) return send(res, 409, { error: 'privacy_reset_running' })
+    await setTopicMute(topicKey, selection)
+    return send(res, 200, { topicKey, muted })
+  }
   if (method === 'POST' && p === 'proactive/run') {
     const result = await proactiveTick({ busyConversations })
     return send(res, 200, { result, status: await proactiveStatus({ busyConversations }) })
@@ -1377,6 +1504,7 @@ function publicConfig(c) {
   return {
     bind: c.bind,
     port: c.port,
+    listener: describeListener(server.address()),
     auth: { required: c.requirePassword === true, passwordSet: authState.passwordSet },
     onboarding: onboardingState(),
     providers: { search: searchProviderCatalog(c), upstream: UPSTREAM_PRESETS, profiles: Object.keys(MEMORY_PROFILES) },
@@ -1685,38 +1813,24 @@ async function boot() {
   await sweepTempCaptures().catch(() => {})
 
   const port = Number(process.env.ECHO_PORT ?? cfg.port)
-  const wantLan = (process.env.ECHO_BIND ?? cfg.bind) === 'all'
+  const mode = process.env.ECHO_BIND ?? cfg.bind
   const auth = await readJSON(P.auth, {})
   authState.passwordSet = Boolean(auth.password)
-  const authRequired = cfg.requirePassword === true
-  const bind = wantLan && (auth.password || !authRequired) ? '0.0.0.0' : '127.0.0.1'
-  if (authRequired && !auth.password) log.warn('要求口令但还没设置，已退化为仅本机监听')
+  const bind = bindAddress(mode, cfg.requirePassword, authState.passwordSet)
+  if (mode === 'all' && bind === '127.0.0.1') log.warn('要求口令但还没设置，已退化为仅本机监听')
 
   await new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, bind, resolve)
   })
 
-  const ips = lanAddresses()
-  log.info(`Echo v${VERSION} 已启动 · 监听 ${bind}:${port} · env文件=${envResult.loaded ? '已加载' : '无'}`)
-  log.info(`  本机   http://127.0.0.1:${port}`)
-  for (const ip of bind === '0.0.0.0' ? ips : []) log.info(`  局域网 http://${ip}:${port}`)
+  const listener = describeListener(server.address())
+  log.info(`Echo v${VERSION} 已启动 · 监听 ${listener.address}:${listener.port} · env文件=${envResult.loaded ? '已加载' : '无'}`)
+  log.info(`  本机   http://127.0.0.1:${listener.port}`)
+  if (listener.lanUrl) log.info(`  局域网 ${listener.lanUrl}`)
   log.info(`  上游   ${upstreamCreds().baseUrl} · key=${upstreamCreds().apiKey ? '已配置' : '缺失'} · 模型=${cfg.upstream.defaultModel}`)
   log.info(`  记忆   ${JSON.stringify(await memoryStats())}`)
   kickPreparation()
-}
-
-function lanAddresses() {
-  const out = []
-  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
-    for (const a of addrs ?? []) {
-      if (a.family !== 'IPv4' || a.internal) continue
-      // skip APIPA and the proxy's fake-IP range; they are never reachable from a phone
-      if (a.address.startsWith('169.254.') || a.address.startsWith('198.18.')) continue
-      out.push(`${a.address} (${name})`)
-    }
-  }
-  return out.sort((x, y) => (x.includes('(en0)') ? -1 : y.includes('(en0)') ? 1 : 0))
 }
 
 async function shutdown(signal) {

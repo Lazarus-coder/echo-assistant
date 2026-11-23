@@ -354,6 +354,9 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .outcome-actions .selected { border-color: var(--accent); color: var(--accent); background: var(--panel-2); }
 .result-link { margin: 8px 0; }
 #proactiveOverview { display: flex; flex-direction: column; gap: 14px; padding-top: 8px; }
+.preview-items, .preview-mutes { padding-inline-start: 1.5rem; }
+.preview-items li, .preview-mutes li { margin: .5rem 0; overflow-wrap: anywhere; }
+.preview-items p { margin: .25rem 0; }
 .research-settings { padding: 12px 0 0; }
 .research-settings > .goal-checkbox { font-size: 13px; font-weight: 600; }
 .research-options, .goal-extra-sources, .goal-context { min-width: 0; margin: 10px 0; }

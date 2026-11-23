@@ -76,10 +76,10 @@ fi
 if node -e "const a=require('fs').existsSync('$ROOT/data/auth.json')&&JSON.parse(require('fs').readFileSync('$ROOT/data/auth.json','utf8')).password; process.exit(a?0:1)"; then
   ok "访问口令已设置（改口令：./bin/echo passwd）"
 else
-  printf '设置访问口令（≥6 位，手机访问要用）: '
+  printf '预设访问口令（≥6 位，启用登录时使用，可留空）: '
   read -rs PW; echo
   if [ "${#PW}" -lt 6 ]; then
-    warn "太短或为空，先跳过。局域网访问会退化为仅本机；之后可用 ./bin/echo passwd 设置"
+    warn "已跳过设置口令。之后可用 ./bin/echo passwd 设置"
   else
     PW="$PW" ROOT="$ROOT" node -e "
 const crypto=require('crypto'),fs=require('fs'),path=require('path')
@@ -96,6 +96,10 @@ console.log('ok')
 fi
 
 # --------------------------------------------------------------- 3. launchd
+SAVED_BIND="${ECHO_BIND-$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:ECHO_BIND' "$PLIST" 2>/dev/null || true)}"
+if [ "${ECHO_BIND+x}" ] && [ "$SAVED_BIND" != "all" ]; then SAVED_BIND=local; fi
+BIND_XML=""
+case "$SAVED_BIND" in all|local) BIND_XML="<key>ECHO_BIND</key><string>$SAVED_BIND</string>" ;; esac
 cat > "$PLIST" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -118,6 +122,7 @@ cat > "$PLIST" <<PLISTEOF
     <key>PATH</key><string>$(dirname "$NODE"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>ECHO_ROOT</key><string>$ROOT</string>
     <key>ECHO_PORT</key><string>$PORT</string>
+    $BIND_XML
   </dict>
 </dict>
 </plist>
@@ -175,12 +180,10 @@ if [ -n "$MENUBAR_BIN" ]; then
 fi
 sleep 2
 
-LAN="$(ipconfig getifaddr en0 2>/dev/null || true)"
 echo
 if curl -sf -m 5 "http://127.0.0.1:$PORT/api/health" >/dev/null; then
   ok "Echo 已常驻运行（登录自动启动、崩溃自动拉起）"
-  echo "   本机   http://127.0.0.1:$PORT"
-  [ -n "$LAN" ] && echo "   手机   http://$LAN:$PORT  （同一 WiFi，需要口令）"
+  "$ROOT/bin/echo" status
   echo
   echo "   常用命令： ./bin/echo status | logs | dream | say | open"
 else

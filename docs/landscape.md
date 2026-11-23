@@ -1,5 +1,13 @@
 # 同类项目全景与 Echo 的取舍
 
+## Previewing and steering a personal assistant · alpha.8
+
+| Product behavior | Decision for Echo |
+|---|---|
+| Zulip lets someone mute and unmute a single topic and makes exceptions for direct mentions. [Topic notifications](https://zulip.com/help/mute-a-topic) | A person can silence an optional topic and still receive a draft they explicitly requested. Muting supplies no usefulness or timing vote. |
+| Home Assistant shows whether an individual automation condition passes. [Testing automations](https://www.home-assistant.io/docs/automation/testing/) | Show the candidate's local rank alongside the reason it would be held, including during quiet hours. Opening the preview spends no interruption budget. |
+| Hermes Agent's Curator can run a dry run and report what it would change. [Curator](https://hermes-agent.nousresearch.com/docs/user-guide/features/curator) | Use the same ranking function for the preview and for delivery. Reading the prediction leaves the queue, feedback, conversation and model connection alone. |
+
 ## Personal agents and proactive assistance · 2026-11-23
 
 | Design | What informed Echo |
