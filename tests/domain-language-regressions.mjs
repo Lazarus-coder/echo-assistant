@@ -88,6 +88,18 @@ try {
     assert.match(zh.evidence[0].excerpt, /截止/)
     assert.match(en.evidence[0].excerpt, /Launch \{0\}; Check the launch calendar; due 2026-09-02/)
     assert.doesNotMatch(JSON.stringify([en.evidence, en.selection.reasons]), /\p{Script=Han}/u)
+    const queued = { id: 'candidate_1', kind: en.selection.kind, anchorId: en.selection.anchorId,
+      content: 'A draft from the earlier session.', wordingLanguage: 'en', evidence: en.evidence, selection: en.selection }
+    const reuse = rankProactiveContent({ cfg: enCfg, state, now, queue: [queued] })
+    assert.equal(reuse.chosen.candidate.id, queued.id)
+    assert.equal(reuse.chosen.candidate.anchorKey, zh.anchorKey)
+    const stale = { ...queued, evidence: [{ ...en.evidence[0], excerpt: 'A different launch' }] }
+    assert.deepEqual(rankProactiveContent({ cfg: enCfg, state, now, queue: [stale] }).staleQueueIds, [stale.id])
+    const legacyQueue = { ...queued, evidence: zh.evidence, wordingLanguage: undefined, content: '已保存的旧版提醒。' }
+    const reword = rankProactiveContent({ cfg: enCfg, state, now, queue: [legacyQueue] })
+    assert.deepEqual(reword.staleQueueIds, [legacyQueue.id])
+    assert.equal(reword.chosen.candidate, undefined)
+    assert.equal(reword.chosen.anchorKey, zh.anchorKey)
     state.attention = { history: [{ anchorKey: zh.anchorKey, status: 'delivered' }] }
     const repeated = rankProactiveContent({ cfg: enCfg, state, now })
     assert.equal(repeated.chosen, null)
