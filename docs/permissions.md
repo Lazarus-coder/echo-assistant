@@ -95,7 +95,7 @@ xcode-select --install      # only if you want the menu-bar app and lack swiftc
 
 ## 5. Network exposure
 
-- Fresh alpha.8 profiles listen on `127.0.0.1:8787`. The public alpha.6 installer defaults to all interfaces without a password.
+- Fresh profiles from alpha.8 onward listen on `127.0.0.1:8787`. The public alpha.6 installer defaults to all interfaces without a password.
 - On untrusted networks: `./bin/echo auth on` then `./bin/echo passwd`. Sessions are HttpOnly + SameSite=Strict; write requests additionally require a custom header that cross-site pages cannot forge.
 - For phone access, enable password protection, set `"bind": "all"` in `config.json` and restart Echo. An explicit `ECHO_BIND` overrides the saved value.
 
@@ -110,6 +110,8 @@ Disable personalization, turn off memory injection, or delete a person to stop i
 ## 7. Workspace tools and MCP
 
 Workspace tools start disabled. On the host Mac, open **工作区**, select an existing directory, and enable reading, editing, and Shell separately. File tools stay inside this directory, reject symlinks and Echo private data, and check the current file hash before replacement. Enabling editing authorizes direct edits; before/after snapshots are saved for review.
+
+**Conversation mode.** On the host Mac, choose **只读规划** to review a project before making changes. The server limits the assistant to read tools in that conversation, even if the project permits editing. It can search source text, read files and review existing results. Choosing **执行任务** restores the tools enabled for this workspace. Existing conversations start in that mode. The mode controls tools for the interactive turn. Echo still saves the chat and applies the profile’s memory and background settings.
 
 Every Shell and MCP tool call requires approval of its exact inputs. Shell runs with your operating-system account privileges: **this is not an OS sandbox**, and a working directory is not a file or network access boundary. MCP servers also run with their own configured privileges; connecting a stdio server launches its configured program. Only configure trusted servers. The official MCP SDK handles protocol negotiation, transport, and cancellation. Required subprocess credentials must be explicitly supplied in the server's `env`; Echo's provider keys are not automatically inherited.
 
@@ -133,7 +135,7 @@ User-confirmed official domains establish which sources may support a verified d
 - **屏幕录制**：默认不采集；只有 `deep` 档会开。开了以后本地 OCR、只发文字、截图即删、锁屏与空闲自动跳过、屏蔽名单你自己定。授权入口在状态栏图标的菜单里，授权后要重启一次图标进程。
 - **通知**：主动消息走 osascript，必要时在系统设置里允许。
 - **常驻**：`./install.sh` 注册 `com.echo.chat` + `com.echo.menubar` 两个 launchd 任务（登录自启、崩溃自动拉起）。
-- **网络**：alpha.8 新资料默认仅在本机监听，公开的 alpha.6 默认监听所有接口。手机访问可先启用口令，再将 `bind` 设为 `all` 并重启。
+- **网络**：从 alpha.8 起，新资料默认仅在本机监听，公开的 alpha.6 默认监听所有接口。手机访问可先启用口令，再将 `bind` 设为 `all` 并重启。
 - **相处方式**：交流偏好与手动人物背景存在 `data/state.json`，随备份导出、“忘掉一切”清除。开启功能与记忆注入时，相关资料会发给所选模型；关闭或删除只影响后续请求，不抹去历史对话。此功能不增加通知，也不单独保存情绪档案。
 - **后台研究**：默认关闭，在本机单独开启。新对话与选定来源可能发给已配置的模型，搜索词发给搜索提供方；不自动读取邮箱或所有文件。只读工具不获得 Shell/MCP/外部写权限，通知仍受静默与预算控制。关闭会取消研究，“全部忘掉”清除文档和事务；睡眠期间不运行。
 - **工作区与 MCP**：本机显式开启；文件编辑检查哈希并保存前后快照；Shell/MCP 每次确认。Shell 以本机账号权限运行，并非操作系统沙箱。局域网对话不能调用本机工具。停止不等于撤销，重启不会重放；`data/runs/` 保存输出，“全部忘掉”会清除。

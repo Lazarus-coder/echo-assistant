@@ -24,7 +24,7 @@ The installer places Echo and its data under `~/Library/Application Support/Echo
 
 ### Choose your access and data settings
 
-- **Network access.** Fresh alpha.8 profiles use loopback. For phone access, set a password and enable authentication, then set `"bind": "all"` in `config.json` and restart. The public alpha.6 installer defaults to LAN access without a password. [Network controls](permissions.md#5-network-exposure)
+- **Network access.** Fresh profiles from alpha.8 onward use loopback. For phone access, set a password and enable authentication, then set `"bind": "all"` in `config.json` and restart. The public alpha.6 installer defaults to LAN access without a password. [Network controls](permissions.md#5-network-exposure)
 - **Model and search:** content used in answers goes to the endpoint you choose; search queries go to the configured search provider. Review their data terms and usage charges. Local record storage does not mean every request stays on your device.
 - **Research:** enable it in **主动服务**, choose sources per goal, and review the results. Research and notification controls are independent. Checks pause when the Mac sleeps or Echo stops.
 - **Follow-ups.** In the public alpha.6 package, open **主动服务** to create a goal, set its date and choose its sources. With the current source, try “Track my proposal until Friday” in chat. Check the saved date, then ask “Show me the proposal draft.” You can read the draft and its sources with proactive messages off. If the draft asks a question, open it in **主动服务**, enter your answer and choose **回答并继续准备**. Your answer stays beside the original question. The goal shows when the next draft is ready.
@@ -71,7 +71,7 @@ Echo 目前是 alpha 产品，面向 macOS 13 或更高版本，安装包支持 
 
 ### 选择访问与数据设置
 
-- **网络访问。** alpha.8 新资料默认仅在本机监听。手机访问可先设置并启用口令，再配置 `"bind": "all"` 并重启。公开的 alpha.6 安装包默认向局域网开放且免登录。[网络访问说明](permissions.md#5-network-exposure)
+- **网络访问。** 从 alpha.8 起，新资料默认仅在本机监听。手机访问可先设置并启用口令，再配置 `"bind": "all"` 并重启。公开的 alpha.6 安装包默认向局域网开放且免登录。[网络访问说明](permissions.md#5-network-exposure)
 - **模型与搜索：**回答所需内容会发送到你选择的模型端点，搜索词会发送到所配置的搜索提供方。请了解提供方的数据条款与计费；记录存在本机不代表所有请求都留在本机。
 - **研究：**在 **主动服务** 开启，为每个目标选择来源，并复核结果。研究与通知分别控制；Mac 睡眠或 Echo 停止时暂停检查。
 - **跟进。** 公开的 alpha.6 安装包可在「主动服务」面板中创建目标、设定日期并选择来源。使用当前源码时，也可以在对话里说“帮我跟进提案，周五截止”。核对日期后，再问“给我看看提案草稿”，就能读到当前草稿及其来源。关闭主动消息也能查。如果草稿里有待确认问题，在「主动服务」打开它，填好回答并点「回答并继续准备」。回答会保留在原问题下，回到目标即可查看下一版的进度。

@@ -1,5 +1,14 @@
 # 同类项目全景与 Echo 的取舍
 
+## Coding in a personal conversation · alpha.9
+
+| Reference | Decision for Echo |
+|---|---|
+| Codex discovers project guidance in scoped `AGENTS.md` files. [OpenAI Docs](https://developers.openai.com/codex/guides/agents-md/) | Prompt Echo to consult project instructions when working on a repository. It reads them on demand through the same scoped file tools the user granted. |
+| DeepSeek Harness gives the tool registry a scope and derives model history from recorded steps. [DeepSeek Harness architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) | Restrict both tool discovery and dispatch for read-only conversations. Use the existing run record to show actual file changes, commands and outcomes. |
+| DeepSeek specifies a separate reasoning field across chat-completion steps in thinking mode. [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/) | Reconstruct per-round fields when continuing on the same official BYOK connection. Other endpoints receive the ordinary chat history. |
+| Aider feeds test failures back into its coding workflow. [Linting and testing](https://aider.chat/docs/usage/lint-test.html) | Let Echo inspect a failed command, edit the file and run the same check with a fresh approval. Keep both exit codes and any unrelated failures in the run. |
+
 ## Previewing and steering a personal assistant · alpha.8
 
 | Product behavior | Decision for Echo |

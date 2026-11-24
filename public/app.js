@@ -468,9 +468,12 @@ function updateRunFeedback(node, run) {
   if (body.innerHTML !== html) body.innerHTML = html
 }
 function toolText(value) { return value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
+function parseToolOutput(value) {
+  if (typeof value !== 'string') return value
+  try { return JSON.parse(value) } catch { return value }
+}
 function toolOutputText(value) {
-  let parsed = value
-  if (typeof value === 'string') { try { parsed = JSON.parse(value) } catch {} }
+  const parsed = parseToolOutput(value)
   if (parsed && typeof parsed === 'object') {
     if (typeof parsed.stdout === 'string' || typeof parsed.stderr === 'string') {
       return [parsed.stdout ? `标准输出\n${parsed.stdout}` : '', parsed.stderr ? `错误输出\n${parsed.stderr}` : '', parsed.reason ? `结束原因：${parsed.reason}` : ''].filter(Boolean).join('\n\n') || '（没有输出）'
@@ -727,11 +730,22 @@ function chatReady() {
   return cfg?.onboarding?.usable ?? (cfg?.upstreamConfigured === true)
 }
 
+function visibleWorkspaceMode() {
+  if (!S.boot?.localTools || !S.current || S.conv?.id !== S.current) return undefined
+  if (!S.boot.config.harness?.enabled && S.conv.workspaceMode !== 'read_only') return undefined
+  return S.conv.workspaceMode === 'read_only' ? 'read_only' : 'work'
+}
+
 function updateComposer() {
   const cfg = S.boot?.config ?? {}
   const ready = chatReady()
   const drawing = Boolean(S.drawing && S.drawing === S.current)
   const busy = Boolean(S.stream || S.selecting || S.preparing || S.uploading || drawing)
+  const mode = visibleWorkspaceMode()
+  const modeSelect = $('#workspaceMode')
+  modeSelect.hidden = !mode
+  modeSelect.disabled = !mode || busy
+  if (mode && !S.preparing) modeSelect.value = mode
   const text = $('#input').value.trim()
   $('#sendBtn').disabled = !S.current || !ready || busy || (!text && !S.att.length)
   $('#polishBtn').disabled = !ready || busy || !text || POLISH.running
@@ -1269,16 +1283,14 @@ async function startStream({ userText, regenerate = false, editId }) {
   if (S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return toast('请稍候…', true)
   if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
   const conversationId = S.current
+  const superseded = []
   if (editId) {
-    S.preparing = true
-    try {
-      await api(`conversations/${conversationId}/truncate`, { method: 'POST', body: { messageId: editId } })
-      const messages = $$('#threadInner .msg')
-      const index = messages.findIndex((node) => node.dataset.id === editId)
-      if (index >= 0) messages.slice(index).forEach((node) => node.remove())
-    } finally {
-      S.preparing = false
-    }
+    const messages = $$('#threadInner .msg')
+    const index = messages.findIndex((node) => node.dataset.id === editId)
+    if (index >= 0) superseded.push(...messages.slice(index))
+  } else if (regenerate) {
+    const last = $$('#threadInner .msg.assistant').at(-1)
+    if (last) superseded.push(last)
   }
   const inner = $('#threadInner')
   $('.hero', inner)?.remove()
@@ -1294,11 +1306,6 @@ async function startStream({ userText, regenerate = false, editId }) {
     inner.append(userNode)
     scrollBottom(true)
   }
-  if (regenerate) {
-    const nodes = $$('.msg.assistant', inner)
-    nodes.at(-1)?.remove()
-  }
-
   const node = messageNode({ id: uid(), role: 'assistant', content: '', createdAt: new Date().toISOString(), model: $('#modelSelect').value })
   inner.append(node)
   updateRegenerateButtons()
@@ -1331,6 +1338,8 @@ async function startStream({ userText, regenerate = false, editId }) {
       headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
       body: JSON.stringify({
         conversationId,
+        workspaceMode: visibleWorkspaceMode(),
+        editMessageId: editId,
         userText: regenerate ? undefined : userText,
         regenerate,
         images: outgoing.length ? outgoing.map((a) => a.dataUrl) : undefined,
@@ -1344,6 +1353,22 @@ async function startStream({ userText, regenerate = false, editId }) {
     })
     if (!res.ok) {
       const e = await res.json().catch(() => ({}))
+      if (res.status === 409 && e.error === 'workspace_mode_changed') {
+        st.modeChanged = true
+        S.stream = null
+        userNode?.remove()
+        node.remove()
+        if (S.conv?.id === conversationId && ['work', 'read_only'].includes(e.workspaceMode)) S.conv.workspaceMode = e.workspaceMode
+        if (userText && !editId) $('#input').value = [userText, $('#input').value].filter(Boolean).join('\n\n')
+        S.att = [...outgoing, ...S.att]
+        renderAttachments()
+        saveDraft()
+        setBusy(false)
+        autogrow()
+        updateRegenerateButtons()
+        toast(e.message ?? '工作区模式已更改，请核对模式后重新发送。', true)
+        return
+      }
       throw new Error(e.message ?? `HTTP ${res.status}`)
     }
     const reader = res.body.getReader()
@@ -1373,13 +1398,14 @@ async function startStream({ userText, regenerate = false, editId }) {
       toast(err.message, true)
     }
   } finally {
-    await finishStream(st)
+    if (!st.modeChanged) await finishStream(st)
   }
 
   function handleEvent(name, d) {
     if (S.stream !== st) return
     switch (name) {
       case 'meta':
+        superseded.forEach((previous) => previous.remove())
         node.dataset.id = d.messageId
         if (d.runId) st.runId = d.runId
         if (userNode && d.userMessageId) userNode.dataset.id = d.userMessageId
@@ -1679,6 +1705,7 @@ async function renderWorkspacePanel() {
   const config = data.config ?? {}
   if (S.boot?.config) S.boot.config.harness = config
   updateWorkspaceBadge()
+  updateComposer()
   // Only opening the panel rebuilds its form; background polling updates the runs below.
   panel.innerHTML = `<section class="sect"><h3>工作区执行</h3>
     <p class="muted small">让 Echo 读取项目、编辑文件、执行命令，并保存每一步的输入、输出和结果。启用后，在对话中直接描述任务。</p>
@@ -1726,6 +1753,7 @@ async function saveWorkspaceForm(form) {
     WORKSPACE.config = result.config ?? config
     if (S.boot?.config) S.boot.config.harness = WORKSPACE.config
     updateWorkspaceBadge()
+    updateComposer()
     status.textContent = '已保存。下一条对话将使用这些权限。'
   } catch (err) {
     status.textContent = err.message
@@ -1733,6 +1761,37 @@ async function saveWorkspaceForm(form) {
     delete form.dataset.saving
     submit.disabled = false
   }
+}
+
+function runReviewHtml(run) {
+  if (!WORKSPACE.local) return ''
+  const files = [], commands = []
+  for (const step of run.steps ?? []) {
+    if (['workspace_write', 'workspace_edit'].includes(step.name) && step.changes?.length) {
+      const changes = step.changes.map((change) => `${change.before === null ? '新建' : '修改'} <code>${esc(change.path)}</code>`)
+      const snapshots = (step.artifacts ?? []).filter((a) => /\.(before|after)\.txt$/.test(a.name))
+        .map((a) => ({ ...a, name: a.name.endsWith('.before.txt') ? '修改前' : '修改后' }))
+      files.push(`<li>${changes.join('、')}<div>${artifactLinks(snapshots)}</div></li>`)
+    }
+    if (step.name !== 'shell_exec') continue
+    const result = parseToolOutput(step.result)
+    const command = step.args?.command ?? result?.command
+    const cwd = result?.cwd ?? step.args?.cwd ?? (step.args ? '.' : '未记录')
+    const exit = step.exitCode ?? result?.exitCode
+    const reason = step.terminationReason ?? result?.reason
+    const signal = step.exitSignal ?? result?.signal
+    const reasonLabels = { timeout: '命令超时', output_limit: '达到输出上限', cancelled: '已停止', output_error: '输出保存失败', process_error: '进程错误' }
+    const details = [toolStatus(step), exit != null ? `退出码 ${exit}` : '', reasonLabels[reason] ?? reason, signal,
+      step.args?.timeoutMs != null ? `请求超时 ${step.args.timeoutMs} ms` : ''].filter(Boolean)
+    const error = step.error || result?.error || (step.status === 'failed' && result?.stderr)
+    const logs = (step.artifacts ?? []).filter((a) => ['stdout.txt', 'stderr.txt'].includes(a.name))
+    commands.push(`<li><pre class="run-code">${esc(command ?? '命令未记录')}</pre><p class="muted small">目录 <code>${esc(cwd)}</code> · ${esc(details.join(' · '))}</p>
+      ${error ? `<pre class="run-code err">${esc(String(error).length > 1000 ? '…' + String(error).slice(-1000) : error)}</pre>` : ''}${artifactLinks(logs)}</li>`)
+  }
+  if (!files.length && !commands.length) return ''
+  return `<section class="run-review" aria-label="工作区结果"><h3>工作区结果</h3>
+    ${files.length ? `<h4>文件工具记录的变更</h4><ul>${files.join('')}</ul>` : ''}
+    <h4>Shell 命令记录</h4>${commands.length ? `<ol>${commands.join('')}</ol>` : '<p class="muted small">本轮没有 Shell 命令验证记录。</p>'}</section>`
 }
 
 function runStepHtml(runId, step, workspaceRoot) {
@@ -1799,7 +1858,8 @@ async function inspectRun(id, { poll = false } = {}) {
   const openSteps = new Set($$('details[open]', inspector).map((details) => details.dataset.stepId))
   inspector.innerHTML = `<h3>执行详情</h3>
     <div class="run-feedback" data-state="${esc(run.status)}"><div class="run-feedback-body" role="status" aria-live="polite" aria-atomic="true">${runFeedbackHtml(run)}</div></div>
-    <p class="muted small">${esc(run.workspaceRoot ?? '')}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
+    <p class="muted small">${esc(run.workspaceRoot ?? '')}${run.workspaceMode === 'read_only' ? ' · 只读规划' : run.workspaceMode === 'work' && run.workspaceRoot ? ' · 执行任务' : ''}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
+    ${runReviewHtml(run)}
     ${(run.steps ?? []).map((step) => runStepHtml(id, step, run.workspaceRoot)).join('') || '<p class="muted small">尚未调用工具。</p>'}
     ${artifactLinks(run.artifacts)}`
   inspector.dataset.key = key
@@ -3831,6 +3891,24 @@ $('#modelSelect').addEventListener('change', (e) => {
   api(`conversations/${S.current}`, { method: 'PATCH', body: { model: e.target.value } })
   autogrow()
 })
+async function changeWorkspaceMode(select) {
+  const mode = select.value
+  if (!visibleWorkspaceMode() || select.disabled || !['read_only', 'work'].includes(mode)) return
+  const id = S.current
+  S.preparing = true
+  updateComposer()
+  try {
+    const saved = await api(`conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: { workspaceMode: mode } })
+    if (saved.id !== id || saved.workspaceMode !== mode) throw new Error('工作区模式保存失败，请刷新后重试。')
+    if (S.conv?.id === id) S.conv.workspaceMode = saved.workspaceMode
+  } catch (error) {
+    toast(error.message, true)
+  } finally {
+    S.preparing = false
+    updateComposer()
+  }
+}
+$('#workspaceMode').addEventListener('change', (event) => changeWorkspaceMode(event.target))
 $('#searchSelect').addEventListener('change', (e) => {
   prefs.searchMode = e.target.value
   api(`conversations/${S.current}`, { method: 'PATCH', body: { searchMode: e.target.value } })

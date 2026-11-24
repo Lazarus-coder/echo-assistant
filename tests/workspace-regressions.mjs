@@ -28,7 +28,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 try {
   await test('tool definitions expose conventional function calling and root validation', async () => {
-    assert.deepEqual(WORKSPACE_TOOLS.map((entry) => entry.function.name), ['workspace_list', 'workspace_read', 'workspace_write', 'workspace_edit', 'shell_exec'])
+    assert.deepEqual(WORKSPACE_TOOLS.map((entry) => entry.function.name), ['workspace_list', 'workspace_read', 'workspace_search', 'workspace_write', 'workspace_edit', 'shell_exec'])
     for (const tool of WORKSPACE_TOOLS) assert.equal(tool.function.parameters.additionalProperties, false)
     assert.equal(await validateWorkspaceRoot(workspaceRoot), await fs.realpath(workspaceRoot))
     await assert.rejects(validateWorkspaceRoot('/'), /specific workspace/)
@@ -61,6 +61,61 @@ try {
     await assert.rejects(call('workspace_read', { path: 'secret.txt' }, { workspaceRoot: authorizedRoot }), { status: 403 })
     await assert.rejects(call('shell_exec', { command: 'pwd' }, { workspaceRoot: authorizedRoot }), { status: 403 })
     assert.equal(await fs.readFile(path.join(outside, 'secret.txt'), 'utf8'), 'outside')
+  })
+
+  await test('read-only search returns literal, ordered line excerpts only from visible workspace source', async () => {
+    const query = 'symbol.*(a)'
+    const source = path.join(workspaceRoot, 'lookup')
+    const excluded = ['.cache', 'node_modules', 'build']
+    await fs.mkdir(source)
+    for (const name of excluded) {
+      await fs.mkdir(path.join(source, name))
+      await fs.writeFile(path.join(source, name, 'excluded.txt'), query)
+    }
+    await fs.writeFile(path.join(source, 'z.txt'), 'first\n' + 'x'.repeat(3000) + query + ' after\n')
+    await fs.writeFile(path.join(source, 'a.txt'), query + '\nSYMBOL.*(A)\nsymbolxxxxa\n')
+    await fs.writeFile(path.join(source, '.hidden.txt'), query)
+    await fs.writeFile(path.join(source, 'generated.min.js'), query)
+    await fs.writeFile(path.join(source, 'empty.txt'), '')
+    await fs.writeFile(path.join(source, 'binary.dat'), Buffer.from(query + '\0' + query))
+    await fs.writeFile(path.join(outside, 'outside-hit.txt'), query)
+    await fs.symlink(path.join(outside, 'outside-hit.txt'), path.join(source, 'linked.txt'))
+    await fs.symlink(outside, path.join(source, 'linked-dir'))
+    await fs.writeFile(path.join(process.env.ECHO_DATA_DIR, 'private-hit.txt'), query)
+    await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify({ private: query }))
+    const readOnly = { allowShell: false, allowWrites: false }
+    const found = parsed(await call('workspace_search', { query }, readOnly))
+    assert.deepEqual(found.matches.map(({ path, line }) => [path, line]), [['lookup/a.txt', 1], ['lookup/z.txt', 2]])
+    assert.equal(found.partial, false)
+    assert.equal(found.skipped.binary, 1)
+    assert.ok(found.matches[1].excerpt.includes(query))
+    assert.ok(found.matches[1].excerpt.length < 200)
+    const single = parsed(await call('workspace_search', { query, path: 'lookup/z.txt' }, readOnly))
+    assert.deepEqual(single.matches, found.matches.slice(1))
+    for (const requested of ['lookup/.hidden.txt', 'lookup/node_modules', 'lookup/linked-dir', 'echo-private', 'echo-settings.json', '../outside']) {
+      await assert.rejects(call('workspace_search', { query, path: requested }, readOnly))
+    }
+    for (const badQuery of ['', 'x\ny', 'a'.repeat(161)]) await assert.rejects(call('workspace_search', { query: badQuery }), /single-line/)
+    await assert.rejects(call('workspace_search', { query }, { signal: AbortSignal.abort() }), { name: 'AbortError' })
+  })
+
+  await test('search returns parseable results within the model preview and reports incomplete coverage', async () => {
+    const dir = path.join(workspaceRoot, 'search-limits')
+    await fs.mkdir(dir)
+    await fs.writeFile(path.join(dir, 'big.txt'), 'q'.repeat(1024 * 1024 + 1))
+    await fs.writeFile(path.join(dir, 'log.txt'), ('match ' + '\t'.repeat(70) + '\n').repeat(60))
+    const result = await call('workspace_search', { query: 'match', path: 'search-limits' })
+    const summary = parsed(result)
+    assert.ok(result.text.length <= 8000)
+    assert.ok(summary.matches.length > 0 && summary.matches.length <= 25)
+    assert.equal(summary.skipped.oversized, 1)
+    assert.equal(summary.limit, 'match_limit')
+    assert.equal(summary.partial, true)
+    assert.match(summary.hint, /Narrow path/)
+    for (let i = 0; i < 9; i++) await fs.writeFile(path.join(dir, `a${i}.txt`), 'x'.repeat(1024 * 1024))
+    const bounded = parsed(await call('workspace_search', { query: 'never', path: 'search-limits' }))
+    assert.equal(bounded.limit, 'byte_limit')
+    assert.equal(bounded.partial, true)
   })
 
   await test('create, paginated read, exact edit, and review snapshots preserve hashes and content', async () => {
@@ -113,9 +168,15 @@ try {
     assert.equal(first.partialLine, true)
     assert.equal(first.nextLine, 1)
     assert.ok(first.nextColumn > 1)
-    const second = parsed(await call('workspace_read', { path: 'long-line.txt', startLine: first.nextLine, startColumn: first.nextColumn }))
-    assert.equal(second.truncated, false)
-    const restored = first.content.slice(3) + second.content.split('\n')[0].slice(3)
+    assert.ok(first.content.length > 7000)
+    let page = first, restored = ''
+    while (true) {
+      if (page.startLine === 1) restored += page.content.split('\n')[0].slice(3)
+      if (!page.truncated) break
+      const result = await call('workspace_read', { path: 'long-line.txt', startLine: page.nextLine, startColumn: page.nextColumn })
+      assert.ok(result.text.length <= 8000)
+      page = parsed(result)
+    }
     assert.equal(restored, 'x'.repeat(90000))
     await fs.writeFile(path.join(workspaceRoot, 'bom.txt'), '\ufefforiginal')
     const original = parsed(await call('workspace_read', { path: 'bom.txt' }))
@@ -196,6 +257,8 @@ try {
     const result = await call('shell_exec', { command: `${node} stubborn.mjs`, timeoutMs: 200 })
     assert.equal(result.ok, false)
     assert.equal(parsed(result).reason, 'timeout')
+    assert.equal(result.terminationReason, 'timeout')
+    assert.equal(result.exitSignal, parsed(result).signal)
     assert.ok(Date.now() - started < 3000)
   })
 

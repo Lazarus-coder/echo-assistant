@@ -50,6 +50,8 @@ function callsFor(scenario, toolMessages) {
     ].slice(count, count + 1)
   }
   if (count) return []
+  if (scenario === 'plan_search') return [{ name: 'workspace_search', args: { query: 'find_this_handler' } }]
+  if (scenario === 'plan_write') return [{ name: 'workspace_write', args: { path: 'unauthorized.txt', content: 'unexpected' } }]
   if (scenario === 'approve') return [{ name: 'shell_exec', args: approvedArgs }]
   if (scenario === 'boundary') return [{ name: 'shell_exec', args: { command: "printf 'forbidden' > boundary.txt", cwd: '.' } }]
   if (scenario === 'stop' || scenario === 'disable') return [{ name: 'shell_exec', args: longArgs }]
@@ -172,14 +174,16 @@ const configure = (config, extra) => api('harness', { method: 'PATCH', body: { c
 const getRun = async (runId) => (await api(`runs/${runId}`)).body.run
 const exists = (filename) => fs.stat(filename).then(() => true, () => false)
 
-async function startChat(scenario, headers = {}) {
-  const created = await api('conversations', { method: 'POST', body: { title: `Harness ${scenario}` } })
-  assert.equal(created.status, 200)
-  const conversationId = created.body.id
+async function startChat(scenario, headers = {}, { conversationId, ...options } = {}) {
+  if (!conversationId) {
+    const created = await api('conversations', { method: 'POST', body: { title: `Harness ${scenario}` } })
+    assert.equal(created.status, 200)
+    conversationId = created.body.id
+  }
   const ctrl = new AbortController()
   const response = await fixtureFetch(`${base}/api/chat`, {
     method: 'POST', headers: { 'x-echo-request': 'echo', 'content-type': 'application/json', ...headers },
-    body: JSON.stringify({ conversationId, userText: `HARNESS:${scenario}` }), signal: ctrl.signal,
+    body: JSON.stringify({ conversationId, userText: `HARNESS:${scenario}`, ...options }), signal: ctrl.signal,
   })
   assert.equal(response.status, 200)
   const stream = { conversationId, ctrl, events: [], ended: false, error: null }
@@ -264,6 +268,39 @@ try {
     const enabled = await configure({ enabled: true, workspaceRoot: workspace, allowWrites: true, allowShell: true, shellTimeoutMs: 10000, maxToolRounds: 8 })
     assert.equal(enabled.status, 200)
     assert.equal(enabled.body.config.workspaceRoot, await fs.realpath(workspace))
+  })
+
+  await test('a planning conversation can search, rejects write requests and keeps its history on a stale edit', async () => {
+    await fs.writeFile(path.join(workspace, 'handler.js'), '// find_this_handler\n')
+    const conversationId = (await api('conversations', { method: 'POST', body: { title: 'Planning' } })).body.id
+    const route = `conversations/${conversationId}`
+    const setMode = (workspaceMode) => api(route, { method: 'PATCH', body: { workspaceMode } })
+    assert.equal((await setMode('unknown')).status, 400)
+    assert.equal((await setMode('read_only')).body.workspaceMode, 'read_only')
+    const plan = await finish(await startChat('plan_search', {}, { conversationId, workspaceMode: 'read_only' }))
+    const run = await getRun(plan.message.runId)
+    assert.equal(run.workspaceMode, 'read_only')
+    assert.equal(run.status, 'completed')
+    assert.match(run.steps[0].result, /handler\.js/)
+    const offered = modelRequests.find((r) => r.scenario === 'plan_search' && r.body.stream).body.tools.map((t) => t.function.name)
+    assert.ok(offered.includes('workspace_search') && offered.includes('follow_up_list'))
+    assert.ok(!offered.some((name) => ['workspace_write', 'workspace_edit', 'shell_exec', 'follow_up_create', 'follow_up_update', 'follow_up_complete'].includes(name)))
+    const rejected = await finish(await startChat('plan_write', {}, { conversationId }))
+    assert.equal(rejected.message.runStatus, 'failed')
+    assert.equal(await exists(path.join(workspace, 'unauthorized.txt')), false)
+    assert.equal((await setMode('work')).status, 200)
+    const original = (await api(route)).body.messages
+    const editMessageId = original[0].id
+    const requestsBefore = modelRequests.length
+    const stale = await api('chat', { method: 'POST', body: { conversationId, workspaceMode: 'read_only', userText: 'stale edit', editMessageId } })
+    assert.equal(stale.status, 409)
+    assert.equal(stale.body.workspaceMode, 'work')
+    assert.deepEqual((await api(route)).body.messages, original)
+    assert.equal(modelRequests.length, requestsBefore)
+    await finish(await startChat('revised', {}, { conversationId, workspaceMode: 'work', editMessageId }))
+    const revised = (await api(route)).body.messages
+    assert.deepEqual(revised.map((m) => m.role), ['user', 'assistant'])
+    assert.equal(revised[0].content, 'HARNESS:revised')
   })
 
   await test('mocked model can write, read, hash-check edit, verify and persist review snapshots', async () => {
@@ -408,6 +445,10 @@ try {
       assert.equal(exposed.status, 200)
       assert.equal(exposed.body.local, false)
       assert.equal(exposed.body.config.workspaceRoot, '')
+      const bootstrap = (await api('bootstrap', { headers })).body
+      assert.equal(bootstrap.localTools, false)
+      assert.equal(bootstrap.config.harness.workspaceRoot, '')
+      assert.equal((await api(`conversations/${stream.conversationId}`, { method: 'PATCH', headers, body: { workspaceMode: 'work' } })).status, 403)
       assert.equal((await configure({ enabled: false }, { headers })).status, 403)
       assert.equal((await api('settings', { method: 'PATCH', headers, body: { config: { harness: { enabled: false } } } })).status, 403)
       assert.equal((await api('settings', { method: 'PATCH', headers, body: { config: { mcpServers: { fixture: { enabled: false } } } } })).status, 403)
@@ -421,6 +462,7 @@ try {
       assert.ok(!request.tools.some((tool) => /^(workspace_|shell_exec|read_output|fixture__)/.test(tool.function.name)), `${label} received local tool capabilities`)
     }
     assert.equal((await getRun(pending.runId)).status, 'awaiting_approval')
+    assert.equal((await api(`conversations/${stream.conversationId}`, { method: 'PATCH', body: { workspaceMode: 'read_only' } })).status, 409)
     assert.equal(await exists(path.join(workspace, 'boundary.txt')), false)
     assert.equal((await api(`runs/${pending.runId}/approvals/${pending.approval.id}`, { method: 'POST', body: { decision: 'deny' } })).status, 200)
     assert.equal((await finish(stream)).aborted, true)

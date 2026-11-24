@@ -100,6 +100,71 @@ test('run feedback distinguishes waiting, running and terminal outcomes without 
   }
 })
 
+test('local workspace review preserves file snapshots and command attempts in recorded order', () => {
+  const h = harness()
+  const artifact = (name) => ({ name, url: '/api/runs/test/artifacts/step/' + name })
+  const steps = [
+    { name: 'workspace_edit', changes: [{ path: '<file>.mjs', before: 'old', after: 'new' }], artifacts: [artifact('1.before.txt'), artifact('1.after.txt')] },
+    { name: 'shell_exec', args: { command: 'npm test\nprintf end', cwd: 'package', timeoutMs: 3000 }, status: 'failed', result: JSON.stringify({ exitCode: 2, stderr: '<failure>' }), artifacts: [artifact('stderr.txt')] },
+    { name: 'shell_exec', args: { command: 'npm test' }, status: 'completed', exitCode: 0 },
+    { name: 'shell_exec', args: { command: 'wait' }, status: 'failed', result: '{"stdout":"clipped', terminationReason: 'timeout', exitSignal: 'SIGTERM' },
+  ]
+  h.context.fixture = { steps }
+  assert.equal(h.run('runReviewHtml(fixture)'), '', 'review is only available on the host')
+  const html = h.run('WORKSPACE.local = true; runReviewHtml(fixture)')
+  for (const token of ['修改 <code>&lt;file&gt;.mjs', '修改前', '修改后', 'npm test\nprintf end', 'package', '3000 ms', 'stderr.txt', '&lt;failure&gt;', '命令超时', 'SIGTERM']) assert.ok(html.includes(token), token)
+  assert.ok(html.indexOf('退出码 2') < html.indexOf('退出码 0'))
+  assert.doesNotMatch(html, /<failure>|<file>|测试通过|验证通过/)
+  const old = h.run('runReviewHtml({steps:[{name:"workspace_write", changes:[{path:"new",before:null}]}]})')
+  assert.match(old, /新建 <code>new/)
+  assert.match(old, /没有 Shell 命令验证记录/)
+  assert.doesNotMatch(old, /修改前|修改后/)
+  assert.equal(h.run('runReviewHtml({})'), '')
+})
+
+test('the workspace selector follows the conversation and effective host permissions', () => {
+  const h = harness(), select = h.get('#workspaceMode')
+  h.run('S.boot = {localTools:true,config:{harness:{enabled:true}}}; S.current="a"; S.conv={id:"a"}; updateComposer()')
+  assert.equal(select.hidden, false)
+  assert.equal(select.value, 'work')
+  h.run('S.conv.workspaceMode="read_only"; S.boot.config.harness.enabled=false; updateComposer()')
+  assert.equal(select.hidden, false, 'the user can leave read-only after disabling the workspace')
+  assert.equal(select.value, 'read_only')
+  h.run('S.stream={}; updateComposer()')
+  assert.equal(select.disabled, true)
+  h.run('S.stream=null; S.current="b"; S.conv={id:"b"}; updateComposer()')
+  assert.equal(select.hidden, true)
+  h.run('S.boot.localTools=false; S.boot.config.harness.enabled=true; updateComposer()')
+  assert.equal(select.hidden, true)
+  assert.equal(h.run('visibleWorkspaceMode()'), undefined)
+})
+
+test('mode changes block sending until saved and restore the previous mode on failure', async () => {
+  const h = harness(), select = h.get('#workspaceMode')
+  h.get('#input').value = 'review this project'
+  h.run('S.boot={localTools:true,config:{upstreamConfigured:true,harness:{enabled:true}}}; S.current="conv"; S.conv={id:"conv"}; updateComposer()')
+  let finish
+  h.context.save = async (route, options) => {
+    assert.equal(route, 'conversations/conv')
+    assert.equal(options.method, 'PATCH')
+    assert.equal(options.body.workspaceMode, 'read_only')
+    return new Promise((resolve) => { finish = resolve })
+  }
+  h.context.select = select
+  select.value = 'read_only'
+  const pending = h.run('api=save; changeWorkspaceMode(select)')
+  assert.equal(select.disabled, true)
+  assert.equal(h.get('#sendBtn').disabled, true)
+  finish({ id: 'conv', workspaceMode: 'read_only' })
+  await pending
+  assert.equal(h.run('S.conv.workspaceMode'), 'read_only')
+  assert.equal(h.get('#sendBtn').disabled, false)
+  select.value = 'work'
+  await h.run('api=async()=>{throw Error("busy")}; toast=()=>{}; changeWorkspaceMode(select)')
+  assert.equal(select.value, 'read_only')
+  assert.equal(h.get('#input').value, 'review this project')
+})
+
 test('run feedback reports observed step counts and the pending approval with escaped tool text', () => {
   const h = harness()
   const run = {

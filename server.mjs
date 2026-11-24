@@ -220,8 +220,9 @@ function publicRecall(recalled) {
 }
 
 function publicChatMessage(message) {
-  if (!message || !Object.hasOwn(message, 'recalled')) return message
-  return { ...message, recalled: publicRecall(message.recalled) }
+  if (!message) return message
+  const { reasoningReplay, ...visible } = message
+  return Object.hasOwn(visible, 'recalled') ? { ...visible, recalled: publicRecall(visible.recalled) } : visible
 }
 
 async function publicConversation(conv) {
@@ -706,7 +707,8 @@ async function api(req, res, url) {
     const conversations = await listConversations()
     return send(res, 200, {
       version: VERSION,
-      config: publicConfig(cfg),
+      config: publicConfig(cfg, req),
+      localTools: isLocalToolsRequest(req),
       conversations,
       main: conversations.find((c) => c.id === MAIN_ID) ?? null,
       memory: await memoryStats(),
@@ -798,9 +800,9 @@ async function api(req, res, url) {
     if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns('工具权限已更改，请重新发起')
     if (written.length) log.info(`设置页写入提供方变量：${written.join(',')}`)
     if (patch.mcpServers !== undefined || body.restartMcp) await connectMcp()
-    return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
+    return send(res, 200, { config: publicConfig(cfg, req), mcp: mcp.status() })
   }
-  if (method === 'GET' && p === 'settings') return send(res, 200, { config: publicConfig(cfg), mcp: mcp.status() })
+  if (method === 'GET' && p === 'settings') return send(res, 200, { config: publicConfig(cfg, req), mcp: mcp.status() })
 
   if (method === 'GET' && p === 'harness') {
     return send(res, 200, {
@@ -863,8 +865,12 @@ async function api(req, res, url) {
     }
     if (method === 'PATCH' && !action) {
       const body = await readBody(req)
+      if ('workspaceMode' in body) {
+        if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '请在本机设置工作区模式' })
+        if (inflight.has(id)) return send(res, 409, { error: 'busy', message: '请等本轮运行结束后再切换模式' })
+      }
       const conv = await patchConversation(id, body)
-      return send(res, 200, conv ? await publicConversation(conv) : { error: 'not found' })
+      return send(res, conv ? 200 : 404, conv ? await publicConversation(conv) : { error: 'not found' })
     }
     if (method === 'DELETE' && !action) {
       if (id === MAIN_ID) return send(res, 400, { error: '主对话不能删除' })
@@ -998,7 +1004,7 @@ async function api(req, res, url) {
       product: 'Echo',
       version: VERSION,
       at: nowIso(),
-      config: { ...publicConfig(cfg), upstream: { models: cfg.upstream.models.map((m) => m.id), defaultModel: cfg.upstream.defaultModel } },
+      config: { ...publicConfig(cfg, req), upstream: { models: cfg.upstream.models.map((m) => m.id), defaultModel: cfg.upstream.defaultModel } },
       conversations: convs,
       memory: {
         core: await loadCore(),
@@ -1101,7 +1107,7 @@ async function api(req, res, url) {
     }
     if (body.restartMcp) await connectMcp()
     log.info(`引导完成：端点 ${cfg.upstream.baseUrl || '(来自环境变量)'} · 模型 ${cfg.upstream.models.length} 个 · 记忆档 ${cfg.memory.profile} · 搜索链 ${(cfg.search.order ?? []).join('→')}${written.length ? ` · 写入密钥 ${written.join(',')}` : ''}`)
-    return send(res, 200, { ok: true, envKeys: written, onboarding: onboardingState(), config: publicConfig(cfg) })
+    return send(res, 200, { ok: true, envKeys: written, onboarding: onboardingState(), config: publicConfig(cfg, req) })
   }
 
   if (method === 'GET' && p === 'permissions') return send(res, 200, await permissionsReport(req))
@@ -1500,7 +1506,7 @@ async function diagnostics() {
   }
 }
 
-function publicConfig(c) {
+function publicConfig(c, req) {
   return {
     bind: c.bind,
     port: c.port,
@@ -1525,7 +1531,7 @@ function publicConfig(c) {
     dream: c.dream,
     proactive: c.proactive,
     attention: c.attention,
-    harness: c.harness,
+    harness: isLocalToolsRequest(req) ? c.harness : { ...c.harness, workspaceRoot: '' },
     mcpServers: Object.fromEntries(Object.entries(c.mcpServers ?? {}).map(([k, v]) => [k, { type: v.type, enabled: v.enabled !== false, url: v.url, command: v.command, args: v.args }])),
   }
 }
@@ -1586,9 +1592,31 @@ async function changePassword(req, res, who) {
 async function streamChatHandler(req, res) {
   const body = await readBody(req)
   const conversationId = assertId(String(body.conversationId ?? ''))
+  if ('editMessageId' in body) {
+    assertId(body.editMessageId)
+    if (body.regenerate || typeof body.userText !== 'string' || !body.userText.trim()) return send(res, 400, { error: '请填写要替换的消息' })
+  }
   if (inflight.has(conversationId)) return send(res, 409, { error: 'busy', message: '这个会话正在生成中' })
   const ctrl = new AbortController()
   inflight.set(conversationId, ctrl)
+  if ('workspaceMode' in body || 'editMessageId' in body) {
+    try {
+      const conv = await getConversation(conversationId, { afterWrites: true })
+      const workspaceMode = conv?.workspaceMode ?? 'work'
+      if (!conv || ('workspaceMode' in body && workspaceMode !== body.workspaceMode)) {
+        inflight.delete(conversationId)
+        if (!conv) return send(res, 404, { error: '会话不存在' })
+        return send(res, 409, { error: 'workspace_mode_changed', workspaceMode, message: '本对话的工作区模式已改变，请核对后再发送。' })
+      }
+      if (body.editMessageId && !conv.messages.some((m) => m.role === 'user' && m.id === body.editMessageId)) {
+        inflight.delete(conversationId)
+        return send(res, 409, { error: '原消息已变化，请刷新后再编辑' })
+      }
+    } catch (error) {
+      inflight.delete(conversationId)
+      throw error
+    }
+  }
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
     'cache-control': 'no-cache, no-transform',
@@ -1632,6 +1660,7 @@ async function streamChatHandler(req, res) {
     for await (const ev of runTurn({
       conversationId,
       userText: body.userText,
+      editMessageId: body.editMessageId,
       regenerate: Boolean(body.regenerate),
       searchMode: body.searchMode,
       model: body.model,
@@ -1659,7 +1688,7 @@ async function streamChatHandler(req, res) {
       model: doneEvt?.message?.model ?? body.model ?? cfg.upstream.defaultModel,
       rounds: doneEvt?.rounds ?? 1,
       ms: Date.now() - startedAt,
-      ok: doneEvt?.message?.runStatus === 'completed' && !failedTools,
+      ok: doneEvt?.message?.runStatus === 'completed',
       aborted: Boolean(doneEvt?.aborted),
       tools: toolCount,
       failedTools,

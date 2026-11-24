@@ -53,9 +53,9 @@ async function collect(generator, onEvent = () => {}) {
   for await (const event of generator) { events.push(event); await onEvent(event) }
   return events
 }
-function response({ content = '', calls = [] } = {}) {
+function response({ content = '', calls = [], finish = calls.length ? 'tool_calls' : 'stop' } = {}) {
   const delta = { content, ...(calls.length ? { tool_calls: calls.map((call, index) => ({ index, id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) } })) } : {}) }
-  return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: calls.length ? 'tool_calls' : 'stop' }] })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
+  return new Response(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\ndata: [DONE]\n\n`, { headers: { 'content-type': 'text/event-stream' } })
 }
 function assertToolProtocol(messages) {
   const pending = new Set()
@@ -387,6 +387,7 @@ try {
     const done = events.findLast((event) => event.type === 'done')
     assert.equal(done.message.tools.length, 32)
     assert.equal(requests.length, 2)
+    assert.equal(done.rounds, requests.length)
     assert.equal(requests[1].tools, undefined)
     assert.equal(done.message.finishReason, 'tool_limit', 'a successful summary cannot hide the eight unexecuted requests')
     assert.equal(done.message.runStatus, 'limit_reached')
@@ -413,6 +414,173 @@ try {
     assert.equal(run.status, 'failed')
     assert.equal(run.error, done.message.runError)
     assert.equal(run.steps[0].status, 'failed')
+  })
+
+  for (const unrelatedFailure of [false, true]) {
+    await test(`a repaired program passes the original command, preserving unrelated failures: ${unrelatedFailure}`, async () => {
+      await resetConfig({ maxToolRounds: 6 })
+      const conv = await store.createConversation()
+      const file = 'math.cjs'
+      await fs.writeFile(path.join(workspaceRoot, file), 'module.exports = () => 1\n')
+      await fs.writeFile(path.join(workspaceRoot, 'check.cjs'), "require('node:assert/strict').equal(require('./math.cjs')(), 2)\n")
+      const command = { command: 'node check.cjs', cwd: '.' }
+      let requests = 0
+      globalThis.fetch = async (_, options) => {
+        const body = JSON.parse(options.body)
+        switch (++requests) {
+          case 1: return response({ calls: [
+            ...(unrelatedFailure ? [{ id: 'missing', name: 'workspace_read', args: { path: 'another-missing.cjs' } }] : []),
+            { id: 'run-test', name: 'shell_exec', args: command },
+          ] })
+          case 2: return response({ calls: [{ id: 'locate', name: 'workspace_search', args: { query: 'module.exports = () =>' } }] })
+          case 3: {
+            const { matches } = JSON.parse(body.messages.at(-1).content.split('\n输出文件')[0])
+            return response({ calls: [{ id: 'inspect', name: 'workspace_read', args: { path: matches[0].path } }] })
+          }
+          case 4: {
+            const { hash } = JSON.parse(body.messages.at(-1).content.split('\n输出文件')[0])
+            return response({ calls: [{ id: 'repair', name: 'workspace_edit', args: { path: file, oldText: '=> 1', newText: '=> 2', expectedHash: hash } }] })
+          }
+          case 5: return response({ calls: [{ id: 'retest', name: 'shell_exec', args: { cwd: '.', command: command.command } }] })
+          case 6: return response({ content: 'Re-ran check.cjs after editing math.cjs.' })
+          default: throw new Error('Unexpected model request')
+        }
+      }
+      const approvals = new Set()
+      const events = await collect(runTurn({ conversationId: conv.id, userText: 'Fix the failing check', allowLocalTools: true,
+        onToolEvent(event) {
+          if (event.type !== 'tool_approval') return
+          approvals.add(event.approval.id)
+          void harness.decideApproval(event.runId, event.approval.id, 'approve')
+        },
+      }))
+      const done = events.at(-1)
+      assert.equal(done.type, 'done')
+      assert.equal(requests, 6)
+      assert.equal(approvals.size, 2)
+      assert.equal(await fs.readFile(path.join(workspaceRoot, file), 'utf8'), 'module.exports = () => 2\n')
+      const run = await harness.getRun(done.message.runId)
+      assert.deepEqual(run.steps.filter((step) => step.name === 'shell_exec').map((step) => [step.status, step.exitCode]), [['failed', 1], ['completed', 0]])
+      assert.equal(run.status, unrelatedFailure ? 'failed' : 'completed')
+      assert.equal(done.message.runStatus, run.status)
+      assert.equal((await store.getConversation(conv.id)).messages.at(-1).runStatus, run.status)
+      if (unrelatedFailure) assert.match(run.error, /another-missing/)
+    })
+  }
+
+  await test('repeating a failed command without progress stops before another approval or side effect', async () => {
+    await resetConfig({ maxToolRounds: 8 })
+    const conv = await store.createConversation()
+    const command = 'printf x >> attempts.txt && exit 9'
+    let requests = 0, approvals = 0
+    globalThis.fetch = async () => response({ calls: [
+      { id: `attempt-${++requests}`, name: 'shell_exec', args: { command } },
+      ...(requests > 1 ? [{ id: 'discarded', name: 'workspace_write', args: { path: 'discarded.txt', content: 'skip' } }] : []),
+    ] })
+    const events = await collect(runTurn({ conversationId: conv.id, userText: 'Run the diagnostic', allowLocalTools: true,
+      onToolEvent(event) {
+        if (event.type !== 'tool_approval') return
+        approvals++
+        void harness.decideApproval(event.runId, event.approval.id, 'approve')
+      },
+    }))
+    const last = events.at(-1)
+    assert.equal(last.type, 'error')
+    const run = await harness.getRun(last.assistant.runId)
+    assert.equal(run.status, 'failed')
+    assert.equal(run.finishReason, 'no_progress')
+    assert.equal(last.assistant.finishReason, run.finishReason)
+    assert.equal(run.steps.length, 1)
+    assert.equal(requests, 2)
+    assert.equal(approvals, 1)
+    assert.equal(await fs.readFile(path.join(workspaceRoot, 'attempts.txt'), 'utf8'), 'x')
+    await assert.rejects(fs.stat(path.join(workspaceRoot, 'discarded.txt')), { code: 'ENOENT' })
+    assertToolProtocol(last.assistant.toolMessages)
+  })
+
+  for (const finish of ['length', 'content_filter']) {
+    await test(`the model's ${finish} finish reason cannot dispatch a partial file change`, async () => {
+      await resetConfig()
+      const conv = await store.createConversation()
+      globalThis.fetch = async () => response({ content: 'Partial result.', finish,
+        calls: [{ id: 'fragment', name: 'workspace_write', args: { path: 'truncated.txt', content: 'partial' } }],
+      })
+      const events = await collect(runTurn({ conversationId: conv.id, userText: 'Make the change', allowLocalTools: true }))
+      const assistant = (await store.getConversation(conv.id)).messages.at(-1)
+      assert.equal(assistant.finishReason, finish)
+      assert.match(assistant.content, /Partial result/)
+      assert.equal(assistant.runStatus, finish === 'length' ? 'limit_reached' : 'failed')
+      const run = await harness.getRun(assistant.runId)
+      assert.equal(run.status, assistant.runStatus)
+      assert.equal(run.finishReason, finish)
+      assert.equal(run.steps.length, 0)
+      assert.ok(!events.some((event) => event.type === 'tool_call'))
+      await assert.rejects(fs.stat(path.join(workspaceRoot, 'truncated.txt')), { code: 'ENOENT' })
+    })
+  }
+
+  await test('chat pages recover escaped source and shell output using only the cursors delivered to the model', async () => {
+    await resetConfig({ maxToolRounds: 16 })
+    const conv = await store.createConversation()
+    const file = 'paged-source.txt'
+    const source = 'first\n' + 'x'.repeat(7800) + '\\\t\u0001"🧩'.repeat(1800) + '\nlast\n'
+    await fs.writeFile(path.join(workspaceRoot, file), source)
+    const lines = []
+    let output = '', hash, stepId, filePages = 0, logPages = 0
+    globalThis.fetch = async (_, options) => {
+      const { messages } = JSON.parse(options.body)
+      const last = messages.at(-1)
+      const use = (name, args) => response({ calls: [{ id: 'page_' + messages.length, name, args }] })
+      if (last.role !== 'tool') return use('workspace_read', { path: file })
+      const tool = messages.at(-2).tool_calls[0].function.name
+      if (tool === 'shell_exec') {
+        stepId = JSON.parse(last.content.split('\n输出文件（可用 read_output 读取）：')[1]).stepId
+        return use('read_output', { stepId, name: 'stdout.txt', maxChars: 16000 })
+      }
+      assert.ok(last.content.length <= 8000)
+      const page = JSON.parse(last.content)
+      if (tool === 'workspace_read') {
+        filePages++
+        assert.match(page.hash, /^[a-f0-9]{64}$/)
+        hash ??= page.hash
+        assert.equal(page.hash, hash)
+        for (const numbered of page.content.split('\n')) {
+          const [, line, fragment] = /^(\d+): (.*)$/u.exec(numbered)
+          lines[Number(line) - 1] = (lines[Number(line) - 1] ?? '') + fragment
+        }
+        if (page.nextLine !== null) return use(tool, { path: file, startLine: page.nextLine, startColumn: page.nextColumn })
+        assert.equal(lines.join('\n'), source)
+        return use('shell_exec', { command: 'cat paged-source.txt' })
+      }
+      assert.equal(tool, 'read_output')
+      logPages++
+      output += page.content
+      assert.equal(page.totalChars, source.length)
+      if (page.nextOffset !== null) {
+        assert.equal(page.nextOffset, output.length)
+        return use(tool, { stepId, name: 'stdout.txt', offset: page.nextOffset })
+      }
+      assert.equal(output, source)
+      return response({ content: 'Read the complete file and command log.' })
+    }
+    const events = await collect(runTurn({ conversationId: conv.id, userText: 'Read the fixture and compare its output', allowLocalTools: true,
+      onToolEvent(event) {
+        if (event.type === 'tool_approval') void harness.decideApproval(event.runId, event.approval.id, 'approve')
+      },
+    }))
+    assert.equal(events.at(-1).type, 'done')
+    assert.equal(events.at(-1).message.runStatus, 'completed')
+    assert.ok(filePages > 1 && logPages > 1)
+  })
+
+  await test('usage without a response does not complete the user request', async () => {
+    const conv = await store.createConversation()
+    globalThis.fetch = async () => new Response('data: {"choices":[],"usage":{"prompt_tokens":3}}\n\ndata: [DONE]\n\n')
+    const events = await collect(runTurn({ conversationId: conv.id, userText: 'Describe the result' }))
+    const last = events.at(-1)
+    assert.equal(last.type, 'error')
+    assert.equal(last.assistant.runStatus, 'failed')
+    assert.equal((await harness.getRun(last.assistant.runId)).finishReason, 'empty_response')
   })
 
   await test('context budgeting counts large tool request contents before retaining older history', async () => {

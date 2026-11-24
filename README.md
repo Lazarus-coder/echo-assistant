@@ -4,8 +4,8 @@
 
 ### Keep the thread. Move things forward.
 
-A personal AI assistant for your Mac, with memory you can manage,<br />
-research you choose to enable, and tools for the work in front of you.
+A personal AI assistant and coding harness for your Mac.<br />
+Plan a change, edit a project, run its checks, and keep track of the work in chat.
 
 **macOS · Bring your own model · Alpha**
 
@@ -19,7 +19,7 @@ research you choose to enable, and tools for the work in front of you.
 
 Echo brings conversations, personal context, and ongoing goals into one place. Start with a question, keep what matters, and return to a clear next step. Choose your own compatible model endpoint and API key; Echo runs on your Mac and stores its records there.
 
-**Which version has these features?** The public alpha.6 installer supports goals through the **主动服务** panel. The alpha.8 source and local Mac build also include chat-created goals, one-click adoption, the return brief and the reminder preview. [Alpha.8 notes](docs/release-notes-0.1.0-alpha.8.md) · [Source setup](docs/development.md#requirements-and-source-setup)
+**Which version has these features?** The public alpha.6 installer supports goals through the **主动服务** panel. The alpha.9 source and local Mac build also include chat-created goals, the reminder preview, read-only workspace planning and command review. [Alpha.9 notes](docs/release-notes-0.1.0-alpha.9.md) · [Source setup](docs/development.md#requirements-and-source-setup)
 
 ## Made for work that continues
 
@@ -28,6 +28,10 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 | **Work through a question** | Discuss ideas, refine a prompt, search for sources, and revisit a conversation. Image input and generation are available when supported by your selected models. |
 | **Prepare for a goal** | Ask Echo to track a goal with a due date. It prepares a draft in the background. Ask “show me the draft” to read the current result and its sources in chat, even with proactive messages off. Or define it in **主动服务** and choose each goal's sources. With research enabled, it uses public sources, attached documents, and selected folders, and follows relevant dates or source changes. |
 | **Work on a project** | Connect a local workspace to read files and, with the relevant permissions enabled, edit them or run commands. Follow the current step and outcome, then return to saved steps and outputs. |
+
+### Work on a repository
+
+On your Mac, open **工作区**, choose the project folder and enable workspace access. In the chat composer choose **只读规划** and ask “Find where the CSV is exported and show me what needs to change to add a date column.” Echo can search source text and read the matching lines. For an implementation, switch the same conversation to **执行任务**, enable editing and Shell as needed, and ask it to make the change and run the relevant tests. Review each proposed command. Under the reply, **查看步骤与结果** shows changed files, snapshots and command exit codes in execution order. [Workspace permissions](docs/permissions.md#7-workspace-tools-and-mcp)
 
 ## Context that stays useful
 
@@ -54,7 +58,7 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 
 Screen capture uses on-device OCR by default; extracted text can be sent to your model. Image mode can send screenshots. Local workspace execution and approvals are available only on the host Mac.
 
-New alpha.8 profiles listen on this Mac by default. The public alpha.6 installer defaults to LAN access without a password. Explicit network settings carry over on upgrade. [Network controls](docs/permissions.md#5-network-exposure)
+New profiles from alpha.8 onward listen on this Mac by default. The public alpha.6 installer defaults to LAN access without a password. Explicit network settings carry over on upgrade. [Network controls](docs/permissions.md#5-network-exposure)
 
 ## Start with Echo
 

@@ -111,6 +111,10 @@
             <textarea id="input" rows="1" aria-label="消息" aria-describedby="composerHint" placeholder="说说你想做什么…"></textarea>
             <div class="composer-bar">
               <div class="composer-meta">
+                <select id="workspaceMode" class="pill" aria-label="本对话的工作区模式" title="只读规划可查看项目。执行任务可按工作区权限编辑文件或申请执行命令。" hidden>
+                  <option value="work">工作区 · 执行任务</option>
+                  <option value="read_only">工作区 · 只读规划</option>
+                </select>
                 <span id="ctxChip" class="muted"></span>
               </div>
               <div class="composer-actions">

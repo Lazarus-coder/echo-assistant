@@ -233,6 +233,7 @@ details.fold .fold-body { padding: 2px 12px 11px; font-size: 13px; color: var(--
 .content img { max-width: 100%; border-radius: 12px; }
 .composer-bar { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
 .composer-meta { flex: 1; min-width: 0; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.composer-meta select { max-width: 100%; margin-right: 5px; }
 .composer-actions { display: flex; gap: 6px; }
 .composer-help { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; padding: 7px 4px 0; color: var(--muted); font-size: 11.5px; }
 #composerState { text-align: right; }
@@ -399,6 +400,10 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .run-inspector { min-width: 0; overflow-wrap: anywhere; }
 .run-inspector:empty { display: none; }
 .run-inspector h3 { font-size: 15px; }
+.run-review { margin: 14px 0; }
+.run-review h4 { margin: 10px 0 4px; font-size: 13px; }
+.run-review ul, .run-review ol { padding-left: 21px; margin: 4px 0; }
+.run-review li { margin-bottom: 7px; font-size: 13px; }
 .run-step { border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; min-width: 0; }
 .run-step > summary { cursor: pointer; font-size: 13px; overflow-wrap: anywhere; }
 .run-step > summary span { margin-left: 6px; }

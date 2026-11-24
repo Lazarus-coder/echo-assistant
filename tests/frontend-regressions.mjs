@@ -719,34 +719,59 @@ test('a browser abort never turns a completed or unconfirmed task into a cancell
   }
 })
 
-test('editing removes downstream messages only after successful truncation', async () => {
+test('one edit request carries the workspace mode and keeps history until acceptance', async () => {
   for (const success of [true, false]) {
-    const h = streamHarness([['done', { message: { content: 'Replacement reply' } }]])
+    const h = streamHarness([
+      ['meta', { messageId: 'replacement', userMessageId: 'new-user' }],
+      ['done', { message: { content: 'Replacement reply' } }],
+    ])
+    h.run('S.boot.localTools = true; S.boot.config.harness = {enabled:true}; S.conv = {id:S.current,workspaceMode:"read_only"}')
     const existing = ['earlier', 'edited-user', 'old-answer', 'later-user'].map((id) => {
       const node = element()
       node.dataset.id = id
       return node
     })
     h.collections.set('#threadInner .msg', existing)
+    h.get('#input').value = 'separate composer draft'
     let finish
-    let fail
-    h.context.truncate = () => new Promise((resolve, reject) => { finish = resolve; fail = reject })
-    h.run('api = truncate')
-    const request = h.run('startStream({ userText: "Edited", editId: "edited-user" })')
-    assert.equal(h.run('S.preparing'), true)
-    assert.ok(existing.every((node) => !node.removed), 'Keep history visible while saving')
-    if (success) {
-      finish({})
-      await request
-      assert.ok(!existing[0].removed, 'Messages before the edit must remain')
-      assert.ok(existing.slice(1).every((node) => node.removed))
-    } else {
-      fail(new Error('Truncation failed'))
-      await assert.rejects(request, /Truncation failed/)
-      assert.ok(existing.every((node) => !node.removed), 'A failed edit must preserve visible history')
+    const accepted = h.context.fetch
+    h.context.fetch = (path, options) => {
+      assert.equal(path, '/api/chat')
+      const data = JSON.parse(options.body)
+      assert.equal(data.editMessageId, 'edited-user')
+      assert.equal(data.userText, 'Edited')
+      assert.equal(data.workspaceMode, 'read_only')
+      return new Promise((resolve) => { finish = resolve })
     }
-    assert.equal(h.run('S.preparing'), false)
+    const request = h.run('startStream({ userText: "Edited", editId: "edited-user" })')
+    assert.ok(existing.every((node) => !node.removed))
+    finish(success ? await accepted() : {ok:false, status:409, json:async () => ({error:'workspace_mode_changed', workspaceMode:'work'})})
+    await request
+    assert.ok(!existing[0].removed)
+    assert.ok(existing.slice(1).every((node) => Boolean(node.removed) === success))
+    assert.equal(h.get('#input').value, 'separate composer draft')
+    if (!success) {
+      assert.equal(h.run('S.conv.workspaceMode'), 'work')
+      assert.ok(h.messages.every(({node}) => node.removed))
+    }
   }
+})
+
+test('a stale mode restores the unsent text and image while preserving new typing', async () => {
+  const h = streamHarness([])
+  h.run('S.boot.localTools=true; S.boot.config.harness={enabled:true}; S.conv={id:S.current,workspaceMode:"read_only"}; S.att=[{name:"image",bytes:22,dataUrl:"data:image/png;base64,test"}]')
+  h.get('#input').value = ''
+  let finish
+  h.context.fetch = () => new Promise((resolve) => { finish = resolve })
+  const request = h.run('startStream({ userText:"Plan tests" })')
+  h.get('#input').value = 'new typing'
+  finish({ok:false,status:409,json:async () => ({error:'workspace_mode_changed',workspaceMode:'work'})})
+  await request
+  assert.equal(h.run('S.conv.workspaceMode'), 'work')
+  assert.equal(h.get('#input').value, 'Plan tests\n\nnew typing')
+  assert.equal(h.run('S.att[0].name'), 'image')
+  assert.equal(h.storage.get('echo.draft.test-conversation'), h.get('#input').value)
+  assert.ok(h.messages.every(({node}) => node.removed))
 })
 
 test('generated images are displayed only in their original conversation', async () => {

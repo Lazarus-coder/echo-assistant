@@ -17,7 +17,7 @@ await fs.writeFile(process.env.ECHO_CONFIG, JSON.stringify({
   media: { imageOutput: false },
 }))
 
-const { streamChat } = await import('../lib/upstream.mjs')
+const { streamChat, thinkingOptions } = await import('../lib/upstream.mjs')
 const { loadConfig, saveConfig } = await import('../lib/config.mjs')
 const { bindAddress, describeListener } = await import('../lib/listener.mjs')
 await test('new profiles stay local and only an effective LAN listener advertises an address', async () => {
@@ -176,6 +176,78 @@ try {
   await test('source reads stop at the configured response-size budget', async () => {
     globalThis.fetch = async () => new Response('x'.repeat(100), { headers: { 'content-type': 'text/plain' } })
     await assert.rejects(webFetch('https://93.184.216.34/source', { maxBytes: 32 }), /大小预算/)
+  })
+
+  await test('DeepSeek tool turns replay per-step reasoning only on their original BYOK connection', async () => {
+    const previousUrl = process.env.ECHO_BACKEND_TEST_URL, previousKey = process.env.ECHO_BACKEND_TEST_KEY
+    const base = 'https://api.deepseek.com/v1'
+    const conv = await store.createConversation()
+    const requests = []
+    const send = async (prompt, enabled = true) => {
+      const { events } = await collect(runTurn({ conversationId: conv.id, userText: prompt, model: 'deepseek-flash', enableThinking: enabled }))
+      assert.equal(events.at(-1)?.message?.runStatus, 'completed')
+    }
+    try {
+      process.env.ECHO_BACKEND_TEST_URL = base
+      globalThis.fetch = async (url, options) => {
+        assert.equal(url, process.env.ECHO_BACKEND_TEST_URL + '/chat/completions')
+        requests.push(JSON.parse(options.body))
+        const firstStep = requests.length === 1
+        const delta = firstStep
+          ? { reasoning_content: 'first step 🕑', tool_calls: [{ index: 0, id: 'time_id', function: { name: 'local_time', arguments: '{}' } }] }
+          : { reasoning_content: 'final step ' + requests.length, content: 'Clock result ' + requests.length }
+        const frame = { choices: [{ delta, finish_reason: firstStep ? 'tool_calls' : 'stop' }] }
+        return streamingResponse(['data: ' + JSON.stringify(frame) + '\n\ndata: [DONE]\n\n'])
+      }
+      await send('Check time.')
+      await send('Continue.')
+      await send('Continue again.')
+      const reasoning = (index) => requests[index].messages.filter((m) => m.role === 'assistant').map((m) => m.reasoning_content)
+      assert.equal(requests.length, 4)
+      assert.deepEqual(requests[0].thinking, { type: 'enabled' })
+      assert.ok(!('enable_thinking' in requests[0]))
+      assert.deepEqual(reasoning(1), ['first step 🕑'])
+      assert.deepEqual(reasoning(2), ['first step 🕑', 'final step 2'])
+      assert.deepEqual(reasoning(3), ['first step 🕑', 'final step 2', 'final step 3'])
+      const saved = (await store.getConversation(conv.id)).messages.find((m) => m.toolMessages?.length)
+      assert.equal(saved.reasoning, 'first step 🕑final step 2')
+      assert.ok(!JSON.stringify(saved.toolMessages).includes('first step'))
+      await send('Thinking off.', false)
+      assert.deepEqual(requests[4].thinking, { type: 'disabled' })
+      assert.ok(!JSON.stringify(requests[4]).includes('reasoning_content'))
+      process.env.ECHO_BACKEND_TEST_KEY = 'rotated-local-test-only'
+      await send('Continue with new key.')
+      assert.ok(reasoning(5).every((value) => value === ''))
+      process.env.ECHO_BACKEND_TEST_URL = 'https://api.deepseek.com.example.invalid/v1'
+      await send('Continue on another server.')
+      assert.ok(!JSON.stringify(requests[6]).includes('reasoning_content'))
+      assert.ok(!('thinking' in requests[6]))
+      assert.deepEqual(thinkingOptions(base, false, 'responses'), { reasoning: { effort: 'none' } })
+    } finally {
+      process.env.ECHO_BACKEND_TEST_URL = previousUrl
+      process.env.ECHO_BACKEND_TEST_KEY = previousKey
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  await test('only a settled batch with complete object arguments can dispatch tools', async () => {
+    const call = (id, args) => ({ index: id, id: 'call_' + id, function: { name: 'local_time', arguments: args } })
+    const fixture = (calls, finish, done = true) => {
+      globalThis.fetch = async () => streamingResponse(['data: ' + JSON.stringify({ choices: [{ delta: { tool_calls: calls }, finish_reason: finish }] }) + '\n\n' + (done ? 'data: [DONE]\n\n' : '')])
+    }
+    const request = () => collect(streamChat({ body: { model: 'test' }, baseUrl: 'http://unused', apiKey: 'test' }))
+    fixture([call(0, '{}')], null, false)
+    await assert.rejects(request(), /中断/)
+    for (const malformed of ['{', 'null', '[]', '']) {
+      fixture([call(0, '{}'), call(1, malformed)], 'tool_calls')
+      await assert.rejects(request(), /工具/)
+    }
+    for (const reason of ['length', 'content_filter']) {
+      fixture([call(0, '{')], reason)
+      const { result } = await request()
+      assert.equal(result.finishReason, reason)
+      assert.deepEqual(result.toolCalls, [])
+    }
   })
 
   await test('streaming accepts CRLF frames split across transport chunks', async () => {
