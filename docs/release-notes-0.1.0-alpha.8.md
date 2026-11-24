@@ -1,6 +1,6 @@
 # Echo 0.1.0-alpha.8 · local Mac candidate
 
-Open **主动服务 → 预览候选提醒** to see up to three reminders Echo is considering, including why each is ready or being held. Previewing is local and requires no model call. You can mute an optional topic there or from a delivered reminder, and restore it from either place. In companion mini-chat, the mute applies to the kind of screen cue named on the bubble. A user-requested draft still follows the normal delivery rules.
+Open **Proactive assistance → Preview candidates** to see up to three reminders Echo is considering, including why each is ready or being held. Previewing is local and requires no model call. You can mute an optional topic there or from a delivered reminder, and restore it from either place. In companion mini-chat, the mute applies to the kind of screen cue named on the bubble. A user-requested draft still follows the normal delivery rules.
 
 The wizard connects to your own endpoint and accepts a manual model ID if the provider omits its model list. A custom key variable must contain the key for that connection. Background wording and gateway search use the configured endpoint and models. A fresh profile listens on this Mac. Explicit LAN settings survive upgrades.
 

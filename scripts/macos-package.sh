@@ -5,44 +5,50 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+source "$ROOT/bin/language.sh"
+echo_select_language "$ROOT"
 VER="$(node -p "require('./package.json').version")"
 NAME="Echo-$VER-macos"
 STAGE="$ROOT/dist/stage/$NAME"
 OUT="$ROOT/dist"
 VERIFY=1
-[ "${1:-}" = "--no-verify" ] && VERIFY=0
 
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 info() { printf '\033[36m·\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 ALLOW_DIRTY=0
-for arg in "$@"; do [ "$arg" = "--allow-dirty" ] && ALLOW_DIRTY=1; done
+for arg in "$@"; do
+  case "$arg" in --allow-dirty) ALLOW_DIRTY=1 ;; --no-verify) VERIFY=0 ;; esac
+done
 if [ -n "$(git status --porcelain)" ] && [ "$ALLOW_DIRTY" = "0" ]; then
-  printf '\033[31m✗ 工作区有未提交改动，拒绝打包（DMG 装的是工作区内容，会带上未提交的改动）\033[0m\n'
+  printf '\033[31m✗ %s\033[0m\n' "$(msg dirty_dmg)"
   git status --short | head -12 | sed 's/^/    /'
-  printf '  先提交，或显式用 --allow-dirty 打包\n'
+  printf '  %s\n' "$(msg dirty_hint)"
   exit 1
 fi
 
-command -v swiftc >/dev/null || die "需要 swiftc（xcode-select --install）"
-command -v hdiutil >/dev/null || die "需要 hdiutil（macOS 自带）"
-command -v npm >/dev/null || die "需要 npm 来打包锁定版本的运行依赖"
-[ -f "$ROOT/package-lock.json" ] || die "缺少 package-lock.json"
-node tests/installer-regressions.mjs || die "安装器隔离回归未通过"
+command -v swiftc >/dev/null || die "$(msg pack_swift)"
+command -v hdiutil >/dev/null || die "$(msg pack_hdiutil)"
+command -v npm >/dev/null || die "$(msg pack_npm)"
+[ -f "$ROOT/package-lock.json" ] || die "$(msg pack_lock)"
+if ! installer_checks="$(node tests/installer-regressions.mjs 2>&1)"; then
+  printf '%s\n' "$installer_checks" >&2
+  die "$(msg installer_tests_failed)"
+fi
 
 rm -rf "$STAGE" && mkdir -p "$STAGE" "$OUT" "$ROOT/build"
 
 # 1) 编译状态栏 App（通用二进制：Apple Silicon + Intel）+ 图标
-info "编译状态栏 App（arm64 + x86_64）…"
+info "$(msg compile_universal)"
 SWIFT_SRC="menubar/main.swift menubar/EchoBar.swift menubar/CompanionOverlay.swift"
 swiftc -O -target arm64-apple-macos13.0 -o "$ROOT/build/EchoBar.arm64" $SWIFT_SRC
 if swiftc -O -target x86_64-apple-macos13.0 -o "$ROOT/build/EchoBar.x86" $SWIFT_SRC 2>/dev/null; then
   lipo -create "$ROOT/build/EchoBar.arm64" "$ROOT/build/EchoBar.x86" -output "$ROOT/build/EchoBar"
-  ok "通用二进制：$(lipo -archs "$ROOT/build/EchoBar")"
+  ok "$(msg universal "$(lipo -archs "$ROOT/build/EchoBar")")"
 else
   cp "$ROOT/build/EchoBar.arm64" "$ROOT/build/EchoBar"
-  info "（x86_64 编译不可用，仅 Apple Silicon：$(lipo -archs "$ROOT/build/EchoBar")）"
+  info "$(msg arm_only "$(lipo -archs "$ROOT/build/EchoBar")")"
 fi
 mkdir -p "$ROOT/build/icons"
 swiftc -O -o "$ROOT/build/makeicon" menubar/make-icon.swift
@@ -75,25 +81,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
-plutil -lint "$APP/Contents/Info.plist" >/dev/null || die "Info.plist 不合法"
+plutil -lint "$APP/Contents/Info.plist" >/dev/null || die "$(msg plist_invalid)"
 # ad-hoc 签名：固定 bundle id + 固定路径，让"屏幕录制"授权尽量一次生效（未签名的裸二进制每次重编都会被当成新 App）
 codesign --force --deep --sign - --identifier com.echoassistant.menubar "$APP" >/dev/null 2>&1 || true
-codesign -dv "$APP" 2>&1 | grep -q 'adhoc' && ok "已 ad-hoc 签名（Identifier=com.echoassistant.menubar）" || info "未签名（macOS 会要求单独授权）"
-ok "Echo.app 组装完成（$(du -sh "$APP" | awk '{print $1}')）"
+codesign -dv "$APP" 2>&1 | grep -q 'adhoc' && ok "$(msg signed)" || info "$(msg unsigned)"
+ok "$(msg assembled "$(du -sh "$APP" | awk '{print $1}')")"
 
 # 3) 仅打包已提交的程序文件，排除目录内未跟踪的本机文件。
 git archive HEAD -- server.mjs install.sh package.json package-lock.json bin lib public tests docs CHANGELOG.md README.md README.zh-CN.md | tar -x -C "$STAGE"
-info "打包锁定版本的运行依赖（安装 DMG 时无需联网下载）…"
-( cd "$STAGE" && npm ci --omit=dev --ignore-scripts ) || die "运行依赖安装失败"
-( cd "$STAGE" && node --input-type=module -e "await import('./lib/mcp.mjs')" ) || die "MCP 运行依赖校验失败"
+info "$(msg bundle_deps)"
+( cd "$STAGE" && npm ci --omit=dev --ignore-scripts ) || die "$(msg deps_failed)"
+( cd "$STAGE" && node --input-type=module -e "await import('./lib/mcp.mjs')" ) || die "$(msg verify_mcp)"
 rm -rf "$STAGE/tests/last-report.json"
 cp "scripts/macos/Install Echo.command" "$STAGE/"
 cp "scripts/macos/Uninstall Echo.command" "$STAGE/"
-cp "scripts/macos/README.txt" "$STAGE/安装说明 README.txt"
+cp scripts/macos/README.txt "$STAGE/README.en.txt"
+cp scripts/macos/README.zh-CN.txt "$STAGE/README.zh-CN.txt"
 chmod +x "$STAGE/Install Echo.command" "$STAGE/Uninstall Echo.command" "$STAGE/bin/echo"
 
 # 4) DMG + ZIP
-info "生成 DMG…"
+info "$(msg create_dmg)"
 rm -f "$OUT/$NAME.dmg" "$OUT/$NAME.zip"
 hdiutil create -volname "Echo $VER" -srcfolder "$STAGE" -ov -format UDZO -quiet "$OUT/$NAME.dmg"
 ( cd "$OUT" && ditto -c -k --sequesterRsrc --keepParent "stage/$NAME" "$NAME.zip" )
@@ -111,46 +118,46 @@ if [ "$VERIFY" = "1" ]; then
     rm -rf "$INSTALL_TEST_ROOT"
   }
   trap cleanup_verify EXIT
-  info "挂载 DMG 验证…"
+  info "$(msg mount_dmg)"
   MOUNT="$(hdiutil attach -nobrowse -readonly "$OUT/$NAME.dmg" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)"
-  [ -d "$MOUNT" ] || die "DMG 挂载失败"
+  [ -d "$MOUNT" ] || die "$(msg mount_failed)"
   ls "$MOUNT" | sed 's/^/    /'
-  [ -x "$MOUNT/Install Echo.command" ] || die "安装器没有可执行位"
-  [ -f "$MOUNT/Echo.app/Contents/Info.plist" ] || die "Echo.app 不完整"
+  [ -x "$MOUNT/Install Echo.command" ] || die "$(msg not_executable)"
+  [ -f "$MOUNT/Echo.app/Contents/Info.plist" ] || die "$(msg app_incomplete)"
 
-  info "在临时目标目录试装（不注册或打开服务）…"
+  info "$(msg test_install)"
   INST="$INSTALL_TEST_ROOT/Library/Application Support/Echo"
   if env -u ECHO_PASSWORD -u ECHO_DATA_DIR -u ECHO_CONFIG -u NODE_OPTIONS \
      ECHO_FORCE=1 OPENAI_API_KEY=sk-installer-selftest OPENAI_BASE_URL=https://example.invalid/v1 \
      ECHO_PORT=0 "$MOUNT/Install Echo.command" --no-launchd --no-open --target "$INST" <<< "" >"$INSTALL_TEST_ROOT/install.log" 2>&1; then
-    ok "安装器跑通"
+    ok "$(msg install_passed)"
   else
     tail -20 "$INSTALL_TEST_ROOT/install.log"
-    die "安装器在临时目标目录下失败（见上面输出）"
+    die "$(msg test_install_failed)"
   fi
-  [ -f "$INST/server.mjs" ] && [ -f "$INST/package-lock.json" ] && [ -d "$INST/node_modules/@modelcontextprotocol/sdk" ] && [ -f "$INST/Echo.app/Contents/MacOS/EchoBar" ] && [ -x "$INST/bin/echo" ] || die "安装结果缺少关键文件"
-  ok "装出的内容完整（server.mjs / MCP 依赖 / Echo.app / bin/echo）"
+  [ -f "$INST/server.mjs" ] && [ -f "$INST/package-lock.json" ] && [ -d "$INST/node_modules/@modelcontextprotocol/sdk" ] && [ -f "$INST/Echo.app/Contents/MacOS/EchoBar" ] && [ -x "$INST/bin/echo" ] || die "$(msg missing_files)"
+  ok "$(msg required_files)"
 
-  info "用装出来的副本跑离线自测…"
+  info "$(msg test_copy)"
   if ( cd "$INST" && env -u NODE_OPTIONS node tests/selftest.mjs --json >"$INSTALL_TEST_ROOT/selftest.json" 2>&1 ); then
     cp "$INST/tests/last-report.json" "$OUT/$NAME.selftest.json"
-    ok "安装副本自测通过"
+    ok "$(msg copy_passed)"
   else
     tail -12 "$INSTALL_TEST_ROOT/selftest.json"
-    die "安装副本自测未通过"
+    die "$(msg copy_failed_tests)"
   fi
 
   # 隔离/凭据检查
   if [ -f "$INST/data/echo.env" ]; then
     perm=$(stat -f '%Lp' "$INST/data/echo.env")
-    [ "$perm" = "600" ] || die "echo.env 权限不是 600（是 ${perm}）"
-    ok "凭据文件权限 600"
+    [ "$perm" = "600" ] || die "$(msg wrong_mode "$perm")"
+    ok "$(msg creds_mode)"
   fi
   cleanup_verify
   trap - EXIT
-  ok "DMG 验证通过"
+  ok "$(msg dmg_passed)"
 fi
 
 echo
-info "上传到 release："
+info "$(msg upload_release)"
 echo "  gh release upload v$VER dist/$NAME.dmg dist/$NAME.zip dist/SHA256SUMS-macos --clobber"

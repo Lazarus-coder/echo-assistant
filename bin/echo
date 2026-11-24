@@ -1,8 +1,11 @@
 #!/bin/bash
-# Echo 控制脚本：up / down / status / logs / open / dream / say / diag / selftest / forget / remember
+# Echo local service controls.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/bin/language.sh"
+echo_select_language "$ROOT"
+
 LABEL="com.echo.chat"
 MENUBAR_LABEL="com.echo.menubar"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -13,39 +16,41 @@ UID_NUM="$(id -u)"
 
 c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
 c_warn() { printf '\033[33m%s\033[0m\n' "$*"; }
-c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; return 1; }
 
 need_plist() {
   if [ ! -f "$PLIST" ]; then
-    c_err "还没安装 launchd 服务。先运行：./install.sh"
+    c_err "$(msg need_launchd)"
     exit 1
   fi
 }
 
 need_dependencies() {
   if ! ( cd "$ROOT" && node --input-type=module -e "await import('@modelcontextprotocol/sdk/client/index.js')" >/dev/null 2>&1 ); then
-    c_err "运行依赖未就绪。请在项目目录运行：npm ci --omit=dev --ignore-scripts"
+    c_err "$(msg need_dependencies)"
     exit 1
   fi
 }
 
 local_token() {
-  [ -f "$ROOT/data/local.token" ] && cat "$ROOT/data/local.token" || echo ""
+  [ -f "${ECHO_DATA_DIR:-$ROOT/data}/local.token" ] && cat "${ECHO_DATA_DIR:-$ROOT/data}/local.token" || echo ""
 }
 
-api() { # api METHOD PATH [JSON|-]，"-" 表示请求体从 stdin 读（口令这类内容不落 argv）
+api() { # A dash reads sensitive request bodies from stdin.
   local method="$1" path="$2" body="${3:-}"
   local tok; tok="$(local_token)"
   if [ "$body" = "-" ]; then
-    curl -sS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
+    curl -fsS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
       -H 'content-type: application/json' -H 'x-echo-request: echo' -H "x-echo-local: $tok" --data-binary @-
   elif [ -n "$body" ]; then
-    curl -sS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
+    curl -fsS -m "${ECHO_API_TIMEOUT:-300}" -X "$method" "$URL/api/$path" \
       -H 'content-type: application/json' -H 'x-echo-request: echo' -H "x-echo-local: $tok" -d "$body"
   else
-    curl -sS -m "${ECHO_API_TIMEOUT:-60}" -X "$method" "$URL/api/$path" -H "x-echo-local: $tok"
+    curl -fsS -m "${ECHO_API_TIMEOUT:-60}" -X "$method" "$URL/api/$path" -H "x-echo-local: $tok"
   fi
 }
+
+format() { node "$ROOT/bin/cli-format.mjs" "$1" "$ECHO_DISPLAY_LANGUAGE"; }
 
 case "${1:-status}" in
   up)
@@ -58,7 +63,7 @@ case "${1:-status}" in
     ;;
   down)
     need_plist
-    launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null && c_warn "Echo 已停止（开机也不会自启）"
+    launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null && c_warn "$(msg service_stopped)"
     launchctl bootout "gui/$UID_NUM/$MENUBAR_LABEL" 2>/dev/null || true
     ;;
   restart)
@@ -68,24 +73,15 @@ case "${1:-status}" in
     sleep 1.2 && "$0" status
     ;;
   status)
-    printf '%-14s' "进程:"
-    if pgrep -f "node .*server\.mjs" >/dev/null; then c_ok "运行中"; else c_err "未运行"; fi
-    printf '%-14s' "健康检查:"
+    printf '%-14s' "$(msg process)"
+    if pgrep -f "node .*server\.mjs" >/dev/null; then c_ok "$(msg running)"; else c_err "$(msg offline)"; fi
+    printf '%-14s' "$(msg health)"
     if health="$(curl -sf -m 4 "$URL/api/health")"; then
-      c_ok "$URL 有响应"
-      node -e '
-const listener = JSON.parse(require("node:fs").readFileSync(0, "utf8")).listener
-if (listener) console.log(`  监听：${listener.address === "0.0.0.0" ? "局域网" : "仅本机"} ${listener.address}:${listener.port}`)
-' <<< "$health" 2>/dev/null
-      api GET summary 2>/dev/null | node -e '
-const d = JSON.parse(require("node:fs").readFileSync(0, "utf8"))
-if (!d.ok) { console.log("  暂时无法读取服务状态"); process.exit(0) }
-if (d.listener?.lanUrl) console.log("  同一网络访问：" + d.listener.lanUrl)
-console.log(`  未读 ${d.unread ?? 0} · 主动今日 ${d.proactiveToday ?? 0} · 跟进 ${d.loops ?? 0} 条 · 记忆 ${d.memory?.observations ?? 0} 条`)
-console.log(`  上次 Dream ${d.dreamLastAt || "从未"} · 搜索 ${d.enabled?.search ? "开" : "关"} · 主动 ${d.enabled?.proactive ? "开" : "关"}`)
-' 2>/dev/null
+      c_ok "$(msg responding "$URL")"
+      format health <<< "$health"
+      api GET summary | format summary
     else
-      c_err "$URL 无响应"
+      c_err "$(msg unreachable "$URL")"
     fi
     ;;
   logs)
@@ -97,56 +93,40 @@ console.log(`  上次 Dream ${d.dreamLastAt || "从未"} · 搜索 ${d.enabled?.
     open "$URL"
     ;;
   dream)
-    c_warn "触发 Dream 提炼（可能要 30–90 秒）…"
-    api POST dream '{}' | python3 -c "
-import sys,json
-d=json.load(sys.stdin); r=d.get('result',{})
-print('  ok=',r.get('ok'),'|',('；'.join(r.get('summary',[])) or r.get('error','')))
-print('  跟进',len(r.get('loops',[])),'条 · 话题',len(r.get('nudges',[])),'条')" 2>/dev/null || c_err "Dream 调用失败"
+    c_warn "$(msg dream_start)"
+    api POST dream '{}' | format dream || c_err "$(msg dream_failed)"
     ;;
   say)
-    c_warn "让助手判断是否要主动开口…"
-    api POST proactive/run '{}' | python3 -c "
-import sys,json
-d=json.load(sys.stdin); r=d.get('result',{})
-if r.get('acted'): print('  已发出：',r['message']['content'][:120])
-else: print('  这次没说：',r.get('skipped'),r.get('reason') or '')" 2>/dev/null || c_err "调用失败"
+    c_warn "$(msg checking)"
+    api POST proactive/run '{}' | format say || c_err "$(msg request_failed)"
     ;;
   search)
     shift
-    printf '%s' "${1:-今天美元汇率}" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"query": sys.stdin.read()}))' \
-      | api POST search/test - | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-print(f\"  引擎 {d.get('engine')} · {d.get('ms')}ms · {len(d.get('results',[]))} 条\")
-for r in d.get('results',[])[:3]: print('   -',r['url'][:70])" 2>/dev/null || c_err "搜索失败"
+    printf '%s' "${1:-$(msg default_query)}" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"query": sys.stdin.read()}))' \
+      | api POST search/test - | format search || c_err "$(msg search_failed)"
     ;;
   mcp)
-    api POST mcp/reload '{}' | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-for s in d.get('servers',[]): print(f\"  {s['name']:14s} {s['state']:9s} {s['tools']} 工具\")
-print('  （没有输出表示还没配置 MCP）')" 2>/dev/null
+    api POST mcp/reload '{}' | format mcp
     ;;
   passwd)
-    printf '新口令（≥6 位）: '; read -rs NEW; echo
-    printf '%s' "$NEW" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"next": sys.stdin.read()}))' \
-      | api POST password - >/dev/null && c_ok "口令已更新"
+    CURRENT=""
+    if [ "$(api GET bootstrap 2>/dev/null | node -e 'try { const a = JSON.parse(require("node:fs").readFileSync(0, "utf8")).config.auth; process.stdout.write(String(a.required && a.passwordSet)) } catch {}')" = "true" ]; then
+      printf '%s' "$(msg current_password)"; read -rs CURRENT; echo
+    fi
+    printf '%s' "$(msg new_password)"; read -rs NEW; echo
+    printf '%s\0%s' "$CURRENT" "$NEW" | node -e 'const [current, password] = require("node:fs").readFileSync(0, "utf8").split("\0"); process.stdout.write(JSON.stringify({ current, password }))' \
+      | api POST password - >/dev/null && c_ok "$(msg password_updated)"
     ;;
   auth)
     case "${2:-status}" in
       on)
-        api PATCH auth '{"required":true}' >/dev/null && c_ok "已开启口令验证（用 ./bin/echo passwd 设口令）"
+        api PATCH auth '{"required":true}' >/dev/null && c_ok "$(msg auth_on)"
         ;;
       off)
-        api PATCH auth '{"required":false}' >/dev/null && c_ok "已关闭口令验证"
+        api PATCH auth '{"required":false}' >/dev/null && c_ok "$(msg auth_off)"
         ;;
       *)
-        api GET bootstrap | python3 -c "
-import sys,json
-d=json.load(sys.stdin);a=d['config'].get('auth',{})
-print('  口令验证：', '开' if a.get('required') else '关', '｜ 是否已设口令：', '是' if a.get('passwordSet') else '否')
-print('  用法：./bin/echo auth on|off')" 2>/dev/null || c_err "读取失败"
+        api GET bootstrap | format auth || c_err "$(msg read_failed)"
         ;;
     esac
     ;;
@@ -155,47 +135,32 @@ print('  用法：./bin/echo auth on|off')" 2>/dev/null || c_err "读取失败"
     ;;
   env)
     if [ -f "$ROOT/data/echo.env" ]; then
-      c_ok "data/echo.env 存在，包含："
-      cut -d= -f1 "$ROOT/data/echo.env" | sed 's/^/  /'
+      c_ok "$(msg env_keys)"
+      sed -nE 's/^([A-Za-z_][A-Za-z_0-9]*)=.*/  \1/p' "$ROOT/data/echo.env"
     else
-      c_warn "没有 data/echo.env，跑 ./install.sh 生成"
+      c_warn "$(msg env_missing)"
     fi
     ;;
   selftest)
     shift
     need_dependencies
-    node "$ROOT/tests/selftest.mjs" "$@"
+    for arg in "$@"; do
+      if [ "$arg" = "--json" ]; then exec node "$ROOT/tests/selftest.mjs" "$@"; fi
+    done
+    node "$ROOT/tests/selftest.mjs" "$@" --json | format selftest
     ;;
   forget)
-    api GET memory/forgetting | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-print('  已淡出/已忘：',len(d.get('items',[])),'条')
-for o in d.get('items',[])[:6]: print(f\"   - [{o['status']}] {o['text'][:50]} ← {o['reason']}\")
-print('  遗忘日志最近 8 段：')
-for b in (d.get('log') or [])[:8]: print('   ',b.split(chr(10))[0])" 2>/dev/null || c_err "读取失败"
+    api GET memory/forgetting | format forget || c_err "$(msg read_failed)"
     ;;
   remember)
     shift
     printf '%s' "$*" | python3 -c 'import sys,json; sys.stdout.write(json.dumps({"text": sys.stdin.read(), "kind": "fact", "importance": 3}))' \
-      | api POST memory/observation - >/dev/null && c_ok "已记住：$*"
+      | api POST memory/observation - >/dev/null && c_ok "$(msg remembered "$*")"
     ;;
   diag)
-    api GET diagnostics | python3 -c "
-import sys,json
-d=json.load(sys.stdin);m=d['metrics'];t=m['turns']
-print(f\"  近 7 天生成 {t['count']} 次 · 失败率 {t['errorRate']*100:.0f}% · P95 {t['p95Ms']}ms · 平均 {t['avgRounds']} 轮\")
-print(f\"  tokens 入 {t['tokensIn']} / 出 {t['tokensOut']}\")
-for k,v in (m.get('tools') or {}).items(): print(f\"  工具 {k}: {v['count']} 次 成功 {v['okRate']*100:.0f}% P50 {v['p50Ms']}ms\")
-for k,v in (m.get('search') or {}).items(): print(f\"  搜索 {k}: {v['count']} 次 P50 {v['p50Ms']}ms\")
-p=m.get('proactive') or {}
-print(f\"  主动：开口 {p.get('acted',0)} 次 · 被接住率 {p.get('replyRate')}\")
-print(f\"  存储：截图 {d['storage']['screenshots']['mb']}MB/图片 {d['storage']['uploads']['mb']}MB · 记忆 {d['memory']['observations']} 条（淡出 {d['memory']['forgetting']['faded']}）· 图谱 {d['graph']['nodes']} 节点\")
-print(f\"  决策最优类型：{d['agency']['best']} · 屏幕感知 {'开' if d['screen']['enabled'] else '关'}\")" 2>/dev/null || c_err "诊断失败"
+    api GET diagnostics | format diag || c_err "$(msg diag_failed)"
     ;;
   *)
-    sed -n '2,3p' "$0"
-    echo
-    echo "用法: ./bin/echo {up|down|restart|status|logs|open|dream|say|search|mcp|auth|passwd|init|env|selftest|diag|forget|remember}"
+    echo "$(msg usage)"
     ;;
 esac

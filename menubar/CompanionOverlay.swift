@@ -3,10 +3,10 @@ import Foundation
 import WebKit
 
 /**
- * 伴随模式的桌面呈现：
- *  - 一个不抢焦点的悬浮窗（右上角），把气泡一张张叠出来；气泡自动淡出，鼠标悬停暂停
- *  - 点气泡 → 弹一个小对话窗（WKWebView 加载 /mini.html?b=<id>），专注于那个话题
- *  - 全部通过本机 HTTP 与主进程通信，不共享内存
+ * Desktop companion UI.
+ * A floating window stacks bubbles and pauses expiration while the pointer hovers.
+ * Clicking a bubble opens its topic in a WKWebView.
+ * The server and native app communicate through the local HTTP API.
  */
 
 struct Bubble {
@@ -19,11 +19,11 @@ struct Bubble {
 
 let SCENARIO_EMOJI: [String: String] = ["chat": "💬", "video": "🎬", "work": "💼", "code": "⌨️", "browse": "🌐", "other": "💡"]
 
-final class OverlayController: NSObject, WKUIDelegate {
+final class OverlayController: NSObject, WKUIDelegate, WKNavigationDelegate {
     private var window: NSWindow?
     private var stack: NSStackView?
-    private var visible: [String: NSView] = [:]
-    private var miniPanels: [String: NSWindow] = [:]
+    private var visible: [String: BubbleCard] = [:]
+    private var miniPanels: [String: (panel: NSWindow, topic: String)] = [:]
 
     private let maxVisible = 3
 
@@ -90,11 +90,11 @@ final class OverlayController: NSObject, WKUIDelegate {
             }
             stack.addArrangedSubview(card)
             visible[b.id] = card
-            // 进场
+            // Animate in.
             card.alphaValue = 0
             card.animator().alphaValue = 1
         }
-        // 只留最近 maxVisible 张
+        // Expire the oldest cards first.
         let arranged = stack.arrangedSubviews
         if arranged.count > maxVisible {
             for view in arranged.prefix(arranged.count - maxVisible) {
@@ -106,9 +106,30 @@ final class OverlayController: NSObject, WKUIDelegate {
         w.ignoresMouseEvents = false
     }
 
+    func updateLanguage() {
+        for card in visible.values { card.updateLanguage() }
+        for entry in miniPanels.values {
+            entry.panel.title = menuText("Companion · %@", entry.topic)
+            if let web = entry.panel.contentView as? WKWebView { updateMiniLanguage(web) }
+        }
+    }
+
+    private func updateMiniLanguage(_ web: WKWebView) {
+        guard let url = web.url, url.scheme == base.scheme, url.host == base.host,
+              url.port == base.port, url.path == "/mini.html" else { return }
+        // The embedded web view and the main browser have separate local storage.
+        // Let the page finish a reply or draft before navigating.
+        web.callAsyncJavaScript("window.dispatchEvent(new CustomEvent('echo-profile-language', { detail: language }))",
+                                arguments: ["language": menuLanguage], in: nil, in: .page) { _ in }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        updateMiniLanguage(webView)
+    }
+
     private func remove(_ id: String) {
         guard let view = visible[id], let stack = stack else { return }
-        (view as? BubbleCard)?.stopAutoDismiss()
+        view.stopAutoDismiss()
         visible.removeValue(forKey: id)
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.18
@@ -121,9 +142,9 @@ final class OverlayController: NSObject, WKUIDelegate {
         }
     }
 
-    /// 点开气泡 → 小对话窗（WKWebView）
+    /// Open the topic in a mini chat.
     func openMini(for bubble: Bubble, port: String, token: String) {
-        if let existing = miniPanels[bubble.id] {
+        if let existing = miniPanels[bubble.id]?.panel {
             existing.makeKeyAndOrderFront(nil)
             return
         }
@@ -133,7 +154,7 @@ final class OverlayController: NSObject, WKUIDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.title = "伴随 · \(bubble.topic)"
+        panel.title = menuText("Companion · %@", bubble.topic)
         panel.titlebarAppearsTransparent = true
         panel.level = .floating
         panel.isReleasedWhenClosed = false
@@ -143,6 +164,7 @@ final class OverlayController: NSObject, WKUIDelegate {
         }
         let web = WKWebView(frame: panel.contentView?.bounds ?? .zero, configuration: config)
         web.uiDelegate = self
+        web.navigationDelegate = self
         web.autoresizingMask = [.width, .height]
         if let url = URL(string: "http://127.0.0.1:\(port)/mini.html?b=\(bubble.id)") {
             web.load(URLRequest(url: url))
@@ -150,7 +172,7 @@ final class OverlayController: NSObject, WKUIDelegate {
         panel.contentView = web
         panel.center()
         panel.makeKeyAndOrderFront(nil)
-        miniPanels[bubble.id] = panel
+        miniPanels[bubble.id] = (panel, bubble.topic)
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: .main) { [weak self] _ in
             self?.miniPanels.removeValue(forKey: bubble.id)
         }
@@ -160,7 +182,7 @@ final class OverlayController: NSObject, WKUIDelegate {
         guard !token.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: ["origin": origin, "token": token]),
               let payload = String(data: data, encoding: .utf8) else { return nil }
-        // 只给本机小窗注入；mini.js 读取后删除，外部网页和子框架拿不到口令。
+        // Only the local mini page can consume this one-time credential injection.
         return """
         (() => {
           const auth = \(payload);
@@ -186,7 +208,7 @@ final class OverlayController: NSObject, WKUIDelegate {
     }
 }
 
-/// 单张气泡：图标 + 一句话 + 悬停显示的按钮；12 秒自动淡出（鼠标停在上面就不走）
+/// A bubble expires after 12 seconds unless the pointer is hovering.
 final class BubbleCard: NSView, NSGestureRecognizerDelegate {
     var onOpen: (() -> Void)?
     var onDismiss: ((String) -> Void)?
@@ -194,6 +216,9 @@ final class BubbleCard: NSView, NSGestureRecognizerDelegate {
     private var tracking: NSTrackingArea?
     private var timer: Timer?
     private var resolved = false
+    private let hint = NSTextField(labelWithString: "")
+    private let dismiss = NSButton(title: "✕", target: nil, action: #selector(dismissTapped))
+    private let wrongTime = NSButton(title: "", target: nil, action: #selector(wrongTimeTapped))
 
     init(bubble: Bubble) {
         super.init(frame: .zero)
@@ -213,19 +238,17 @@ final class BubbleCard: NSView, NSGestureRecognizerDelegate {
         text.font = NSFont.systemFont(ofSize: 13)
         text.maximumNumberOfLines = 3
         text.lineBreakMode = .byTruncatingTail
-        let hint = NSTextField(labelWithString: "点开细聊")
         hint.font = NSFont.systemFont(ofSize: 10)
         hint.textColor = .tertiaryLabelColor
 
-        let dismiss = NSButton(title: "✕", target: self, action: #selector(dismissTapped))
+        dismiss.target = self
         dismiss.isBordered = false
         dismiss.font = NSFont.systemFont(ofSize: 11)
         dismiss.contentTintColor = .tertiaryLabelColor
-        dismiss.setAccessibilityLabel("收起气泡")
-        let wrongTime = NSButton(title: "时机不合适", target: self, action: #selector(wrongTimeTapped))
+        wrongTime.target = self
         wrongTime.isBordered = false
         wrongTime.font = NSFont.systemFont(ofSize: 11)
-        wrongTime.toolTip = "暂缓打扰 30 分钟，并记住这次气泡出现的时段"
+        updateLanguage()
 
         let top = NSStackView(views: [icon, text])
         top.orientation = .horizontal
@@ -253,6 +276,13 @@ final class BubbleCard: NSView, NSGestureRecognizerDelegate {
         addGestureRecognizer(click)
 
         scheduleAutoDismiss()
+    }
+
+    func updateLanguage() {
+        hint.stringValue = menuText("Click to chat")
+        dismiss.setAccessibilityLabel(menuText("Dismiss bubble"))
+        wrongTime.title = menuText("Bad timing")
+        wrongTime.toolTip = menuText("Pause interruptions for 30 minutes and remember the timing of this bubble.")
     }
 
     required init?(coder: NSCoder) { nil }

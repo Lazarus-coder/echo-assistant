@@ -56,6 +56,14 @@ struct CompanionUITest {
         precondition(controller.recordCaptureIfDue(companion: false, force: false, now: start.addingTimeInterval(300)))
 
         _ = NSApplication.shared
+        controller.applyProfileLanguage(["ok": true, "language": "zh-CN"])
+        precondition(humanAge(nil) == "从未")
+        precondition(menuText("Recent: %@", "%@ opaque") == "最近：%@ opaque")
+        controller.applyProfileLanguage(nil)
+        precondition(menuLanguage == "zh-CN", "Keep the last profile language when offline")
+        controller.applyProfileLanguage(["ok": true, "language": "en"])
+        precondition(humanAge(nil) == "Never")
+        precondition(menuText("Recent: %@", "原文 100%") == "Recent: 原文 100%")
         let token = "test-'\"\\\n</script>😀"
         let authScript = OverlayController.miniAuthScript(origin: "http://127.0.0.1:8787", token: token)!
         for (origin, pathname, allowed) in [

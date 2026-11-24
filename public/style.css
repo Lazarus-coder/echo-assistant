@@ -440,7 +440,7 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
 .chain-row input[type='checkbox'] { appearance: auto; width: 15px; height: 15px; }
 .pem { font: 12.5px var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; display: block; margin: 6px 0; white-space: pre-wrap; }
 
-/* 润色预览：意图/缺口/假设可见，正文可改，绝不静默替换 */
+/* Request refinement preview and editable draft. */
 .polish-box { border-top: 1px dashed var(--border-strong); margin: 0 -2px 8px; padding: 10px 2px 4px; }
 .polish-box .head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
 .polish-box .pill-group { display: flex; gap: 4px; margin-left: auto; }
@@ -504,3 +504,7 @@ html[data-theme='dark'] .btn.primary { color: #10231b; }
   .msg-actions { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+.language-choice { display: flex; align-items: center; justify-content: space-between; gap: 1rem; font-size: 13px; }
+.language-choice select { width: auto; max-width: 65%; }
+.wizard-card .language-choice, .gate-card .language-choice { margin: 12px 0; }

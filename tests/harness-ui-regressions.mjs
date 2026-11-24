@@ -2,8 +2,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { localizeWebAsset } from '../public/ui-locale.mjs'
 
-const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8')
+const source = localizeWebAsset('app.js', await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), 'zh-CN')
 const program = source.split('/* --------------------------------- start ----------------------------------- */')[0]
 const tests = []
 const test = (name, run) => tests.push({ name, run })
@@ -117,7 +118,7 @@ test('local workspace review preserves file snapshots and command attempts in re
   assert.doesNotMatch(html, /<failure>|<file>|测试通过|验证通过/)
   const old = h.run('runReviewHtml({steps:[{name:"workspace_write", changes:[{path:"new",before:null}]}]})')
   assert.match(old, /新建 <code>new/)
-  assert.match(old, /没有 Shell 命令验证记录/)
+  assert.match(old, /没有终端命令验证记录/)
   assert.doesNotMatch(old, /修改前|修改后/)
   assert.equal(h.run('runReviewHtml({})'), '')
 })

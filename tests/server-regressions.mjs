@@ -80,6 +80,33 @@ try {
     await fs.rename(oldRoot, path.join(sandbox, 'archived profile'))
     assert.equal(check({}).status, 0)
   })
+  await test('a new profile uses the host locale or the explicit launch language to seed its first conversation', async () => {
+    for (const [hostLocale, override, language, title] of [
+      ['en_US.UTF-8', 'zh-CN', 'zh-CN', '主对话'],
+      ['en_US.UTF-8', '', 'en', 'Main conversation'],
+      ['fr_FR.UTF-8', '', 'en', 'Main conversation'],
+    ]) {
+      const fresh = await fs.mkdtemp(path.join(sandbox, 'fresh-'))
+      const data = path.join(fresh, 'data')
+      const configFile = path.join(fresh, 'config.json')
+      const child = spawn(process.execPath, ['server.mjs'], {
+        cwd: install, stdio: 'ignore',
+        env: { PATH: process.env.PATH, LANG: hostLocale, ECHO_LANGUAGE: override, ECHO_PORT: '0', ECHO_BIND: 'local', ECHO_DATA_DIR: data, ECHO_CONFIG: configFile },
+      })
+      const exited = new Promise(resolve => child.once('exit', resolve))
+      try {
+        const main = await waitUntil(async () => {
+          assert.equal(child.exitCode, null)
+          return fs.readFile(path.join(data, 'conversations', 'main.json'), 'utf8').then(JSON.parse).catch(() => null)
+        })
+        assert.equal(main.title, title)
+        assert.equal(JSON.parse(await fs.readFile(configFile, 'utf8')).language, language)
+      } finally {
+        child.kill()
+        await exited
+      }
+    }
+  })
   const reservation = http.createServer()
   await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve))
   const port = reservation.address().port
@@ -196,6 +223,116 @@ try {
     method: 'PATCH', headers: { 'content-type': 'application/json', 'x-echo-request': 'echo' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
   })
+  await test('switching languages persists the profile and localizes assets, generated titles and provider instructions', async () => {
+    const read = async route => {
+      const response = await fetch(base + '/api/' + route)
+      assert.equal(response.status, 200)
+      return response.json()
+    }
+    const save = async value => {
+      const response = await patch('settings', { config: value })
+      assert.equal(response.status, 200)
+      return (await response.json()).config
+    }
+    const providerCounts = async () => (await Promise.all([jsonLines(requestsFile), jsonLines(discoveryFile)])).map(rows => rows.length)
+    const conversationFile = id => path.join(dataDir, 'conversations', id + '.json')
+    const originalConfig = await fs.readFile(config, 'utf8')
+    const originalMain = await fs.readFile(conversationFile('main'), 'utf8')
+    const customPrompt = 'Style rule by the user: 保留原文.'
+    const customGroup = 'Personal models · 项目 A'
+    const userText = '会议 notes: preserve {{html:send}}'
+    const explicit = await (await post('conversations', { title: '新对话' })).json()
+    const legacy = await (await post('conversations', {})).json()
+    const legacyMain = JSON.parse(originalMain)
+    delete legacyMain.defaultTitle
+    delete legacy.defaultTitle
+    legacyMain.title = '主对话'
+    legacy.title = '新对话'
+    legacy.messages = [{ id: 'original', role: 'user', content: userText }]
+    try {
+      await fs.writeFile(conversationFile('main'), JSON.stringify(legacyMain))
+      await fs.writeFile(conversationFile(legacy.id), JSON.stringify(legacy))
+      await save({ systemPrompt: customPrompt, memory: { extract: false }, upstream: { models: [{ id: 'custom', label: 'Custom', group: customGroup }] } })
+
+      for (const [language, mainTitle, newTitle, systemLanguage, toolLanguage] of [
+        ['en', 'Main conversation', 'New conversation', /Reply in English/i, /local date/i],
+        ['zh-CN', '主对话', '新对话', /默认用中文/, /本机当前日期/],
+      ]) {
+        const before = await providerCounts()
+        const settings = await save({ language })
+        assert.equal(settings.language, language)
+        assert.equal(settings.systemPrompt, customPrompt)
+        assert.equal(settings.models.find(row => row.id === 'custom').group, customGroup)
+        const manual = settings.models.find(row => row.id === 'fixture')
+        assert.equal(manual.groupKind, 'manual')
+        assert.match(manual.group, language === 'en' ? /manual/i : /手动/)
+        const fresh = spawnSync(process.execPath, ['--input-type=module', '-e', `
+          import { loadConfig } from './lib/config.mjs'
+          const cfg = await loadConfig()
+          console.log(JSON.stringify([cfg.language, cfg.systemPrompt]))
+        `], { cwd: install, env: { ECHO_CONFIG: config, ECHO_DATA_DIR: dataDir }, encoding: 'utf8', timeout: 5000 })
+        assert.equal(fresh.status, 0, fresh.stderr)
+        assert.deepEqual(JSON.parse(fresh.stdout), [language, customPrompt])
+
+        const other = language === 'en' ? 'zh-CN' : 'en'
+        const homepage = await fetch(base)
+        assert.equal(homepage.headers.get('content-language'), language)
+        const html = await homepage.text()
+        assert.ok(html.includes('<html lang="' + language + '">'))
+        assert.match(html, new RegExp('/app\\.js[?][^"]*lang=' + language))
+        const preview = await fetch(base + '/?lang=' + other)
+        assert.equal(preview.headers.get('content-language'), other)
+        assert.ok((await preview.text()).includes('<html lang="' + other + '">'))
+        const asset = await fetch(base + '/app.js')
+        const etag = asset.headers.get('etag')
+        assert.ok(etag)
+        assert.ok((await asset.text()).includes("const UI_LANGUAGE = '" + language + "'"))
+        assert.equal((await fetch(base + '/app.js', { headers: { 'if-none-match': etag } })).status, 304)
+        const alternate = await fetch(base + '/app.js?lang=' + other, { headers: { 'if-none-match': etag } })
+        assert.equal(alternate.status, 200)
+        assert.notEqual(alternate.headers.get('etag'), etag)
+        assert.equal(alternate.headers.get('content-language'), other)
+        assert.ok((await alternate.text()).includes("const UI_LANGUAGE = '" + other + "'"))
+
+        const bootstrap = await read('bootstrap')
+        assert.equal(bootstrap.config.language, language, 'asset previews never change the profile')
+        assert.equal(bootstrap.main.title, mainTitle)
+        assert.equal(bootstrap.conversations.find(row => row.id === legacy.id).title, newTitle)
+        assert.equal((await read('conversations/' + explicit.id)).title, '新对话', 'an explicitly named chat may use the stock title')
+        const displayed = await read('conversations/' + legacy.id)
+        assert.equal(displayed.title, newTitle)
+        assert.equal(displayed.messages[0].content, userText)
+        assert.deepEqual(JSON.parse(await fs.readFile(conversationFile(legacy.id), 'utf8')), legacy)
+        assert.deepEqual(await providerCounts(), before, 'switching, reading history and rendering locales are offline')
+
+        const marker = userText + ' / ' + language
+        const reply = await post('chat', { conversationId: explicit.id, userText: marker })
+        assert.equal(reply.status, 200)
+        assert.match(await reply.text(), /"type":"done"/)
+        const request = (await jsonLines(requestsFile)).findLast(row => row.stream && row.messages.at(-1)?.content === marker)
+        assert.ok(request, 'the explicit chat request reached the BYOK provider fixture')
+        const system = request.messages.find(message => message.role === 'system').content
+        assert.ok(system.includes(customPrompt))
+        assert.match(system, systemLanguage)
+        assert.match(request.tools.find(tool => tool.function.name === 'local_time').function.description, toolLanguage)
+      }
+    } finally {
+      await fs.writeFile(config, originalConfig)
+      await fs.writeFile(conversationFile('main'), originalMain)
+      for (const id of [legacy.id, explicit.id]) await fs.rm(conversationFile(id), { force: true })
+      await read('settings')
+    }
+  })
+
+  await test('invalid language rejects the whole change before writing credentials or settings', async () => {
+    const envFile = path.join(dataDir, 'echo.env')
+    const before = await Promise.all([fs.readFile(config, 'utf8'), fs.readFile(envFile, 'utf8')])
+    const response = await patch('settings', { config: { language: 'fr', systemPrompt: 'do not save' }, env: { ECHO_SERVER_TEST_KEY: 'fixture-replacement' } })
+    assert.equal(response.status, 400)
+    assert.equal((await response.json()).error, 'invalid_language')
+    assert.deepEqual(await Promise.all([fs.readFile(config, 'utf8'), fs.readFile(envFile, 'utf8')]), before)
+  })
+
   await test('settings reject non-object JSON without updating the profile', async () => {
     const before = await fs.readFile(config, 'utf8')
     for (const value of [null, [], false, 'model']) {

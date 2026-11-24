@@ -1,7 +1,8 @@
 {
-  "name": "Echo · 本地对话",
+  "name": "{{msg:echoLocalChat}}",
+  "lang": "{{msg:locale}}",
   "short_name": "Echo",
-  "description": "跑在自己机器上的私人对话窗口",
+  "description": "{{msg:privateChatOnYourOwnComputer}}",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

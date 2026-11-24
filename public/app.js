@@ -1,4 +1,4 @@
-/* Echo · 本地对话前端。零依赖，CSP 允许 'self' 脚本，所有交互走 data-action。 */
+/* Echo chat client. Events use data-action so inline scripts stay disabled. */
 const $ = (sel, root = document) => root.querySelector(sel)
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)]
 const esc = (s) =>
@@ -6,7 +6,11 @@ const esc = (s) =>
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n))
 const uid = () => Math.random().toString(36).slice(2, 10)
 
-const KIND_LABEL = { follow_up: '跟进', suggest: '建议', guide: '指导', ask: '询问', brief: '日报' }
+const FOCUS_LABEL = { deep: '{{msg:focused}}', meeting: '{{msg:inAMeeting}}', normal: '{{msg:working}}', idle: '{{msg:idle}}', entertainment: '{{msg:leisure}}' }
+const FACT_LABEL = { user: '{{msg:person}}', project: '{{msg:project}}', feedback: '{{msg:feedbackKind}}', reference: '{{msg:referenceKind}}', fact: '{{msg:factKind}}' }
+const BUBBLE_STATUS = { pending: '{{msg:pendingBubble}}', expired: '{{msg:expiredBubble}}', opened: '{{msg:openedBubble}}', dismissed: '{{msg:dismissedBubble}}' }
+const MCP_STATE = { idle: '{{msg:idle}}', connecting: '{{msg:connecting}}', ready: '{{msg:ready}}', closed: '{{msg:connectionClosed}}', failed: '{{msg:failed}}' }
+const KIND_LABEL = { follow_up: '{{msg:followUp}}', suggest: '{{msg:suggestion}}', guide: '{{msg:guidance}}', ask: '{{msg:question}}', brief: '{{msg:dailyBrief}}' }
 
 const prefs = {
   get model() { return localStorage.getItem('echo.model') },
@@ -44,14 +48,24 @@ async function api(path, { method = 'GET', body, raw = false } = {}) {
     body: body === undefined ? undefined : JSON.stringify(body),
     credentials: 'same-origin',
   })
+  if (!res.ok && (path === 'login' || path === 'password')) {
+    const result = await res.clone().json().catch(() => ({}))
+    const gateMessage = {
+      bad_password: '{{msg:incorrectPassword}}',
+      weak: '{{msg:useAtLeastSixCharacters}}',
+      setup_from_loopback_only: '{{msg:setPasswordOnHost}}',
+      too_many_attempts: '{{msg:loginRateLimited}}',
+    }[result.error]
+    if (gateMessage) throw Object.assign(new Error(gateMessage), { status: res.status })
+  }
   if (res.status === 401) {
     let mode = 'again'
     try {
       const j = await res.clone().json()
       if (j.error === 'no_password') mode = 'first'
     } catch {}
-    showGate(path === 'bootstrap' ? mode : mode)
-    throw new Error('需要登录')
+    showGate(mode)
+    throw Object.assign(new Error('{{msg:signInToContinue}}'), { status: 401 })
   }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -156,7 +170,7 @@ function md(src) {
     if (cm && code[Number(cm[1])]) {
       const { lang, body } = code[Number(cm[1])]
       out.push(
-        `<pre class="code"><div class="code-head"><span>${esc(lang || 'text')}</span><button data-action="copy-code">复制</button></div><code>${highlight(body, lang)}</code></pre>`,
+        `<pre class="code"><div class="code-head"><span>${esc(lang || 'text')}</span><button data-action="copy-code">{{html:copy}}</button></div><code>${highlight(body, lang)}</code></pre>`,
       )
       i++
       continue
@@ -209,16 +223,16 @@ function fmtTime(iso) {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
   const today = new Date().toDateString() === d.toDateString()
-  const hm = d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  const hm = d.toLocaleTimeString(UI_LANGUAGE, { hour12: false, hour: '2-digit', minute: '2-digit' })
   return today ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`
 }
 function ago(iso) {
   const ms = Date.now() - Date.parse(iso ?? 0)
   if (!Number.isFinite(ms) || ms < 0) return '—'
-  if (ms < 60000) return '刚刚'
-  if (ms < 3600000) return `${Math.floor(ms / 60000)} 分钟前`
-  if (ms < 86400000) return `${Math.floor(ms / 3600000)} 小时前`
-  return `${Math.floor(ms / 86400000)} 天前`
+  if (ms < 60000) return '{{msg:justNow}}'
+  if (ms < 3600000) return `${Math.floor(ms / 60000)} {{msg:minAgo}}`
+  if (ms < 86400000) return `${Math.floor(ms / 3600000)} {{msg:hrAgo}}`
+  return `${Math.floor(ms / 86400000)} {{msg:daysAgo}}`
 }
 function toast(msg, bad) {
   const el = document.createElement('div')
@@ -233,19 +247,90 @@ function applyTheme() {
   const dark = want === 'dark' || (want === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)
   document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   const btn = $('#themeBtn')
-  if (btn) btn.textContent = { auto: '自动', dark: '深色', light: '浅色' }[want]
+  if (btn) btn.textContent = { auto: '{{msg:system}}', dark: '{{msg:dark}}', light: '{{msg:light}}' }[want]
 }
+
+/* ------------------------------- language --------------------------------- */
+
+const UI_LANGUAGE = '{{msg:locale}}'
+const supportedLanguage = value => value === 'en' || value === 'zh-CN'
+
+function languageSelector() {
+  return `<label class="language-choice"><span>{{html:interfaceLanguage}}</span>
+    <select data-language>
+      <option value="en" lang="en" ${UI_LANGUAGE === 'en' ? 'selected' : ''}>{{html:englishName}}</option>
+      <option value="zh-CN" lang="zh-CN" ${UI_LANGUAGE === 'zh-CN' ? 'selected' : ''}>{{html:chineseName}}</option>
+    </select></label>`
+}
+
+function navigateLanguage(language) {
+  const url = new URL(location.href)
+  url.searchParams.set('lang', language)
+  if (S.current) {
+    saveDraft()
+    url.searchParams.set('conv', S.current)
+  }
+  location.replace(url.href)
+}
+
+function transientWork() {
+  return S.stream || S.preparing || S.selecting || S.uploading || S.drawing || POLISH.running
+}
+
+function unsavedInputs() {
+  return S.att?.length || [...S.attachmentDrafts.values()].some(items => items.length)
+    || $('.edit-box') || $('#commitmentForm')
+    || $$('[data-language-dirty]').some(editor => !editor.closest('[hidden]'))
+}
+
+async function changeLanguage(input) {
+  const language = input.value
+  input.value = UI_LANGUAGE
+  if (!supportedLanguage(language) || language === UI_LANGUAGE) return
+  if (transientWork()) return toast('{{msg:waitForCurrentWork}}', true)
+  if (unsavedInputs() && !confirm('{{msg:confirmLanguageChange}}')) return
+  input.disabled = true
+  try {
+    if (S.boot) {
+      await api('settings', { method: 'PATCH', body: { config: { language } } })
+      localStorage.setItem('echo.language', language)
+      if (input.closest('#panelSettings')) sessionStorage.setItem('echo.reopenLanguageSettings', '1')
+    } else {
+      sessionStorage.setItem('echo.pendingLanguage', language)
+    }
+    navigateLanguage(language)
+  } catch (err) {
+    input.disabled = false
+    toast(err.message, true)
+  }
+}
+
+document.addEventListener('input', event => {
+  if (event.target.matches?.('[data-language]')) return
+  const editor = event.target.closest?.('#wizard .wizard-card, #drawer .sect, #gateForm')
+  if (editor) editor.dataset.languageDirty = 'true'
+})
+addEventListener('storage', event => {
+  if (event.key === 'echo.language' && supportedLanguage(event.newValue) && event.newValue !== UI_LANGUAGE
+    && !transientWork() && !unsavedInputs()) navigateLanguage(event.newValue)
+})
 
 /* ---------------------------------- gate ----------------------------------- */
 
 let gateMode = 'first'
 function showGate(mode) {
   gateMode = mode ?? 'again'
+  S.boot = null
+  if (!new URLSearchParams(location.search).has('lang')) {
+    const preferred = localStorage.getItem('echo.language') || (/^zh\b/i.test(navigator.language) ? 'zh-CN' : 'en')
+    if (preferred !== UI_LANGUAGE && supportedLanguage(preferred)) return navigateLanguage(preferred)
+  }
+  $('#gateLanguage').innerHTML = languageSelector()
   $('#app').hidden = true
   $('#gate').hidden = false
-  $('#gateTitle').textContent = gateMode === 'first' ? '设置访问口令' : 'Echo'
-  $('#gateHint').textContent = gateMode === 'first' ? '在本机设置访问口令（至少 6 位）' : '输入访问口令'
-  $('#gateSubmit').textContent = gateMode === 'first' ? '创建并进入' : '进入'
+  $('#gateTitle').textContent = gateMode === 'first' ? '{{msg:setAPassword}}' : 'Echo'
+  $('#gateHint').textContent = gateMode === 'first' ? '{{msg:setAPasswordOnThisMacAt}}' : '{{msg:enterYourPassword}}'
+  $('#gateSubmit').textContent = gateMode === 'first' ? '{{msg:createPasswordAndSignIn}}' : '{{msg:signIn}}'
   $('#gateInput').value = ''
   setTimeout(() => $('#gateInput').focus(), 60)
 }
@@ -274,25 +359,25 @@ function renderConvs() {
         .map(
           (c) => `<li class="conv ${c.id === S.current ? 'active' : ''} ${c.isMain ? 'is-main' : ''}" tabindex="0" data-action="select-conv" data-id="${esc(c.id)}" title="${esc(c.preview || c.title)}">
             <div class="col">
-              <div class="name">${c.isMain ? '<span>主对话</span>' : esc(c.title)}${c.unread ? '<i class="dot" title="有新消息"></i>' : ''}${c.pinned && !c.isMain ? '<svg viewBox="0 0 24 24" width="11" height="11" style="fill:currentColor;stroke:none"><path d="M14 3l7 7-4 1-3 3-1 4-4-4-5 5 1-6-4-4 6-1 3-3z"/></svg>' : ''}</div>
-              <div class="sub">${c.isMain ? '主动服务会出现在这里' : esc(c.preview || '空')} · ${ago(c.updatedAt)}</div>
+              <div class="name">${c.isMain ? '<span>{{html:mainChat}}</span>' : esc(c.title)}${c.unread ? '<i class="dot" title="{{html:newMessages}}"></i>' : ''}${c.pinned && !c.isMain ? '<svg viewBox="0 0 24 24" width="11" height="11" style="fill:currentColor;stroke:none"><path d="M14 3l7 7-4 1-3 3-1 4-4-4-5 5 1-6-4-4 6-1 3-3z"/></svg>' : ''}</div>
+              <div class="sub">${c.isMain ? '{{msg:proactiveUpdatesAppearHere}}' : esc(c.preview || '{{msg:empty}}')} · ${ago(c.updatedAt)}</div>
             </div>
             <div class="tools">
-              ${c.isMain ? '' : `<button data-action="pin-conv" data-id="${esc(c.id)}" title="${c.pinned ? '取消置顶' : '置顶'}"><svg viewBox="0 0 24 24"><path d="M9 4h6M12 4v9M8 20l4-7 4 7"/></svg></button>`}
-              <button data-action="export-conv" data-id="${esc(c.id)}" title="导出 markdown"><svg viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></button>
-              ${c.isMain ? '' : `<button data-action="del-conv" data-id="${esc(c.id)}" title="删除"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/></svg></button>`}
+              ${c.isMain ? '' : `<button data-action="pin-conv" data-id="${esc(c.id)}" title="${c.pinned ? '{{msg:unpin}}' : '{{msg:pin}}'}"><svg viewBox="0 0 24 24"><path d="M9 4h6M12 4v9M8 20l4-7 4 7"/></svg></button>`}
+              <button data-action="export-conv" data-id="${esc(c.id)}" title="{{html:exportMarkdown}}"><svg viewBox="0 0 24 24"><path d="M12 4v10M8 10l4 4 4-4M5 19h14"/></svg></button>
+              ${c.isMain ? '' : `<button data-action="del-conv" data-id="${esc(c.id)}" title="{{html:delete}}"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M7 7l1 12h8l1-12"/></svg></button>`}
             </div>
           </li>`,
         )
         .join('')
-    : '<li class="muted small" style="padding:10px">没有匹配的会话</li>'
+    : '<li class="muted small" style="padding:10px">{{html:noMatchingChats}}</li>'
   $('#memCount').textContent = S.boot?.memory?.observations ?? 0
   $('#proCount').textContent = S.boot?.proactive?.todayCount ?? 0
   const followBadge = $('#followBadge')
   if (followBadge) {
     const count = S.boot?.followUps ?? 0
     followBadge.hidden = count === 0
-    followBadge.textContent = `跟进 · ${count}`
+    followBadge.textContent = `{{msg:followUps}} ${count}`
   }
 }
 
@@ -305,10 +390,10 @@ async function refreshList() {
 /* --------------------------------- thread ---------------------------------- */
 
 const MESSAGE_FEEDBACK_LABELS = {
-  good: ['有用', '这条提醒的内容有用'],
-  bad: ['没用', '这条提醒的内容没用'],
-  good_time: ['来得正好', '这条提醒来得正是时候'],
-  wrong_time: ['时机不合适', '这条提醒的时机不合适，暂停打扰 30 分钟'],
+  good: ['{{msg:useful}}', '{{msg:thisReminderWasUseful}}'],
+  bad: ['{{msg:notUseful}}', '{{msg:thisReminderWasNotUseful}}'],
+  good_time: ['{{msg:goodTiming}}', '{{msg:thisWasAGoodTimeForThis}}'],
+  wrong_time: ['{{msg:badTiming}}', '{{msg:badTimingPauseRemindersFor30Minutes}}'],
 }
 
 function messageFeedbackHtml(m) {
@@ -321,18 +406,18 @@ function messageFeedbackHtml(m) {
 }
 
 function topicMuteButton(key, muted, messageId) {
-  return `<button type="button" class="btn small" data-action="topic-mute" data-topic-key="${esc(key)}" data-muted="${muted}"${messageId ? ` data-id="${esc(messageId)}"` : ''}>${muted ? '取消静音' : key.startsWith('companion:') ? '静音这类气泡' : '静音此话题'}</button>`
+  return `<button type="button" class="btn small" data-action="topic-mute" data-topic-key="${esc(key)}" data-muted="${muted}"${messageId ? ` data-id="${esc(messageId)}"` : ''}>${muted ? '{{msg:unmute}}' : key.startsWith('companion:') ? '{{msg:muteThisKindOfSuggestion}}' : '{{msg:muteThisTopic}}'}</button>`
 }
 
 function previewHtml(result) {
   const items = result.items.map((item) => {
-    const why = item.reason === 'ok' ? '当前可提醒' : PROACTIVE_REASON_LABELS[item.reason] ?? '暂缓提醒'
-    return `<li><b>${esc(item.label)}</b><p>${esc(why)} · 本地评分 ${Number(item.score).toFixed(2)}</p>
-      <p class="muted small">${esc(item.reasons.join('；'))}</p>${item.topicKey && !item.requested && item.reason !== 'topic_muted' ? topicMuteButton(item.topicKey, false) : ''}</li>`
+    const why = item.reason === 'ok' ? '{{msg:readyToSend}}' : PROACTIVE_REASON_LABELS[item.reason] ?? '{{msg:onHold}}'
+    return `<li><b>${esc(item.label)}</b><p>${esc(why)} {{msg:localScore}} ${Number(item.score).toFixed(2)}</p>
+      <p class="muted small">${esc(item.reasons.join('{{msg:listClause}}'))}</p>${item.topicKey && !item.requested && item.reason !== 'topic_muted' ? topicMuteButton(item.topicKey, false) : ''}</li>`
   }).join('')
   const muted = result.muted.map((m) => `<li><span>${esc(m.label)} <small class="muted">${esc(agencyTime(m.addedAt))}</small></span> ${topicMuteButton(m.topicKey, true)}</li>`).join('')
-  return `${items ? `<ol class="preview-items">${items}</ol>` : `<p class="muted small">${result.enabled ? '当前没有符合来源条件的候选提醒。' : '主动提醒已关闭。'}</p>`}
-    ${muted ? `<h4>已静音的话题</h4><ul class="preview-mutes">${muted}</ul>` : ''}`
+  return `${items ? `<ol class="preview-items">${items}</ol>` : `<p class="muted small">${result.enabled ? '{{msg:noReminderCandidatesHaveEligibleSources}}' : '{{msg:proactiveRemindersAreOff}}'}</p>`}
+    ${muted ? `<h4>{{html:mutedTopics}}</h4><ul class="preview-mutes">${muted}</ul>` : ''}`
 }
 
 let previewRevision = 0
@@ -353,7 +438,7 @@ async function refreshReminderPreview() {
 function selectionDetails(selection) {
   if (!selection?.label) return ''
   const reasons = Array.isArray(selection.reasons) ? selection.reasons : []
-  return `<details class="fold"><summary>为什么选这条提醒</summary><div class="fold-body">${esc(selection.label)}${reasons.length ? `<ul>${reasons.map((reason) => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}</div></details>`
+  return `<details class="fold"><summary>{{html:whyEchoChoseThis}}</summary><div class="fold-body">${esc(selection.label)}${reasons.length ? `<ul>${reasons.map((reason) => `<li>${esc(reason)}</li>`).join('')}</ul>` : ''}</div></details>`
 }
 
 function messageNode(m) {
@@ -365,27 +450,27 @@ function messageNode(m) {
     wrap.innerHTML = `<div class="body"><div class="content">${esc(m.content)}</div>${imageGallery(imgs)}</div>`
     wrap.insertAdjacentHTML(
       'beforeend',
-      `<div class="msg-actions" style="align-self:flex-start"><button data-action="edit-user">编辑重发</button><button data-action="copy-msg">复制</button>${String(m.content ?? '').trim() ? '<button data-action="adopt-message">设为目标</button>' : ''}</div>`,
+      `<div class="msg-actions" style="align-self:flex-start"><button data-action="edit-user">{{html:editAndResend}}</button><button data-action="copy-msg">{{html:copy}}</button>${String(m.content ?? '').trim() ? '<button data-action="adopt-message">{{html:setAsAGoal}}</button>' : ''}</div>`,
     )
     wrap.style.alignItems = 'flex-end'
     return wrap
   }
-  const kindBadge = m.proactive ? `<span class="kind">${KIND_LABEL[m.kind] ?? '主动'} · 助手主动发起</span>` : ''
+  const kindBadge = m.proactive ? `<span class="kind">${KIND_LABEL[m.kind] ?? '{{msg:proactive}}'} {{html:startedByEcho}}</span>` : ''
   wrap.innerHTML = `<div class="avatar">E</div><div class="body">
       <div class="meta"><span class="who">Echo</span><span>${fmtTime(m.createdAt)}</span>${kindBadge}
         <span class="msg-actions">
-          <button data-action="copy-msg">复制</button>
-          ${m.proactive ? '' : '<button data-action="regen">重新生成</button>'}
+          <button data-action="copy-msg">{{html:copy}}</button>
+          ${m.proactive ? '' : '<button data-action="regen">{{html:regenerate}}</button>'}
           ${messageFeedbackHtml(m)}
         </span>
       </div>
-      ${m.reasoning ? `<details class="fold reasoning"><summary>思考过程 · ${m.reasoning.length} 字</summary><div class="fold-body">${esc(m.reasoning)}</div></details>` : ''}
+      ${m.reasoning ? `<details class="fold reasoning"><summary>{{html:reasoning}} ${m.reasoning.length} {{html:characters}}</summary><div class="fold-body">${esc(m.reasoning)}</div></details>` : ''}
       ${(m.tools ?? []).length ? renderSteps(m.tools) : ''}
-      ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">查看执行记录</button>` : ''}
+      ${m.runId ? (m.tools?.length || m.aborted || m.runStatus && m.runStatus !== 'completed') ? runCardHtml(messageRun(m)) : `<button class="btn small run-link" data-action="view-run" data-id="${esc(m.runId)}">{{html:viewRun}}</button>` : ''}
       <div class="content"></div>
       ${selectionDetails(m.selection ?? m.companion?.selection)}
-      ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">加入跟进</button><span class="muted small">${m.followUp.stale ? `这条线索是 ${esc(String(m.followUp.ageDays ?? ''))} 天前注意到的，先确认它是否还相关` : '让 Echo 接手准备与跟进'}</span></div>` : ''}
-      ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">查看准备结果</button>` : ''}
+      ${m.followUp ? `<div class="follow-up-suggest"><button class="btn small primary" data-action="adopt-follow-up" data-message="${esc(m.id)}">{{html:startFollowUp}}</button><span class="muted small">${m.followUp.stale ? `{{msg:echoNoticedThis}} ${esc(String(m.followUp.ageDays ?? ''))} {{msg:daysAgoCheckWhetherItIsStill}}` : '{{msg:askEchoToPrepareAndFollowUp}}'}</span></div>` : ''}
+      ${m.preparationId || m.commitmentId ? `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(m.preparationId ?? '')}" data-commitment-id="${esc(m.commitmentId ?? '')}">{{html:viewPreparedWork}}</button>` : ''}
       ${imageGallery(m.images)}
       <div class="tail"></div>
     </div>`
@@ -398,16 +483,16 @@ function renderSteps(tools) {
   const items = tools
     .map((t) => {
       const args = Object.values(t.args ?? {}).map(String).join(' · ').slice(0, 80)
-      return `<div class="step ${t.ok === false ? 'bad' : ''}"><i class="st-dot"></i><span class="st-name">${esc(t.label ?? t.name)}</span><span class="st-arg">${esc(args)}</span><span class="st-ms">${esc(toolStatus(t))}${t.exitCode != null ? ` · 退出码 ${esc(t.exitCode)}` : ''}</span></div>`
+      return `<div class="step ${t.ok === false ? 'bad' : ''}"><i class="st-dot"></i><span class="st-name">${esc(t.label ?? t.name)}</span><span class="st-arg">${esc(args)}</span><span class="st-ms">${esc(toolStatus(t))}${t.exitCode != null ? ` {{msg:exitCode}} ${esc(t.exitCode)}` : ''}</span></div>`
     })
     .join('')
   const detail = tools
     .map((t) => `<div class="st-out">${esc(toolOutputText(t.result ?? t.error).slice(0, 6000))}</div>${artifactLinks(t.artifacts)}`)
     .join('<hr style="border:0;border-top:1px solid var(--border);margin:8px 0"/>')
-  return `<details class="fold steps-fold"><summary>调用 ${tools.length} 次工具</summary><div class="fold-body"><div class="steps">${items}</div><div style="margin-top:8px">${detail}</div></div></details>`
+  return `<details class="fold steps-fold"><summary>{{html:used}} ${tools.length} {{html:toolCalls}}</summary><div class="fold-body"><div class="steps">${items}</div><div style="margin-top:8px">${detail}</div></div></details>`
 }
 
-const RUN_STATUS = { pending: '待执行', awaiting_approval: '等待确认', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已停止', interrupted: '已中断', limit_reached: '已达执行上限', denied: '已拒绝', timed_out: '已超时' }
+const RUN_STATUS = { pending: '{{msg:queued}}', awaiting_approval: '{{msg:awaitingApproval}}', running: '{{msg:running}}', completed: '{{msg:completed}}', failed: '{{msg:failed}}', cancelled: '{{msg:stopped}}', interrupted: '{{msg:interrupted}}', limit_reached: '{{msg:limitReached}}', denied: '{{msg:denied}}', timed_out: '{{msg:timedOut}}' }
 function messageRun(message) {
   let status = message.runStatus
   if (!status) {
@@ -427,34 +512,34 @@ function runFeedbackHtml(run) {
   const waiting = steps.find((step) => state(step) === 'awaiting_approval')
   const active = waiting ?? steps.find((step) => state(step) === 'running')
   const status = run.status === 'running' && waiting ? 'awaiting_approval' : run.status
-  const labels = { running: '正在执行', awaiting_approval: '等待你的确认', completed: '本轮执行已完成', failed: '本轮执行有失败', cancelled: '本轮执行已停止', stop_requested: '已请求停止', interrupted: '执行状态待核实', limit_reached: '已达到执行上限' }
+  const labels = { running: '{{msg:running2}}', awaiting_approval: '{{msg:waitingForYourApproval}}', completed: '{{msg:runCompleted}}', failed: '{{msg:runEncounteredAFailure}}', cancelled: '{{msg:runStopped}}', stop_requested: '{{msg:stopRequested}}', interrupted: '{{msg:runStatusUnknown}}', limit_reached: '{{msg:runLimitReached}}' }
   const counts = [
-    [steps.filter((step) => state(step) === 'completed').length, '完成'],
-    [steps.filter((step) => ['failed', 'timed_out'].includes(state(step))).length, '失败'],
-    [steps.filter((step) => state(step) === 'denied').length, '拒绝'],
-    [steps.filter((step) => state(step) === 'cancelled').length, '停止'],
-  ].filter(([count]) => count).map(([count, label]) => `${label} ${count} 步`)
+    [steps.filter((step) => state(step) === 'completed').length, '{{msg:finish}}'],
+    [steps.filter((step) => ['failed', 'timed_out'].includes(state(step))).length, '{{msg:failed}}'],
+    [steps.filter((step) => state(step) === 'denied').length, '{{msg:deny}}'],
+    [steps.filter((step) => state(step) === 'cancelled').length, '{{msg:stop}}'],
+  ].filter(([count]) => count).map(([count, label]) => `${label} ${count} {{msg:steps}}`)
   const notes = {
-    completed: '结果已保留，可查看每一步的输入、输出与文件。',
-    failed: '已完成的步骤与输出仍会保留。请先查看失败原因，再决定是否继续。',
-    cancelled: '后续执行已停止；已完成的操作不会自动撤销。',
-    stop_requested: '服务已收到停止请求，最终状态请查看执行记录；已完成的操作不会自动撤销。',
-    interrupted: '连接已中断，最终状态尚未确认。查看执行记录后再继续。',
-    limit_reached: '剩余步骤尚未执行。已生成的输出可在执行记录中查看。',
-    unknown: '这是历史执行记录，最终状态请以执行详情为准。',
+    completed: '{{msg:theRecordIncludesEachStepSInputs}}',
+    failed: '{{msg:completedStepsAndOutputsAreSavedCheck}}',
+    cancelled: '{{msg:executionStoppedCompletedActionsStillApply}}',
+    stop_requested: '{{msg:stopRequestedCheckTheRunRecordFor}}',
+    interrupted: '{{msg:connectionLostCheckTheRunRecordBefore}}',
+    limit_reached: '{{msg:theRemainingStepsHaveYetToRun}}',
+    unknown: '{{msg:viewRunDetailsForTheFinalStatus}}',
   }
   const current = ['running', 'awaiting_approval'].includes(status)
-    ? active ? `${status === 'awaiting_approval' ? '待确认' : '当前步骤'}：${active.label || active.name || '工具调用'}` : run.phase || '正在准备下一步'
-    : notes[status] ?? '查看执行记录了解详情。'
-  return `<div class="run-feedback-heading"><span class="run-feedback-dot" aria-hidden="true"></span><strong>${esc(labels[status] ?? RUN_STATUS[status] ?? '执行记录')}</strong></div>
-    <p class="run-feedback-count">${steps.length ? `已记录 ${steps.length} 步${counts.length ? ` · ${counts.join(' · ')}` : ''}` : '尚未调用工具'}</p>
+    ? active ? `${status === 'awaiting_approval' ? '{{msg:awaitingApproval2}}' : '{{msg:currentStep}}'}{{msg:labelSeparator}}${active.label || active.name || '{{msg:toolCall}}'}` : run.phase || '{{msg:preparingTheNextStep}}'
+    : notes[status] ?? '{{msg:viewTheRunRecordForDetails}}'
+  return `<div class="run-feedback-heading"><span class="run-feedback-dot" aria-hidden="true"></span><strong>${esc(labels[status] ?? RUN_STATUS[status] ?? '{{msg:runRecord}}')}</strong></div>
+    <p class="run-feedback-count">${steps.length ? `{{msg:recorded}} ${steps.length} {{msg:steps}}${counts.length ? ` · ${counts.join(' · ')}` : ''}` : '{{msg:noToolsCalled}}'}</p>
     <p class="run-feedback-detail">${esc(current)}</p>
     ${run.error && status !== 'cancelled' ? `<p class="err">${esc(toolText(run.error))}</p>` : ''}`
 }
 function runCardHtml(run) {
-  return `<section class="run-feedback" data-state="${esc(run.status ?? 'unknown')}" aria-label="任务执行状态">
+  return `<section class="run-feedback" data-state="${esc(run.status ?? 'unknown')}" aria-label="{{html:runStatus}}">
     <div class="run-feedback-body" role="status" aria-live="polite" aria-atomic="true">${runFeedbackHtml(run)}</div>
-    <button class="btn small run-link" data-action="view-run" data-id="${esc(run.id)}">查看步骤与结果</button></section>`
+    <button class="btn small run-link" data-action="view-run" data-id="${esc(run.id)}">{{html:viewStepsAndResults}}</button></section>`
 }
 function updateRunFeedback(node, run) {
   let card = $('.run-feedback', node)
@@ -476,7 +561,7 @@ function toolOutputText(value) {
   const parsed = parseToolOutput(value)
   if (parsed && typeof parsed === 'object') {
     if (typeof parsed.stdout === 'string' || typeof parsed.stderr === 'string') {
-      return [parsed.stdout ? `标准输出\n${parsed.stdout}` : '', parsed.stderr ? `错误输出\n${parsed.stderr}` : '', parsed.reason ? `结束原因：${parsed.reason}` : ''].filter(Boolean).join('\n\n') || '（没有输出）'
+      return [parsed.stdout ? `{{msg:standardOutput}}${parsed.stdout}` : '', parsed.stderr ? `{{msg:standardError}}${parsed.stderr}` : '', parsed.reason ? `{{msg:endReason}}${parsed.reason}` : ''].filter(Boolean).join('\n\n') || '{{msg:noOutput}}'
     }
     if (typeof parsed.content === 'string') return parsed.content
   }
@@ -485,18 +570,18 @@ function toolOutputText(value) {
 function toolStatus(tool) {
   if (tool.approval?.status === 'denied') return RUN_STATUS.denied
   if (tool.status) return RUN_STATUS[tool.status] ?? tool.status
-  return tool.ok === false ? '失败' : tool.ms != null ? `${tool.ms}ms` : '…'
+  return tool.ok === false ? '{{msg:failed}}' : tool.ms != null ? `${tool.ms}ms` : '…'
 }
 function artifactLinks(artifacts) {
   return (artifacts ?? []).filter((item) => /^\/api\/runs\/[^\\\s?#]+\/artifacts\/[^\\\s?#]+$/.test(item.url ?? ''))
-    .map((item) => `<a class="run-artifact" href="${esc(item.url)}" download>${esc(item.name || '输出文件')}${Number.isFinite(item.bytes) ? ` · ${Math.ceil(item.bytes / 1024)} KB` : ''}</a>`).join('')
+    .map((item) => `<a class="run-artifact" href="${esc(item.url)}" download>${esc(item.name || '{{msg:outputFiles}}')}${Number.isFinite(item.bytes) ? ` · ${Math.ceil(item.bytes / 1024)} KB` : ''}</a>`).join('')
 }
 
-/* -------------------------------- 回来简报 -------------------------------- */
+/* -------------------------------- return brief ---------------------------- */
 
 const BRIEF_GAP_MS = 6 * 3600000
 
-/** 离开足够久后回来，用一次只读请求把"期间发生了什么"拼成一张卡；离开不足时不打扰。 */
+// A single read gathers changes after a long absence.
 async function maybeShowReturnBrief() {
   if (document.hidden) return
   const last = localStorage.getItem('echo.lastVisit')
@@ -529,25 +614,25 @@ function briefCard(brief) {
 function briefCardHtml(brief) {
   const rows = []
   for (const item of brief.items) {
-    if (item.kind === 'proactive') rows.push(`Echo 主动发了 <b>${item.count}</b> 条消息${item.latest?.preview ? ` · 最新：${esc(item.latest.preview)}` : ''}`)
-    else if (item.kind === 'due') rows.push(item.goals.map((g) => `<b>${esc(g.title)}</b> ${g.stage === 'overdue' ? '已过截止' : g.stage === 'today' ? '今天截止' : '临近截止'}（${esc(g.deadline)}）`).join('；'))
-    else if (item.kind === 'drafts') rows.push(`<b>${item.count}</b> 份准备草稿待查看 ${(item.drafts ?? []).map((d) => `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(d.id)}" data-commitment-id="${esc(d.commitmentId)}">${esc(d.title)}</button>`).join(' ')}`)
-    else if (item.kind === 'failed') rows.push(`<b>${item.count}</b> 个目标准备失败，稍后自动重试`)
+    if (item.kind === 'proactive') rows.push(`{{html:echoSent}} <b>${item.count}</b> {{html:proactiveMessages}}${item.latest?.preview ? ` {{msg:latest}}${esc(item.latest.preview)}` : ''}`)
+    else if (item.kind === 'due') rows.push(item.goals.map((g) => `<b>${esc(g.title)}</b> ${g.stage === 'overdue' ? '{{msg:overdue}}' : g.stage === 'today' ? '{{msg:dueToday}}' : '{{msg:dueSoon}}'}{{msg:openParenthesis}}${esc(g.deadline)}{{msg:closeParenthesis}}`).join('{{msg:listClause}}'))
+    else if (item.kind === 'drafts') rows.push(`<b>${item.count}</b> {{html:draftsReadyToReview}} ${(item.drafts ?? []).map((d) => `<button class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(d.id)}" data-commitment-id="${esc(d.commitmentId)}">${esc(d.title)}</button>`).join(' ')}`)
+    else if (item.kind === 'failed') rows.push(`<b>${item.count}</b> {{html:goalsNeedAnotherPreparationAttempt}}`)
     else if (item.kind === 'loops') {
       const fresh = item.freshCount ?? 0
-      // 隔了日子的线索不算"待接管"：Echo 自己没再看过的事，不该催用户现在接手
-      if (fresh) rows.push(`还有 <b>${fresh}</b> 条 Dream 线索可一键接管${item.count > fresh ? `；另有 ${item.count - fresh} 条已经隔了日子` : ''}`)
-      else if (item.newestDays != null) rows.push(`<b>${item.count}</b> 条 Dream 线索至少隔了 ${item.newestDays} 天，先不催你接`)
-      else rows.push(`有 <b>${item.count}</b> 条 Dream 线索，暂时判断不了它们还新不新`)
+      // Older leads need verification before Echo suggests acting on them.
+      if (fresh) rows.push(`{{html:thereAre}} <b>${fresh}</b> {{html:leadsYouCanTakeOver}}${item.count > fresh ? `{{msg:otherLeads}} ${item.count - fresh} {{msg:olderLeads}}` : ''}`)
+      else if (item.newestDays != null) rows.push(`<b>${item.count}</b> {{html:leadsFirstNoticedAtLeast}} ${item.newestDays} {{msg:daysAgo2}}`)
+      else rows.push(`{{html:thereAre2}} <b>${item.count}</b> {{html:leadsOfUnknownAge}}`)
     }
-    else if (item.kind === 'facts') rows.push(`记下了 <b>${item.count}</b> 条新事实`)
+    else if (item.kind === 'facts') rows.push(`{{html:echoSaved}} <b>${item.count}</b> {{html:newFacts}}`)
   }
-  return `<div class="brief-head"><span>你不在的这段时间</span><button class="icon-btn" data-action="dismiss-brief" aria-label="关闭简报"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
+  return `<div class="brief-head"><span>{{html:sinceYouWereAway}}</span><button class="icon-btn" data-action="dismiss-brief" aria-label="{{html:dismissBrief}}"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg></button></div>
     <ul class="brief-list">${rows.map((row) => `<li>${row}</li>`).join('')}</ul>
-    <button class="btn small" data-action="open-panel" data-panel="proactive">去主动服务看看</button>`
+    <button class="btn small" data-action="open-panel" data-panel="proactive">{{html:openProactiveAssistance}}</button>`
 }
 
-/** 主动消息里的一键接管：用户确认后才创建跟进，失败时不猜测结果。 */
+// The user confirms a proposed follow-up before it becomes a goal.
 async function adoptFollowUp(btn) {
   if (btn.disabled) return
   const message = (S.conv?.messages ?? []).find((entry) => entry.id === btn.dataset.message)
@@ -562,20 +647,20 @@ async function adoptFollowUp(btn) {
     }
     if (proposal.candidateLoopId) body.candidateLoopId = proposal.candidateLoopId
     const r = await api('commitments', { method: 'POST', body })
-    btn.textContent = '已加入跟进'
+    btn.textContent = '{{msg:followUpStarted}}'
     btn.classList.add('done')
-    toast(`已加入跟进：${r.commitment?.title ?? proposal.title}`)
+    toast(`{{msg:followUpStarted2}}${r.commitment?.title ?? proposal.title}`)
     const b = await api('bootstrap')
     S.boot = b
     renderConvs()
   } catch (err) {
-    if (/已经在跟进中/.test(err.message)) {
-      btn.textContent = '已在跟进中'
+    if (proposal.candidateLoopId && err.status === 409) {
+      btn.textContent = '{{msg:alreadyFollowingUp}}'
       btn.classList.add('done')
       return
     }
     btn.disabled = false
-    toast(`加入失败：${err.message}`, true)
+    toast(`{{msg:couldNotStartFollowUp}}${err.message}`, true)
   }
 }
 
@@ -585,24 +670,24 @@ function renderTail(node, m) {
   const u = m.usage ?? {}
   const parts = []
   if (u.prompt_tokens || u.completion_tokens) {
-    const cost = u.completion_tokens_details?.reasoning_tokens ? `（含思考 ${u.completion_tokens_details.reasoning_tokens}）` : ''
-    parts.push(`${u.prompt_tokens} 入 / ${u.completion_tokens} 出${cost}`)
+    const cost = u.completion_tokens_details?.reasoning_tokens ? `{{msg:includingReasoning}} ${u.completion_tokens_details.reasoning_tokens}{{msg:closeParenthesis}}` : ''
+    parts.push(`${u.prompt_tokens} {{msg:input}} ${u.completion_tokens} {{msg:output}}${cost}`)
   }
   if (m.model) parts.push(m.model)
   if (m.searchMode && m.searchMode !== 'off') {
     const searched = (m.tools ?? []).some((t) => t.name === 'web_search' || t.name === 'web_fetch')
-    parts.push(searched ? '已联网' : '未实际联网')
+    parts.push(searched ? '{{msg:usedWebSearch}}' : '{{msg:noWebSearch}}')
   }
-  if (m.finishReason === 'length') parts.push('被长度截断，可说"继续"')
-  if (m.aborted) parts.push('已停止')
+  if (m.finishReason === 'length') parts.push('{{msg:lengthLimitReachedSayContinueToKeep}}')
+  if (m.aborted) parts.push('{{msg:stopped}}')
   const drafts = new Map()
   for (const step of m.tools ?? []) {
     const draft = step.preparation
     if (step.name === 'follow_up_list' && step.ok === true && draft?.preparationId && draft.commitmentId) drafts.set(draft.preparationId, draft)
   }
-  const draftLinks = [...drafts.values()].map((draft) => `<button type="button" class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(draft.preparationId)}" data-commitment-id="${esc(draft.commitmentId)}">打开草稿《${esc(draft.title || '准备结果')}》</button>`).join(' ')
+  const draftLinks = [...drafts.values()].map((draft) => `<button type="button" class="btn small result-link" data-action="view-preparation" data-preparation-id="${esc(draft.preparationId)}" data-commitment-id="${esc(draft.commitmentId)}">{{html:openDraft}}${esc(draft.title || '{{msg:preparedWork}}')}{{msg:bookTitleEnd}}</button>`).join(' ')
   const hasRecall = m.id && Array.isArray(m.recalled) && m.recalled.length > 0
-  tail.innerHTML = `${draftLinks}${parts.length ? `<div class="usage">${esc(parts.join(' · '))}</div>` : ''}${sourceHtml(m.sources)}${hasRecall ? `<details class="fold recalled-facts"><summary>为这条回复检索的记忆 · ${m.recalled.length} 条</summary><div class="fold-body"></div></details>` : ''}`
+  tail.innerHTML = `${draftLinks}${parts.length ? `<div class="usage">${esc(parts.join(' · '))}</div>` : ''}${sourceHtml(m.sources)}${hasRecall ? `<details class="fold recalled-facts"><summary>{{html:memoryRetrievedForThisReply}} ${m.recalled.length} {{html:items}}</summary><div class="fold-body"></div></details>` : ''}`
   if (hasRecall) {
     const detail = $('.recalled-facts', tail)
     const conversationId = S.current
@@ -616,13 +701,13 @@ async function showRecalledFacts(detail, conversationId, messageId) {
   // Each opening gets its own status node so a late response cannot repopulate a closed or reopened panel.
   const status = document.createElement('div')
   status.setAttribute('role', 'status')
-  status.textContent = '正在核对当前记忆…'
+  status.textContent = '{{msg:checkingCurrentMemory}}'
   panel.replaceChildren(status)
   try {
     const { facts, unavailableCount } = await api(`conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/recalled-facts`)
-    status.innerHTML = `${facts.length ? `<ul>${facts.map((fact) => `<li>${esc(fact.text)}</li>`).join('')}</ul>` : ''}${unavailableCount ? `<p class="muted small">${esc(unavailableCount)} 条记忆已变更或当前不可用。</p>` : ''}<button type="button" class="btn small ghost" data-action="open-panel" data-panel="memory">管理记忆</button>`
+    status.innerHTML = `${facts.length ? `<ul>${facts.map((fact) => `<li>${esc(fact.text)}</li>`).join('')}</ul>` : ''}${unavailableCount ? `<p class="muted small">${esc(unavailableCount)} {{html:memoriesHaveChangedOrAreUnavailable}}</p>` : ''}<button type="button" class="btn small ghost" data-action="open-panel" data-panel="memory">{{html:manageMemory}}</button>`
   } catch (error) {
-    status.textContent = `读取失败：${error.message}。收起后重新展开可重试。`
+    status.textContent = `{{msg:couldNotLoad}}${error.message}{{msg:collapseAndReopenToTryAgain}}`
   }
 }
 
@@ -636,13 +721,13 @@ function sourceHtml(sources) {
 const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, '') } catch { return u } }
 
 function modelOptionsHtml(models, selected) {
-  const groups = {}
-  for (const m of models) (groups[m.group ?? '其他'] ??= []).push(m)
+  const groups = Object.create(null)
+  for (const m of models) (groups[m.group ?? '{{msg:other}}'] ??= []).push(m)
   return Object.entries(groups)
     .map(
       ([g, list]) =>
         `<optgroup label="${esc(g)}">${list
-          .map((m) => `<option value="${esc(m.id)}" ${m.id === selected ? 'selected' : ''}>${esc(m.label)}${m.vision ? ' · 视觉' : ''}</option>`)
+          .map((m) => `<option value="${esc(m.id)}" ${m.id === selected ? 'selected' : ''}>${esc(m.label)}${m.vision ? ' {{msg:vision}}' : ''}</option>`)
           .join('')}</optgroup>`,
     )
     .join('')
@@ -654,7 +739,7 @@ function imageGallery(images) {
   return `<div class="gallery">${list
     .map(
       (i) =>
-        `<a href="${esc(i.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(i.url)}" alt="${esc(i.prompt ?? '图片')}" loading="lazy" /></a>`,
+        `<a href="${esc(i.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(i.url)}" alt="${esc(i.prompt ?? '{{msg:image}}')}" loading="lazy" /></a>`,
     )
     .join('')}</div>`
 }
@@ -690,17 +775,17 @@ function heroNode() {
   el.className = 'hero'
   const main = S.current === 'main'
   el.innerHTML = `<img src="/logo.svg" width="42" height="42" alt="" />
-    <h3>${main ? '今天，想一起做点什么？' : '从一个想法开始'}</h3>
+    <h3>${main ? '{{msg:whatWouldYouLikeToWorkOn}}' : '{{msg:startWithAnIdea}}'}</h3>
     <p>${
       main
-        ? '随手记下想法，整理一件事，或继续上次的话题。Echo 的主动跟进也会留在这里。'
-        : '问题还没想清楚也没关系。先写下来，再用「润色」一起理清。'
+        ? '{{msg:captureAThoughtOrganizeATaskOr}}'
+        : '{{msg:writeDownWhatYouHaveSoFar}}'
     }</p>
     <div class="suggestions">
-      ${['帮我把今天的待办理清楚', '把这个想法变成下一步行动', '帮我起草一条消息', '一起梳理一个难题']
+      ${['{{msg:helpMeOrganizeTodaySTasks}}', '{{msg:turnThisIdeaIntoANextStep}}', '{{msg:helpMeDraftAMessage}}', '{{msg:helpMeThinkThroughAProblem}}']
         .map((t) => `<button class="sug" data-action="sug">${esc(t)}</button>`)
         .join('')}
-    </div><p class="suggestion-hint">选一个起点，编辑后再发送</p>`
+    </div><p class="suggestion-hint">{{html:chooseAStartingPointAndEditIt}}</p>`
   return el
 }
 
@@ -753,19 +838,19 @@ function updateComposer() {
   const draw = $('[data-action="draw"]')
   draw.hidden = cfg.media?.imageOutput === false || !cfg.defaultImageModel
   draw.disabled = !cfg.upstreamConfigured || busy || Boolean(S.drawing)
-  draw.textContent = drawing ? '正在画…' : '画图'
+  draw.textContent = drawing ? '{{msg:drawing}}' : '{{msg:draw}}'
   $('#connectionNotice').hidden = ready
-  $('#connectionText').textContent = cfg.upstreamConfigured ? '在引导中选择默认模型即可开始。草稿已保留。' : '连接你的模型后即可开始。你可以先写下草稿。'
+  $('#connectionText').textContent = cfg.upstreamConfigured ? '{{msg:chooseADefaultModelInSetupYour}}' : '{{msg:connectYourModelToStartYouCan}}'
   $('#composerHint').textContent = matchMedia('(pointer: coarse)').matches
-    ? '回车换行 · 点「发送」开始'
-    : 'Enter 发送 · Shift+Enter 换行'
-  const draftState = S.uploading ? '正在处理图片…' : text || S.att.length
-    ? `草稿已保留${S.att.length ? ' · 图片保留至关闭页面' : ''}` : ''
+    ? '{{msg:enterForANewLineClickSend}}'
+    : '{{msg:enterToSendShiftEnterForA}}'
+  const draftState = S.uploading ? '{{msg:processingImage}}' : text || S.att.length
+    ? `{{msg:draftSaved}}${S.att.length ? ' {{msg:imagesStayHereUntilThisPageCloses}}' : ''}` : ''
   if ($('#composerState').textContent !== draftState) $('#composerState').textContent = draftState
   const status = $('#replyStatus')
   status.hidden = !S.stream && !drawing && !S.selecting
-  const replyState = S.selecting ? '正在打开对话…' : drawing ? '正在生成图片，完成后会保存在这个对话里…'
-    : S.stream ? S.stream.status ?? 'Echo 正在准备回复…' : ''
+  const replyState = S.selecting ? '{{msg:openingChat}}' : drawing ? '{{msg:generatingAnImageItWillBeSaved}}'
+    : S.stream ? S.stream.status ?? '{{msg:echoIsPreparingAReply}}' : ''
   if (status.textContent !== replyState) status.textContent = replyState
   $('#thread').setAttribute('aria-busy', String(Boolean(S.stream || S.selecting)))
 }
@@ -780,7 +865,7 @@ function renderAttachments() {
   strip.innerHTML = S.att
     .map(
       (a, i) =>
-        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${esc(a.dataUrl)}" alt="${esc(a.name || '待发送图片')}" /><button type="button" data-action="rm-att" data-i="${i}" aria-label="移除${esc(a.name || '图片')}" title="移除">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
+        `<div class="thumb" title="${esc(a.name ?? '')}"><img src="${esc(a.dataUrl)}" alt="${esc(a.name || '{{msg:imagesToSend}}')}" /><button type="button" data-action="rm-att" data-i="${i}" aria-label="{{msg:remove}}{{msg:wordSpace}}${esc(a.name || '{{msg:image}}')}" title="{{html:remove2}}">×</button><span>${Math.round(a.bytes / 1024)}KB</span></div>`,
     )
     .join('')
 }
@@ -789,7 +874,7 @@ function readAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const fr = new FileReader()
     fr.onload = () => resolve(fr.result)
-    fr.onerror = () => reject(new Error('读取失败'))
+    fr.onerror = () => reject(new Error('{{msg:couldNotReadFile}}'))
     fr.readAsDataURL(file)
   })
 }
@@ -816,7 +901,7 @@ async function shrinkImage(file, maxEdge) {
     }
     im.onerror = () => {
       URL.revokeObjectURL(url)
-      reject(new Error('无法解析这张图'))
+      reject(new Error('{{msg:couldNotDecodeThisImage}}'))
     }
     im.src = url
   })
@@ -824,7 +909,7 @@ async function shrinkImage(file, maxEdge) {
 
 async function addFiles(files) {
   const media = S.boot?.config?.media ?? {}
-  if (media.imageInput === false || !S.current) return toast('当前未开启图片输入', true)
+  if (media.imageInput === false || !S.current) return toast('{{msg:imageInputIsOff}}', true)
   const conversationId = S.current
   saveDraft()
   const max = media.maxImagesPerMessage ?? 4
@@ -838,13 +923,13 @@ async function addFiles(files) {
         const image = await shrinkImage(file, maxEdge)
         const attachments = S.current === conversationId ? S.att : S.attachmentDrafts.get(conversationId) ?? []
         if (attachments.length >= max) {
-          toast(`一条消息最多 ${max} 张图`, true)
+          toast(`{{msg:imagesPerMessage}} ${max} {{msg:images}}`, true)
           break
         }
         attachments.push(image)
         S.attachmentDrafts.set(conversationId, attachments.slice())
       } catch (err) {
-        toast(`图片处理失败：${err.message}`, true)
+        toast(`{{msg:couldNotProcessImage}}${err.message}`, true)
       }
     }
   } finally {
@@ -854,7 +939,7 @@ async function addFiles(files) {
   }
 }
 
-/* --------------------------- 首次引导（BYOK 向导） -------------------------- */
+/* -------------------------------- setup wizard ---------------------------- */
 
 const W = {
   open: false,
@@ -875,7 +960,7 @@ const W = {
   password: '',
 }
 
-const STEPS = ['端点', '模型', '记忆', '搜索', '权限', '完成']
+const STEPS = ['{{msg:endpoint}}', '{{msg:models}}', '{{msg:memory}}', '{{msg:search}}', '{{msg:permissions}}', '{{msg:finish}}']
 
 async function openWizard() {
   const cat = await api('providers')
@@ -916,20 +1001,21 @@ function renderWizard() {
   card.className = 'wizard-card'
   card.innerHTML = `
     <div class="wizard-steps">${STEPS.map((_, i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}</div>
+    ${step === 0 ? languageSelector() : ''}
     <h2>${esc(STEPS[step])}</h2>
-    <p class="sub">${['第 1 步 · 你要用自己的模型 API（BYOK），密钥只存在本机 data/echo.env',
-      '第 2 步 · 从端点拉到的模型里挑默认用哪个',
-      '第 3 步 · 决定它记住你多少，以及要不要主动开口',
-      '第 4 步 · 联网搜索可以完全不要，也可以接你自己的搜索服务',
-      '第 5 步 · 权限与常驻状态检查',
-      '就绪'][step]}</p>
+    <p class="sub">${['{{msg:step1ConnectYourModelProviderThe}}',
+      '{{msg:step2ChooseTheDefaultModelFor}}',
+      '{{msg:step3ChooseWhatEchoRemembersAnd}}',
+      '{{msg:step4SetUpAnOptionalWeb}}',
+      '{{msg:step5ReviewPermissionsAndStartupSettings}}',
+      '{{msg:ready}}'][step]}</p>
     <div id="wBody"></div>
     <div class="wizard-foot">
-      <span class="muted small">第 ${step + 1} / ${STEPS.length} 步</span>
+      <span class="muted small">{{html:step}} ${step + 1} / ${STEPS.length} {{html:stepSuffix}}</span>
       <div class="right">
-        ${step > 0 ? '<button class="btn" data-w="back">上一步</button>' : ''}
-        <button class="btn ghost" data-w="skip">${step === 0 ? '以后再配' : '先不配'}</button>
-        <button class="btn primary" data-w="next">${step === STEPS.length - 1 ? '完成' : '继续'}</button>
+        ${step > 0 ? '<button class="btn" data-w="back">{{html:back}}</button>' : ''}
+        <button class="btn ghost" data-w="skip">${step === 0 ? '{{msg:setUpLater}}' : '{{msg:skipForNow}}'}</button>
+        <button class="btn primary" data-w="next">${step === STEPS.length - 1 ? '{{msg:finish}}' : '{{msg:continue}}'}</button>
       </div>
     </div>`
   el.innerHTML = ''
@@ -947,36 +1033,36 @@ function renderWizard() {
 
 function stepEndpoint() {
   const preset = W.catalog.upstream.find((p) => p.baseUrl === W.baseUrl)?.baseUrl ?? ''
-  const presets = W.catalog.upstream.map((p) => `<option value="${esc(p.baseUrl)}" ${p.baseUrl === preset ? 'selected' : ''}>${esc(p.label)}${p.baseUrl ? '' : '（手动填）'}</option>`).join('')
+  const presets = W.catalog.upstream.map((p) => `<option value="${esc(p.baseUrl)}" ${p.baseUrl === preset ? 'selected' : ''}>${esc(p.label)}${p.baseUrl ? '' : '{{msg:wordSpace}}{{msg:enterManually}}'}</option>`).join('')
   const savedKey = W.catalog.onboarding.hasKey && W.baseUrl === W.catalog.onboarding.baseUrl
   return `
-    <div class="field"><label for="wPreset">服务商预设</label><select id="wPreset">${presets}</select></div>
-    <div class="field"><label for="wBase">端点 Base URL（OpenAI 兼容，通常以 /v1 结尾）</label>
+    <div class="field"><label for="wPreset">{{html:providerPreset}}</label><select id="wPreset">${presets}</select></div>
+    <div class="field"><label for="wBase">{{html:endpointBaseUrlOpenaiCompatibleUsuallyEnding}}</label>
       <input type="text" id="wBase" placeholder="https://your-endpoint/v1" value="${esc(W.baseUrl)}" /></div>
-    <div class="field"><label for="wKey">API Key（保存在本机）</label>
-      <input type="password" id="wKey" placeholder="${savedKey ? '留空沿用此端点已配置的密钥' : '输入此端点的密钥'}" value="${esc(W.apiKey)}" /></div>
+    <div class="field"><label for="wKey">{{html:apiKeyStoredLocally}}</label>
+      <input type="password" id="wKey" placeholder="${savedKey ? '{{msg:leaveBlankToKeepTheCurrentKey}}' : '{{msg:enterTheKeyForThisEndpoint}}'}" value="${esc(W.apiKey)}" /></div>
     <div class="row">
-      <button class="btn small" data-w="test">测试连接并拉取模型</button>
-      <span class="muted small" role="status" id="wTestOut">${W.test ? (W.test.ok ? `✓ 读到 ${W.test.count} 个模型 ID` : `✗ ${esc(W.test.error ?? '')}`) : '知道模型 ID 可以直接继续。'}</span>
+      <button class="btn small" data-w="test">{{html:testConnectionAndListModels}}</button>
+      <span class="muted small" role="status" id="wTestOut">${W.test ? (W.test.ok ? `{{msg:found}} ${W.test.count} {{msg:modelIds}}` : `✗ ${esc(W.test.error ?? '')}`) : '{{msg:youCanContinueWithAKnownModel}}'}</span>
     </div>`
 }
 
 function stepModels() {
   return `
-    <div class="field"><label for="wModel">默认模型（可选择或输入模型 ID）</label>
-      <input type="text" id="wModel" list="wModels" required placeholder="例如 gpt-4o-mini / qwen-plus" value="${esc(W.defaultModel)}" />
+    <div class="field"><label for="wModel">{{html:defaultModelChooseOrEnterAnId}}</label>
+      <input type="text" id="wModel" list="wModels" required placeholder="{{html:forExampleGpt4oMiniOrQwen}}" value="${esc(W.defaultModel)}" />
       <datalist id="wModels">${W.models.map((m) => `<option value="${esc(m)}"></option>`).join('')}</datalist></div>
-    <div class="field"><label>后台杂活模型（标题、记忆抽取、Dream；默认同默认模型）</label>
-      <input type="text" id="wUtility" placeholder="留空 = 用默认模型" value="${esc(W.utilityModel)}" /></div>
-    <div class="field"><label>出图模型（可选；留空就关掉 image_gen 工具）</label>
-      <input type="text" id="wImage" placeholder="例如 wan2.7-image / gpt-image-1" value="${esc(W.imageModel)}" /></div>
-    <p class="muted small">这些都是普通配置项，之后在「设置」里随时能改；模型清单也可以用「重新拉取」更新。</p>`
+    <div class="field"><label>{{html:backgroundModelForTitlesMemoryExtractionAnd}}</label>
+      <input type="text" id="wUtility" placeholder="{{html:leaveBlankToUseTheDefaultModel}}" value="${esc(W.utilityModel)}" /></div>
+    <div class="field"><label>{{html:imageGenerationModelOptional}}</label>
+      <input type="text" id="wImage" placeholder="{{html:forExampleWan27ImageOrGpt}}" value="${esc(W.imageModel)}" /></div>
+    <p class="muted small">{{html:youCanChangeTheseSettingsLaterAnd}}</p>`
 }
 
 function stepProfile() {
   return Object.entries(W.catalog.profiles)
     .map(([id, p]) => {
-      const values = { off: '不抽取 / 不注入 / 不主动 / 不采集屏幕', light: '抽取并注入事实；不 Dream、不主动、不采集屏幕', standard: '抽取 + 注入 + 定期 Dream 与遗忘；主动服务开启', deep: '在标准之上打开屏幕感知（本地 OCR，需要屏幕录制授权）' }[id]
+      const values = { off: '{{msg:noMemoryExtractionRecallRemindersOrScreen}}', light: '{{msg:extractAndRecallFactsNoMemoryReviews}}', standard: '{{msg:extractAndRecallFactsReviewMemoryRegularly}}', deep: '{{msg:standardMemoryPlusScreenAwarenessWithLocal}}' }[id]
       return `<label class="opt-card ${W.profile === id ? 'sel' : ''}">
         <input type="radio" name="wProfile" value="${id}" ${W.profile === id ? 'checked' : ''} />
         <span><b>${esc(p.label)}</b><span>${esc(values ?? p.note)}</span></span></label>`
@@ -991,15 +1077,15 @@ function providerRows(order, providerCfg, keys) {
       const idx = (order ?? []).indexOf(p.id)
       const conf = providerCfg?.[p.id] ?? {}
       let extra = ''
-      if (p.id === 'searxng') extra = `<input type="text" data-pcfg="searxng" placeholder="https://your-searxng/（实例根地址）" value="${esc(conf.endpoint ?? '')}" style="margin-top:6px" />`
+      if (p.id === 'searxng') extra = `<input type="text" data-pcfg="searxng" placeholder="{{html:httpsYourSearxngInstanceRootUrl}}" value="${esc(conf.endpoint ?? '')}" style="margin-top:6px" />`
       if (p.id === 'custom') extra = `<input type="text" data-pcfg="custom" placeholder="https://your-search-api/endpoint" value="${esc(conf.endpoint ?? '')}" style="margin-top:6px" />`
-      if (p.needsKey) extra = `<input type="password" data-pkey="${p.envVar}" placeholder="${esc(p.envVar)}（写入本机 echo.env）" value="${esc(keys?.[p.envVar] ?? '')}" style="margin-top:6px" />`
+      if (p.needsKey) extra = `<input type="password" data-pkey="${p.envVar}" placeholder="${esc(p.envVar)}{{msg:wordSpace}}{{msg:savedToTheLocalEchoEnvFile}}" value="${esc(keys?.[p.envVar] ?? '')}" style="margin-top:6px" />`
       return `<div class="chain-row">
         <input type="checkbox" data-order="${p.id}" ${idx >= 0 ? 'checked' : ''} />
         <span class="idx">${idx >= 0 ? idx + 1 : '·'}</span>
         <span style="flex:1">
           <b>${esc(p.label)}</b>
-          <div class="why">${esc(p.note)}${p.ready ? '' : ` · 未就绪：${esc(p.reason)}`}</div>
+          <div class="why">${esc(p.note)}${p.ready ? '' : ` {{msg:unavailable}}${esc(p.reason)}`}</div>
           ${extra}
         </span>
       </div>`
@@ -1014,39 +1100,39 @@ function wizardChainRows() {
 
 function stepSearch() {
   return `
-    <p class="muted small" style="margin-top:0">勾选的按顺序依次尝试，前面的失败（如被限流）自动交给下一个。全部不勾即"不联网"。</p>
+    <p class="muted small" style="margin-top:0">{{html:selectedProvidersAreTriedInOrderIf}}</p>
     <div class="chain">${providerRows(W.order, W.providerCfg, W.keys)}</div>`
 }
 
 function stepPermissions() {
   const p = W.perms
-  if (!p) return '<p class="muted small">正在检查…</p>'
+  if (!p) return '<p class="muted small">{{html:checking}}</p>'
   const row = (ok, text) => `<div class="chain-row"><span class="idx">${ok ? '✓' : '!'}</span><span style="flex:1">${text}</span></div>`
   return `
-    ${row(true, '模型设置已填写，点「完成」后保存。')}
-    ${row(p.runningUnderLaunchd, p.runningUnderLaunchd ? '已由 launchd 常驻（登录自启、崩溃自动拉起）' : '当前是手动启动的；要常驻请跑 ./install.sh')}
-    ${row(p.tools.swiftc, p.tools.swiftc ? 'swiftc 可用（能编译状态栏图标）' : '缺少 swiftc：xcode-select --install')}
-    ${row(true, `监听：${esc(p.bind)} :${p.port}${p.lanUrl ? ` · 同一网络 ${esc(p.lanUrl)}` : ''}`)}
-    ${row(p.authRequired, p.authRequired ? '已开启口令验证' : '尚未要求访问口令')}
-    <div class="field" style="margin-top:12px"><label>屏幕录制权限（只有开启屏幕感知才需要）</label>
-      <div class="row"><button class="btn small" data-w="perm-test">测试一次</button>
-      <span class="muted small" id="wPermOut">${W.permTest ? (W.permTest.granted ? '✓ 已授权，能抓到画面' : `✗ ${esc(W.permTest.hint)}`) : '未测试'}</span></div>
+    ${row(true, '{{msg:modelSettingsAreReadyChooseFinishTo}}')}
+    ${row(p.runningUnderLaunchd, p.runningUnderLaunchd ? '{{msg:runningWithLaunchdAtLoginAndAfter}}' : '{{msg:startedManuallyRunInstallShToEnable}}')}
+    ${row(p.tools.swiftc, p.tools.swiftc ? '{{msg:swiftcIsAvailableToBuildTheMenu}}' : '{{msg:installTheSwiftCompilerWithXcodeSelect}}')}
+    ${row(true, `{{msg:listeningOn}}${esc(p.bind)} :${p.port}${p.lanUrl ? ` {{msg:sameNetwork}} ${esc(p.lanUrl)}` : ''}`)}
+    ${row(p.authRequired, p.authRequired ? '{{msg:passwordProtectionIsOn}}' : '{{msg:passwordProtectionIsOff}}')}
+    <div class="field" style="margin-top:12px"><label>{{html:screenRecordingPermissionForScreenAwareness}}</label>
+      <div class="row"><button class="btn small" data-w="perm-test">{{html:testPermission}}</button>
+      <span class="muted small" id="wPermOut">${W.permTest ? (W.permTest.granted ? '{{msg:screenRecordingPermissionGranted}}' : `✗ ${esc(W.permTest.hint)}`) : '{{msg:untested}}'}</span></div>
     </div>
-    ${p.canSetInitialPassword ? `<div class="field"><label for="wPass">设置口令并开启登录验证（可选）</label>
-      <input type="password" id="wPass" minlength="6" autocomplete="new-password" placeholder="至少 6 位" value="${esc(W.password)}" /></div>` : '<p class="muted small">可在 Mac 本机的「设置 → 访问控制」管理口令。</p>'}
-    <p class="muted small">权限说明与命令见仓库 docs/permissions.md。</p>`
+    ${p.canSetInitialPassword ? `<div class="field"><label for="wPass">{{html:setAPasswordAndRequireSignIn}}</label>
+      <input type="password" id="wPass" minlength="6" autocomplete="new-password" placeholder="{{html:atLeast6Characters}}" value="${esc(W.password)}" /></div>` : '<p class="muted small">{{html:manageYourPasswordInSettingsAccessOn}}</p>'}
+    <p class="muted small">{{html:seeDocsPermissionsMdForDetailsAnd}}</p>`
 }
 
 function stepDone() {
-  const searchText = W.order.length ? W.order.map((id) => W.catalog.search.find((p) => p.id === id)?.label ?? id).join(' → ') : '不联网'
+  const searchText = W.order.length ? W.order.map((id) => W.catalog.search.find((p) => p.id === id)?.label ?? id).join(' → ') : '{{msg:webSearchOff}}'
   return `
     <div class="chain">
-      <div class="chain-row"><span class="idx">1</span><span style="flex:1">端点：<b>${esc(W.baseUrl || '（沿用环境变量）')}</b></span></div>
-      <div class="chain-row"><span class="idx">2</span><span style="flex:1">默认模型：<b>${esc(W.defaultModel || '（未选）')}</b>${W.utilityModel ? ` · 杂活：${esc(W.utilityModel)}` : ''}${W.imageModel ? ` · 出图：${esc(W.imageModel)}` : ''}</span></div>
-      <div class="chain-row"><span class="idx">3</span><span style="flex:1">记忆档位：<b>${esc(W.catalog.profiles[W.profile]?.label ?? W.profile)}</b></span></div>
-      <div class="chain-row"><span class="idx">4</span><span style="flex:1">搜索链：<b>${esc(searchText)}</b></span></div>
+      <div class="chain-row"><span class="idx">1</span><span style="flex:1">{{html:endpoint2}}<b>${esc(W.baseUrl || '{{msg:useEnvironmentVariable}}')}</b></span></div>
+      <div class="chain-row"><span class="idx">2</span><span style="flex:1">{{html:defaultModel}}<b>${esc(W.defaultModel || '{{msg:noneSelected}}')}</b>${W.utilityModel ? ` {{msg:background}}${esc(W.utilityModel)}` : ''}${W.imageModel ? ` {{msg:images2}}${esc(W.imageModel)}` : ''}</span></div>
+      <div class="chain-row"><span class="idx">3</span><span style="flex:1">{{html:memoryProfile}}<b>${esc(W.catalog.profiles[W.profile]?.label ?? W.profile)}</b></span></div>
+      <div class="chain-row"><span class="idx">4</span><span style="flex:1">{{html:searchProviders}}<b>${esc(searchText)}</b></span></div>
     </div>
-    <p class="muted small" style="margin-top:12px">点「完成」会：把密钥写进 data/echo.env、把以上选择写进 config.json，然后你就可以直接开始对话。</p>`
+    <p class="muted small" style="margin-top:12px">{{html:chooseFinishToSaveYourCredentialsTo}}</p>`
 }
 
 function bindWizard() {
@@ -1066,11 +1152,11 @@ function bindWizard() {
     btn.addEventListener('click', async () => {
       const act = btn.dataset.w
       if (act === 'back') { W.step = Math.max(0, W.step - 1); return renderWizard() }
-      if (act === 'skip') { localStorage.setItem('echo.onboardSkipped', '1'); closeWizard(); return toast('随时可以在「设置 → 引导与权限」里重新配置') }
+      if (act === 'skip') { localStorage.setItem('echo.onboardSkipped', '1'); closeWizard(); return toast('{{msg:youCanRunSetupAgainFromSettings}}') }
       if (act === 'test') {
         syncEndpoint()
         W.apiKey = $('#wKey').value.trim()
-        $('#wTestOut').textContent = '测试中…'
+        $('#wTestOut').textContent = '{{msg:testing}}'
         const pending = Symbol()
         W.test = pending
         const r = await api('onboarding/test', { method: 'POST', body: { baseUrl: W.baseUrl, apiKey: W.apiKey } })
@@ -1085,21 +1171,21 @@ function bindWizard() {
         return renderWizard()
       }
       if (act === 'perm-test') {
-        $('#wPermOut').textContent = '测试中（系统可能弹授权窗）…'
+        $('#wPermOut').textContent = '{{msg:testingMacosMayRequestPermission}}'
         W.permTest = await api('permissions/screen-test', { method: 'POST', body: {} })
         return renderWizard()
       }
       if (act === 'next') {
-        // 收集当前步骤的输入
+        // Collect this step before moving on.
         if (W.step === 0) {
           syncEndpoint()
           W.apiKey = ($('#wKey')?.value ?? W.apiKey).trim()
-          if (!W.baseUrl) return toast('请填写模型端点地址', true)
-          if ((!W.catalog.onboarding.hasKey || W.baseUrl !== W.catalog.onboarding.baseUrl) && !W.apiKey) return toast('请输入该端点的 API Key', true)
+          if (!W.baseUrl) return toast('{{msg:enterTheModelEndpointUrl}}', true)
+          if ((!W.catalog.onboarding.hasKey || W.baseUrl !== W.catalog.onboarding.baseUrl) && !W.apiKey) return toast('{{msg:enterTheApiKeyForThisEndpoint}}', true)
         } else if (W.step === 1) {
           if ($('#wModel')?.reportValidity() === false) return
           W.defaultModel = ($('#wModel')?.value ?? '').trim()
-          if (!W.defaultModel) return toast('请选择或输入一个默认模型', true)
+          if (!W.defaultModel) return toast('{{msg:chooseOrEnterADefaultModel}}', true)
           W.utilityModel = ($('#wUtility')?.value ?? '').trim()
           W.imageModel = ($('#wImage')?.value ?? '').trim()
         } else if (W.step === 4) {
@@ -1116,7 +1202,6 @@ function bindWizard() {
           if (W.step === 4 && !W.perms) W.perms = await api('permissions').catch(() => null)
           return renderWizard()
         }
-        // 完成
         btn.disabled = true
         const body = {
           baseUrl: W.baseUrl,
@@ -1125,7 +1210,7 @@ function bindWizard() {
           defaultModel: W.defaultModel,
           utilityModel: W.utilityModel,
           ...(W.imageModel !== (S.boot?.config?.defaultImageModel ?? '') || W.baseUrl !== W.catalog.onboarding.baseUrl ? {
-            imageModels: W.imageModel ? [{ id: W.imageModel, label: W.imageModel, group: '出图' }] : [],
+            imageModels: W.imageModel ? [{ id: W.imageModel, label: W.imageModel, groupKind: 'image' }] : [],
             defaultImageModel: W.imageModel,
           } : {}),
           profile: W.profile,
@@ -1135,7 +1220,7 @@ function bindWizard() {
         }
         try {
           await api('onboarding/complete', { method: 'POST', body })
-          toast('配置已保存，开始对话吧')
+          toast('{{msg:settingsSavedYouCanStartChatting}}')
           closeWizard()
           await boot({ keep: true })
         } catch (err) {
@@ -1174,15 +1259,15 @@ function bindWizard() {
   )
 }
 
-/* ------------------------------- 润色（CoT） ------------------------------- */
+/* -------------------------------- request refinement --------------------- */
 
 const POLISH = { mode: localStorage.getItem('echo.polishMode') ?? 'expand', modes: null, running: false, last: null }
 
 async function runPolish({ mode } = {}) {
   const input = $('#input')
   const text = input.value.trim()
-  if (!text) return toast('输入框是空的', true)
-  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
+  if (!text) return toast('{{msg:enterAMessageFirst}}', true)
+  if (!chatReady()) return toast('{{msg:finishModelSetupFirstYourDraftIs}}', true)
   if (POLISH.running) return
   if (mode) {
     POLISH.mode = mode
@@ -1191,7 +1276,7 @@ async function runPolish({ mode } = {}) {
   POLISH.running = true
   const btn = $('#polishBtn')
   const original = btn.textContent
-  btn.textContent = '润色中…'
+  btn.textContent = '{{msg:refining}}'
   btn.disabled = true
   const conversationId = S.current
   try {
@@ -1201,7 +1286,7 @@ async function runPolish({ mode } = {}) {
     if (!r.ok && r.error) toast(r.error, true)
     renderPolishBox()
   } catch (err) {
-    toast(`润色失败：${err.message}`, true)
+    toast(`{{msg:couldNotRefine}}${err.message}`, true)
   } finally {
     POLISH.running = false
     btn.textContent = original
@@ -1224,23 +1309,23 @@ function renderPolishBox() {
   box.hidden = false
   box.innerHTML = `
     <div class="head">
-      <span>润色${r.changed ? '' : '（原话已经够清楚，基本没改）'}${r.ms ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''}</span>
+      <span>{{html:refine}}{{msg:wordSpace}}${r.changed ? '' : '{{msg:yourOriginalWordingWasAlreadyClear}}'}${r.ms ? ` · ${(r.ms / 1000).toFixed(1)}s` : ''}</span>
       <div class="pill-group">${chips}</div>
     </div>
     <textarea id="polishText">${esc(r.polished ?? '')}</textarea>
     <div class="why">
-      ${r.intent ? `<div><b>它理解的意图：</b>${esc(r.intent)}</div>` : ''}
-      ${list(r.gaps, '缺口：')}
-      ${list(r.assumptions, '它替你假设的（可以不同意）：')}
-      ${r.notes ? `<div><b>说明：</b>${esc(r.notes)}</div>` : ''}
+      ${r.intent ? `<div><b>{{html:interpretedIntent}}</b>${esc(r.intent)}</div>` : ''}
+      ${list(r.gaps, '{{msg:missingDetails}}')}
+      ${list(r.assumptions, '{{msg:assumptionsYouCanChange}}')}
+      ${r.notes ? `<div><b>{{html:notes}}</b>${esc(r.notes)}</div>` : ''}
     </div>
     <div class="acts">
-      <span class="muted small">${esc((r.usage?.total_tokens ? `${r.usage.total_tokens} tokens · ` : '') + '这段不会自动替换你的输入')}</span>
+      <span class="muted small">${esc((r.usage?.total_tokens ? `${r.usage.total_tokens} tokens · ` : '') + '{{msg:yourOriginalMessageStaysInTheComposer}}')}</span>
       <div class="right">
-        <button type="button" class="btn small" data-pact="cancel">取消</button>
-        <button type="button" class="btn small" data-pact="retry">换个说法</button>
-        <button type="button" class="btn small" data-pact="use">替换输入框</button>
-        <button type="button" class="btn small primary" data-pact="send">直接发送</button>
+        <button type="button" class="btn small" data-pact="cancel">{{html:cancel}}</button>
+        <button type="button" class="btn small" data-pact="retry">{{html:tryDifferentWording}}</button>
+        <button type="button" class="btn small" data-pact="use">{{html:replaceComposerText}}</button>
+        <button type="button" class="btn small primary" data-pact="send">{{html:sendNow}}</button>
       </div>
     </div>`
   box.querySelectorAll('[data-pmode]').forEach((b) =>
@@ -1255,17 +1340,17 @@ function renderPolishBox() {
       }
       if (act === 'retry') return runPolish()
       const text = $('#polishText').value.trim()
-      if (!text) return toast('润色后的内容是空的', true)
+      if (!text) return toast('{{msg:theRefinedMessageIsEmpty}}', true)
       if (act === 'use') {
         $('#input').value = text
         autogrow()
         localStorage.setItem(`echo.draft.${S.current}`, text)
         POLISH.last = null
         renderPolishBox()
-        return toast('已替换输入框内容')
+        return toast('{{msg:composerUpdated}}')
       }
       if (act === 'send') {
-        if (S.stream) return toast('正在生成中…', true)
+        if (S.stream) return toast('{{msg:aReplyIsAlreadyBeingGenerated}}', true)
         POLISH.last = null
         renderPolishBox()
         $('#input').value = text
@@ -1280,8 +1365,8 @@ function renderPolishBox() {
 /* -------------------------------- streaming -------------------------------- */
 
 async function startStream({ userText, regenerate = false, editId }) {
-  if (S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return toast('请稍候…', true)
-  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
+  if (S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return toast('{{msg:pleaseWait}}', true)
+  if (!chatReady()) return toast('{{msg:finishModelSetupFirstYourDraftIs}}', true)
   const conversationId = S.current
   const superseded = []
   if (editId) {
@@ -1366,7 +1451,7 @@ async function startStream({ userText, regenerate = false, editId }) {
         setBusy(false)
         autogrow()
         updateRegenerateButtons()
-        toast(e.message ?? '工作区模式已更改，请核对模式后重新发送。', true)
+        toast(e.message ?? '{{msg:theWorkspaceModeChangedCheckItBefore}}', true)
         return
       }
       throw new Error(e.message ?? `HTTP ${res.status}`)
@@ -1388,7 +1473,7 @@ async function startStream({ userText, regenerate = false, editId }) {
         try {
           handleEvent(name, JSON.parse(data))
         } catch (err) {
-          console.error('事件渲染失败', name, err)
+          console.error('{{msg:couldNotRenderEvent}}', name, err)
         }
       }
     }
@@ -1411,16 +1496,16 @@ async function startStream({ userText, regenerate = false, editId }) {
         if (userNode && d.userMessageId) userNode.dataset.id = d.userMessageId
         break
       case 'reasoning':
-        st.phase = '正在思考下一步'
-        st.status = 'Echo 正在思考…'
+        st.phase = '{{msg:consideringTheNextStep}}'
+        st.status = '{{msg:echoIsThinking}}'
         updateComposer()
         st.reasoning += d.text
         openReasoning()
         break
       case 'delta':
-        st.phase = '正在整理回复'
-        if (st.status !== 'Echo 正在回复…') {
-          st.status = 'Echo 正在回复…'
+        st.phase = '{{msg:preparingReply}}'
+        if (st.status !== '{{msg:echoIsReplying}}') {
+          st.status = '{{msg:echoIsReplying}}'
           updateComposer()
         }
         st.buffer += d.text
@@ -1428,10 +1513,10 @@ async function startStream({ userText, regenerate = false, editId }) {
         break
       case 'run_start':
         st.runId = d.runId
-        if (!$('.run-link', node)) $('.meta', node).insertAdjacentHTML('afterend', `<button class="btn small run-link" data-action="view-run" data-id="${esc(d.runId)}">查看执行记录</button>`)
+        if (!$('.run-link', node)) $('.meta', node).insertAdjacentHTML('afterend', `<button class="btn small run-link" data-action="view-run" data-id="${esc(d.runId)}">{{html:viewRun}}</button>`)
         break
       case 'tool_call':
-        st.status = `正在${d.label ?? d.name}…`
+        st.status = `{{msg:inProgress}}${d.label ?? d.name}…`
         updateComposer()
         if (!stepsHost.tools.some((tool) => tool.id === d.id)) stepsHost.tools.push({ id: d.id, name: d.name, label: d.label, args: d.args, status: 'running' })
         else Object.assign(stepsHost.tools.find((tool) => tool.id === d.id), { name: d.name, label: d.label, args: d.args })
@@ -1445,7 +1530,7 @@ async function startStream({ userText, regenerate = false, editId }) {
         break
       }
       case 'tool_approval': {
-        st.status = '等待你确认这次操作，可批准、拒绝或停止'
+        st.status = '{{msg:approveDenyOrStopThisAction}}'
         updateComposer()
         const tool = stepsHost.tools.find((item) => item.id === d.id)
         if (tool) tool.status = 'awaiting_approval'
@@ -1468,15 +1553,15 @@ async function startStream({ userText, regenerate = false, editId }) {
           tool.output = `${tool.output ?? ''}${String(d.text ?? '')}`.slice(-12000)
           tool.status = 'running'
         }
-        if (st.status !== '正在执行工具…') {
-          st.status = '正在执行工具…'
+        if (st.status !== '{{msg:runningTool}}') {
+          st.status = '{{msg:runningTool}}'
           updateComposer()
         }
         renderStepsInto(stepsHost.tools)
         break
       }
       case 'tool_result': {
-        st.phase = '正在整理结果，准备下一步'
+        st.phase = '{{msg:reviewingResultsAndPreparingTheNextStep}}'
         const t = stepsHost.tools.find((x) => x.id === d.id)
         if (t) {
           t.ok = d.ok
@@ -1493,7 +1578,7 @@ async function startStream({ userText, regenerate = false, editId }) {
       }
       case 'run_complete':
         st.runStatus = d.status
-        if (d.status && d.status !== 'completed') st.notices.push(`执行${RUN_STATUS[d.status] ?? d.status}`)
+        if (d.status && d.status !== 'completed') st.notices.push(`{{msg:run}}{{msg:wordSpace}}${RUN_STATUS[d.status] ?? d.status}`)
         break
       case 'sources':
         st.sources.push(...(d.items ?? []))
@@ -1531,7 +1616,7 @@ async function startStream({ userText, regenerate = false, editId }) {
     const el = document.createElement('details')
     el.className = 'fold reasoning'
     el.open = true
-    el.innerHTML = `<summary>思考中…</summary><div class="fold-body"></div>`
+    el.innerHTML = `<summary>{{html:thinking2}}</summary><div class="fold-body"></div>`
     node.querySelector('.meta').after(el)
   }
 
@@ -1554,14 +1639,14 @@ async function startStream({ userText, regenerate = false, editId }) {
     const message = d?.message ?? st.failedMessage
     const finalText = message?.content ?? st.buffer
     const confirmedCancelled = message?.runStatus === 'cancelled' || st.runStatus === 'cancelled' || d?.aborted === true
-    if (!d && !st.error && !st.ctrl.signal.aborted) st.error = '连接中断，回复可能不完整，请重试'
+    if (!d && !st.error && !st.ctrl.signal.aborted) st.error = '{{msg:connectionLostTheReplyMayBeIncomplete2}}'
     st.contentEl.innerHTML = md(finalText) + (st.error ? `<div class="err" role="alert">${esc(st.error)}</div>` : '')
-    if (!finalText.trim() && !st.error) st.contentEl.innerHTML = `<p class="muted">${confirmedCancelled ? '已停止生成' : st.ctrl.signal.aborted ? '回复连接已断开，执行结果请查看记录' : '（没有内容）'}</p>`
+    if (!finalText.trim() && !st.error) st.contentEl.innerHTML = `<p class="muted">${confirmedCancelled ? '{{msg:generationStopped}}' : st.ctrl.signal.aborted ? '{{msg:connectionLostCheckTheRunRecordFor}}' : '{{msg:noContent}}'}</p>`
     if (st.reasoning) {
       const el = $('details.reasoning', node)
       if (el) {
         el.open = false
-        el.querySelector('summary').textContent = `思考过程 · ${st.reasoning.length} 字`
+        el.querySelector('summary').textContent = `{{msg:reasoning}} ${st.reasoning.length} {{msg:characters}}`
         $('.fold-body', el).textContent = st.reasoning
       }
     }
@@ -1575,7 +1660,7 @@ async function startStream({ userText, regenerate = false, editId }) {
     S.stream = null
     $$('[data-approval-id]', node).forEach((card) => settleApproval(card.dataset.approvalId, confirmedCancelled ? 'cancelled' : 'interrupted'))
     setBusy(false)
-    try { await refreshList() } catch (err) { toast(`会话列表更新失败：${err.message}`, true) }
+    try { await refreshList() } catch (err) { toast(`{{msg:couldNotRefreshChatList}}${err.message}`, true) }
     if (S.boot) {
       const c = S.convs.find((x) => x.id === S.current)
       if (c) $('#convTitle').textContent = c.title
@@ -1587,7 +1672,7 @@ async function startStream({ userText, regenerate = false, editId }) {
 function setBusy(busy) {
   $('#stopBtn').hidden = !busy
   $('#sendBtn').disabled = busy
-  $('#sendBtn').textContent = busy ? '生成中' : '发送'
+  $('#sendBtn').textContent = busy ? '{{msg:generating}}' : '{{msg:send}}'
   document.body.classList.toggle('busy', busy)
   updateComposer()
 }
@@ -1597,7 +1682,7 @@ async function stopReply() {
   if (!stream || stream.stopping) return
   stream.stopping = true
   const previousStatus = stream.status
-  stream.status = '正在请求停止…'
+  stream.status = '{{msg:requestingStop}}'
   updateComposer()
   try {
     const result = await api('chat/stop', { method: 'POST', body: { conversationId: stream.conversationId } })
@@ -1607,7 +1692,7 @@ async function stopReply() {
     stream.stopping = false
     stream.status = previousStatus
     if (S.stream === stream) updateComposer()
-    toast(`停止请求失败：${err.message}，可以重试`, true)
+    toast(`{{msg:couldNotStop}}${err.message}{{msg:youCanRetry}}`, true)
   }
 }
 
@@ -1642,22 +1727,22 @@ function updateWorkspaceBadge() {
   const badge = $('#workspaceBadge')
   if (!badge) return
   const config = S.boot?.config?.harness ?? WORKSPACE.config ?? {}
-  badge.textContent = config.enabled ? `工作区 · ${config.allowShell ? '命令' : config.allowWrites ? '读写' : '只读'}` : '工作区 · 未启用'
+  badge.textContent = config.enabled ? `{{msg:workspace2}} ${config.allowShell ? '{{msg:commands}}' : config.allowWrites ? '{{msg:readAndWrite}}' : '{{msg:readOnly}}'}` : '{{msg:workspaceOff}}'
   badge.classList.toggle('on', Boolean(config.enabled))
-  badge.title = config.enabled ? `${config.workspaceRoot || '工作区'} · 查看权限与执行记录` : '配置工作区与查看执行记录'
+  badge.title = config.enabled ? `${config.workspaceRoot || '{{msg:workspace}}'} {{msg:viewPermissionsAndRunHistory}}` : '{{msg:setWorkspacePermissionsAndReviewRuns}}'
 }
 
 function approvalHtml(runId, step) {
   const approval = step.approval
   if (!approval || !['pending', 'awaiting_approval', undefined].includes(approval.status)) return ''
-  return `<section class="tool-approval" data-approval-id="${esc(approval.id)}" data-call-id="${esc(step.id)}" aria-label="确认工具操作">
-    <strong>需要确认 · ${esc(step.name ?? '工作区操作')}</strong>
-    <p>${esc(approval.summary || '请核对本次操作的完整输入。')}</p>
-    ${step.workspaceRoot ? `<p class="muted small">项目目录：${esc(step.workspaceRoot)}</p>` : ''}
+  return `<section class="tool-approval" data-approval-id="${esc(approval.id)}" data-call-id="${esc(step.id)}" aria-label="{{html:reviewToolAction}}">
+    <strong>{{html:approvalNeeded}} ${esc(step.name ?? '{{msg:workspaceAction}}')}</strong>
+    <p>${esc(approval.summary || '{{msg:reviewTheFullInputForThisAction}}')}</p>
+    ${step.workspaceRoot ? `<p class="muted small">{{html:projectDirectory}}${esc(step.workspaceRoot)}</p>` : ''}
     <pre class="run-code">${esc(toolText(approval.args ?? step.args))}</pre>
-    <p class="muted small">批准仅限这一次操作。${step.name === 'shell_exec' ? 'Shell 命令使用运行 Echo 的账户权限，不受文件工具的目录边界保护。' : '工具将使用对应服务的已配置权限。'}</p>
-    <div class="row"><button class="btn small primary" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="approve">批准这一次</button>
-    <button class="btn small" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="deny">拒绝</button></div>
+    <p class="muted small">{{html:approvalAppliesToThisActionOnly}}{{msg:wordSpace}}${step.name === 'shell_exec' ? '{{msg:shellCommandsRunWithThePrivilegesOf}}' : '{{msg:thisToolUsesThePermissionsConfiguredFor}}'}</p>
+    <div class="row"><button class="btn small primary" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="approve">{{html:approveOnce}}</button>
+    <button class="btn small" data-action="run-approval" data-run-id="${esc(runId)}" data-approval-id="${esc(approval.id)}" data-decision="deny">{{html:deny}}</button></div>
     <p class="approval-status small" role="status"></p></section>`
 }
 
@@ -1665,7 +1750,7 @@ function settleApproval(id, status) {
   $$('[data-approval-id].tool-approval').filter((card) => card.dataset.approvalId === id && !card.dataset.settled).forEach((card) => {
     card.dataset.settled = 'true'
     $$('button', card).forEach((button) => { button.disabled = true })
-    $('.approval-status', card).textContent = card.dataset.decision === 'deny' ? '已拒绝这次操作' : RUN_STATUS[status] ?? status
+    $('.approval-status', card).textContent = card.dataset.decision === 'deny' ? '{{msg:actionDenied}}' : RUN_STATUS[status] ?? status
   })
 }
 
@@ -1677,13 +1762,13 @@ async function decideApproval(button) {
     card.dataset.submitting = 'true'
     card.dataset.decision = decision
     $$('button', card).forEach((control) => { control.disabled = true })
-    $('.approval-status', card).textContent = '正在提交…'
+    $('.approval-status', card).textContent = '{{msg:submitting}}'
   })
   try {
     await api(`runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', body: { decision } })
     cards.forEach((card) => {
       card.dataset.decision = decision
-      if (!card.dataset.settled) $('.approval-status', card).textContent = decision === 'approve' ? '已批准这一次，等待执行结果' : '已拒绝这次操作'
+      if (!card.dataset.settled) $('.approval-status', card).textContent = decision === 'approve' ? '{{msg:approvedWaitingForTheResult}}' : '{{msg:actionDenied}}'
     })
     if (!$('#drawer').hidden && S.panel === 'workspace') await refreshRuns({ force: true })
   } catch (err) {
@@ -1707,25 +1792,25 @@ async function renderWorkspacePanel() {
   updateWorkspaceBadge()
   updateComposer()
   // Only opening the panel rebuilds its form; background polling updates the runs below.
-  panel.innerHTML = `<section class="sect"><h3>工作区执行</h3>
-    <p class="muted small">让 Echo 读取项目、编辑文件、执行命令，并保存每一步的输入、输出和结果。启用后，在对话中直接描述任务。</p>
-    ${!WORKSPACE.local ? '<p class="notice">在本机打开 Echo 后可设置权限、批准操作和查看执行记录。</p>' : ''}
+  panel.innerHTML = `<section class="sect"><h3>{{html:workspaceTools}}</h3>
+    <p class="muted small">{{html:letEchoReadAProjectEditFiles}}</p>
+    ${!WORKSPACE.local ? '<p class="notice">{{html:openEchoOnTheHostMacTo}}</p>' : ''}
     <form id="workspaceForm"><fieldset class="workspace-fields" ${!WORKSPACE.local ? 'disabled' : ''}>
-      <label class="switch" for="workspaceEnabled">启用工作区工具<input id="workspaceEnabled" name="enabled" type="checkbox" ${config.enabled ? 'checked' : ''} /></label>
-      <div class="field"><label for="workspaceRoot">项目目录（绝对路径）</label><input id="workspaceRoot" name="workspaceRoot" type="text" placeholder="/Users/you/projects/my-project" value="${esc(config.workspaceRoot)}" autocomplete="off" spellcheck="false" /></div>
-      <label class="switch" for="workspaceWrites">允许编辑工作区文件<input id="workspaceWrites" name="allowWrites" type="checkbox" ${config.allowWrites ? 'checked' : ''} /></label>
-      <label class="switch" for="workspaceShell">允许申请 Shell 命令<input id="workspaceShell" name="allowShell" type="checkbox" ${config.allowShell ? 'checked' : ''} /></label>
-      <p class="muted small">文件工具限制在选定目录内；启用编辑后，Echo 可直接修改其中的文件。Shell 和 MCP 操作每次都展示完整输入，等你批准后执行。Shell 是受信任的本机命令，不是操作系统沙箱，可能访问目录外的文件或网络。</p>
-      <div class="workspace-limits"><div class="field"><label for="workspaceRounds">最多工具轮次</label><input id="workspaceRounds" name="maxToolRounds" type="number" min="1" max="24" value="${esc(config.maxToolRounds ?? 12)}" required /></div>
-      <div class="field"><label for="workspaceTimeout">命令超时（秒）</label><input id="workspaceTimeout" name="timeout" type="number" min="1" max="120" value="${esc((config.shellTimeoutMs ?? 60000) / 1000)}" required /></div></div>
-      <button class="btn small primary" type="submit">保存工作区权限</button>
+      <label class="switch" for="workspaceEnabled">{{html:enableWorkspaceTools}}<input id="workspaceEnabled" name="enabled" type="checkbox" ${config.enabled ? 'checked' : ''} /></label>
+      <div class="field"><label for="workspaceRoot">{{html:projectDirectoryAbsolutePath}}</label><input id="workspaceRoot" name="workspaceRoot" type="text" placeholder="/Users/you/projects/my-project" value="${esc(config.workspaceRoot)}" autocomplete="off" spellcheck="false" /></div>
+      <label class="switch" for="workspaceWrites">{{html:allowFileEdits}}<input id="workspaceWrites" name="allowWrites" type="checkbox" ${config.allowWrites ? 'checked' : ''} /></label>
+      <label class="switch" for="workspaceShell">{{html:allowCommandRequests}}<input id="workspaceShell" name="allowShell" type="checkbox" ${config.allowShell ? 'checked' : ''} /></label>
+      <p class="muted small">{{html:fileToolsStayWithinThisDirectoryEnabling}}</p>
+      <div class="workspace-limits"><div class="field"><label for="workspaceRounds">{{html:maximumToolRounds}}</label><input id="workspaceRounds" name="maxToolRounds" type="number" min="1" max="24" value="${esc(config.maxToolRounds ?? 12)}" required /></div>
+      <div class="field"><label for="workspaceTimeout">{{html:commandTimeoutSeconds}}</label><input id="workspaceTimeout" name="timeout" type="number" min="1" max="120" value="${esc((config.shellTimeoutMs ?? 60000) / 1000)}" required /></div></div>
+      <button class="btn small primary" type="submit">{{html:saveWorkspacePermissions}}</button>
     </fieldset><p id="workspaceStatus" class="small" role="status"></p></form></section>
-    <section class="sect"><div class="row"><h3>本对话的执行记录</h3><button class="btn small right" data-action="refresh-runs" ${!WORKSPACE.local ? 'disabled' : ''}>刷新</button></div>
-      <p class="muted small">查看记录不会再次运行工具。输出文件可下载；中断的执行保留已完成的步骤。</p>
+    <section class="sect"><div class="row"><h3>{{html:runsInThisChat}}</h3><button class="btn small right" data-action="refresh-runs" ${!WORKSPACE.local ? 'disabled' : ''}>{{html:refresh}}</button></div>
+      <p class="muted small">{{html:viewingARecordDoesNotRerunIts}}</p>
       <div id="runList" class="list"></div><p id="runListStatus" class="small" role="status"></p>
-    </section><section id="runInspector" class="run-inspector" tabindex="-1" aria-label="执行详情"></section>`
+    </section><section id="runInspector" class="run-inspector" tabindex="-1" aria-label="{{html:runDetails}}"></section>`
   if (!WORKSPACE.local) {
-    $('#runList').innerHTML = '<p class="muted small">执行记录和输出文件仅在运行 Echo 的本机提供。</p>'
+    $('#runList').innerHTML = '<p class="muted small">{{html:runRecordsAndOutputsAreAvailableOn}}</p>'
     return
   }
   await refreshRuns({ force: true })
@@ -1743,18 +1828,18 @@ async function saveWorkspaceForm(form) {
     shellTimeoutMs: Number(values.get('timeout')) * 1000,
   }
   const status = $('#workspaceStatus')
-  if (config.enabled && !config.workspaceRoot) { status.textContent = '请先填写项目目录。'; $('#workspaceRoot').focus(); return }
+  if (config.enabled && !config.workspaceRoot) { status.textContent = '{{msg:enterTheProjectDirectoryFirst}}'; $('#workspaceRoot').focus(); return }
   form.dataset.saving = 'true'
   const submit = $('button[type="submit"]', form)
   submit.disabled = true
-  status.textContent = '正在保存…'
+  status.textContent = '{{msg:saving}}'
   try {
     const result = await api('harness', { method: 'PATCH', body: { config } })
     WORKSPACE.config = result.config ?? config
     if (S.boot?.config) S.boot.config.harness = WORKSPACE.config
     updateWorkspaceBadge()
     updateComposer()
-    status.textContent = '已保存。下一条对话将使用这些权限。'
+    status.textContent = '{{msg:savedTheNextTurnWillUseThese}}'
   } catch (err) {
     status.textContent = err.message
   } finally {
@@ -1768,41 +1853,41 @@ function runReviewHtml(run) {
   const files = [], commands = []
   for (const step of run.steps ?? []) {
     if (['workspace_write', 'workspace_edit'].includes(step.name) && step.changes?.length) {
-      const changes = step.changes.map((change) => `${change.before === null ? '新建' : '修改'} <code>${esc(change.path)}</code>`)
+      const changes = step.changes.map((change) => `${change.before === null ? '{{msg:created}}' : '{{msg:modified}}'} <code>${esc(change.path)}</code>`)
       const snapshots = (step.artifacts ?? []).filter((a) => /\.(before|after)\.txt$/.test(a.name))
-        .map((a) => ({ ...a, name: a.name.endsWith('.before.txt') ? '修改前' : '修改后' }))
-      files.push(`<li>${changes.join('、')}<div>${artifactLinks(snapshots)}</div></li>`)
+        .map((a) => ({ ...a, name: a.name.endsWith('.before.txt') ? '{{msg:before}}' : '{{msg:after}}' }))
+      files.push(`<li>${changes.join('{{msg:listSeparator}}')}<div>${artifactLinks(snapshots)}</div></li>`)
     }
     if (step.name !== 'shell_exec') continue
     const result = parseToolOutput(step.result)
     const command = step.args?.command ?? result?.command
-    const cwd = result?.cwd ?? step.args?.cwd ?? (step.args ? '.' : '未记录')
+    const cwd = result?.cwd ?? step.args?.cwd ?? (step.args ? '.' : '{{msg:unrecorded}}')
     const exit = step.exitCode ?? result?.exitCode
     const reason = step.terminationReason ?? result?.reason
     const signal = step.exitSignal ?? result?.signal
-    const reasonLabels = { timeout: '命令超时', output_limit: '达到输出上限', cancelled: '已停止', output_error: '输出保存失败', process_error: '进程错误' }
-    const details = [toolStatus(step), exit != null ? `退出码 ${exit}` : '', reasonLabels[reason] ?? reason, signal,
-      step.args?.timeoutMs != null ? `请求超时 ${step.args.timeoutMs} ms` : ''].filter(Boolean)
+    const reasonLabels = { timeout: '{{msg:commandTimedOut}}', output_limit: '{{msg:outputLimitReached}}', cancelled: '{{msg:stopped}}', output_error: '{{msg:couldNotSaveOutput}}', process_error: '{{msg:processError}}' }
+    const details = [toolStatus(step), exit != null ? `{{msg:exitCode2}} ${exit}` : '', reasonLabels[reason] ?? reason, signal,
+      step.args?.timeoutMs != null ? `{{msg:requestTimedOut}} ${step.args.timeoutMs} ms` : ''].filter(Boolean)
     const error = step.error || result?.error || (step.status === 'failed' && result?.stderr)
     const logs = (step.artifacts ?? []).filter((a) => ['stdout.txt', 'stderr.txt'].includes(a.name))
-    commands.push(`<li><pre class="run-code">${esc(command ?? '命令未记录')}</pre><p class="muted small">目录 <code>${esc(cwd)}</code> · ${esc(details.join(' · '))}</p>
+    commands.push(`<li><pre class="run-code">${esc(command ?? '{{msg:commandUnavailable}}')}</pre><p class="muted small">{{html:directory}} <code>${esc(cwd)}</code> · ${esc(details.join(' · '))}</p>
       ${error ? `<pre class="run-code err">${esc(String(error).length > 1000 ? '…' + String(error).slice(-1000) : error)}</pre>` : ''}${artifactLinks(logs)}</li>`)
   }
   if (!files.length && !commands.length) return ''
-  return `<section class="run-review" aria-label="工作区结果"><h3>工作区结果</h3>
-    ${files.length ? `<h4>文件工具记录的变更</h4><ul>${files.join('')}</ul>` : ''}
-    <h4>Shell 命令记录</h4>${commands.length ? `<ol>${commands.join('')}</ol>` : '<p class="muted small">本轮没有 Shell 命令验证记录。</p>'}</section>`
+  return `<section class="run-review" aria-label="{{html:workspaceResults}}"><h3>{{html:workspaceResults}}</h3>
+    ${files.length ? `<h4>{{html:changesRecordedByFileTools}}</h4><ul>${files.join('')}</ul>` : ''}
+    <h4>{{html:shellCommands}}</h4>${commands.length ? `<ol>${commands.join('')}</ol>` : '<p class="muted small">{{html:noShellCommandsWereRecordedForThis}}</p>'}</section>`
 }
 
 function runStepHtml(runId, step, workspaceRoot) {
-  const output = step.approval?.status === 'denied' ? '已拒绝本次操作，未执行。' : toolOutputText(step.result === '' ? step.output : step.result ?? step.output)
-  return `<details class="run-step" data-step-id="${esc(step.id)}" ${step.status === 'awaiting_approval' ? 'open' : ''}><summary>${esc(step.name || '工具')} <span class="muted small">${esc(toolStatus(step))}${step.ms != null ? ` · ${esc(step.ms)} ms` : ''}${step.exitCode != null ? ` · 退出码 ${esc(step.exitCode)}` : ''}</span></summary>
-    <h4>完整输入</h4><pre class="run-code">${esc(toolText(step.args))}</pre>
+  const output = step.approval?.status === 'denied' ? '{{msg:actionDeniedBeforeExecution}}' : toolOutputText(step.result === '' ? step.output : step.result ?? step.output)
+  return `<details class="run-step" data-step-id="${esc(step.id)}" ${step.status === 'awaiting_approval' ? 'open' : ''}><summary>${esc(step.name || '{{msg:tool}}')} <span class="muted small">${esc(toolStatus(step))}${step.ms != null ? ` · ${esc(step.ms)} ms` : ''}${step.exitCode != null ? ` {{msg:exitCode}} ${esc(step.exitCode)}` : ''}</span></summary>
+    <h4>{{html:fullInput}}</h4><pre class="run-code">${esc(toolText(step.args))}</pre>
     ${approvalHtml(runId, { ...step, workspaceRoot })}
-    ${output ? `<h4>输出${output.length > 12000 ? '（显示末尾 12,000 字符）' : ''}</h4><pre class="run-code">${esc(output.slice(-12000))}</pre>` : ''}
-    ${step.truncated ? '<p class="muted small">输出达到记录上限，记录可能不完整。</p>' : ''}
+    ${output ? `<h4>{{html:output2}}{{msg:wordSpace}}${output.length > 12000 ? '{{msg:last12000Characters}}' : ''}</h4><pre class="run-code">${esc(output.slice(-12000))}</pre>` : ''}
+    ${step.truncated ? '<p class="muted small">{{html:theRecordReachedItsOutputLimitAnd}}</p>' : ''}
     ${artifactLinks(step.artifacts)}
-    ${(step.changes ?? []).length ? `<p class="small">已修改：${step.changes.map((change) => esc(change.path)).join('、')}。上方可下载修改前后的快照。</p>` : ''}
+    ${(step.changes ?? []).length ? `<p class="small">{{html:changed}}${step.changes.map((change) => esc(change.path)).join('{{msg:listSeparator}}')}{{html:downloadTheBeforeAndAfterSnapshotsAbove}}</p>` : ''}
     ${step.error ? `<p class="err">${esc(toolText(step.error))}</p>` : ''}</details>`
 }
 
@@ -1819,14 +1904,14 @@ async function refreshRuns({ force = false } = {}) {
     if (WORKSPACE.conversationId !== conversationId) { WORKSPACE.selected = null; WORKSPACE.conversationId = conversationId }
     if (force || list.dataset.key !== key) {
       const focusedId = document.activeElement?.closest('[data-action="view-run"]')?.dataset.id
-      list.innerHTML = runs.map((run) => `<button class="run-row" data-action="view-run" data-id="${esc(run.id)}" aria-pressed="${WORKSPACE.selected === run.id}"><span>${esc(fmtTime(run.startedAt))} · ${esc(RUN_STATUS[run.status] ?? run.status)}</span><span class="muted small">${Array.isArray(run.steps) ? run.steps.length : run.stepCount ?? 0} 步${run.workspaceRoot ? ` · ${esc(run.workspaceRoot)}` : ''}</span></button>`).join('') || '<p class="muted small">还没有执行记录。启用工作区后，让 Echo 先检查项目文件。</p>'
+      list.innerHTML = runs.map((run) => `<button class="run-row" data-action="view-run" data-id="${esc(run.id)}" aria-pressed="${WORKSPACE.selected === run.id}"><span>${esc(fmtTime(run.startedAt))} · ${esc(RUN_STATUS[run.status] ?? run.status)}</span><span class="muted small">${Array.isArray(run.steps) ? run.steps.length : run.stepCount ?? 0} {{msg:steps}}${run.workspaceRoot ? ` · ${esc(run.workspaceRoot)}` : ''}</span></button>`).join('') || '<p class="muted small">{{html:noRunsYetEnableTheWorkspaceAnd}}</p>'
       list.dataset.key = key
       if (focusedId) $$('[data-action="view-run"]', list).find((button) => button.dataset.id === focusedId)?.focus()
     }
     $('#runListStatus').textContent = ''
     if (WORKSPACE.selected) await inspectRun(WORKSPACE.selected, { poll: !force })
   } catch (err) {
-    $('#runListStatus').textContent = `记录加载失败：${err.message}`
+    $('#runListStatus').textContent = `{{msg:couldNotLoadTheRecord}}${err.message}`
   } finally {
     WORKSPACE.loading = false
   }
@@ -1856,11 +1941,11 @@ async function inspectRun(id, { poll = false } = {}) {
     return
   }
   const openSteps = new Set($$('details[open]', inspector).map((details) => details.dataset.stepId))
-  inspector.innerHTML = `<h3>执行详情</h3>
+  inspector.innerHTML = `<h3>{{html:runDetails}}</h3>
     <div class="run-feedback" data-state="${esc(run.status)}"><div class="run-feedback-body" role="status" aria-live="polite" aria-atomic="true">${runFeedbackHtml(run)}</div></div>
-    <p class="muted small">${esc(run.workspaceRoot ?? '')}${run.workspaceMode === 'read_only' ? ' · 只读规划' : run.workspaceMode === 'work' && run.workspaceRoot ? ' · 执行任务' : ''}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
+    <p class="muted small">${esc(run.workspaceRoot ?? '')}${run.workspaceMode === 'read_only' ? ' {{msg:readOnlyPlan}}' : run.workspaceMode === 'work' && run.workspaceRoot ? ' {{msg:work}}' : ''}<br />${esc(fmtTime(run.startedAt))}${run.finishedAt ? ` → ${esc(fmtTime(run.finishedAt))}` : ''}</p>
     ${runReviewHtml(run)}
-    ${(run.steps ?? []).map((step) => runStepHtml(id, step, run.workspaceRoot)).join('') || '<p class="muted small">尚未调用工具。</p>'}
+    ${(run.steps ?? []).map((step) => runStepHtml(id, step, run.workspaceRoot)).join('') || '<p class="muted small">{{html:noToolsCalled2}}</p>'}
     ${artifactLinks(run.artifacts)}`
   inspector.dataset.key = key
   $$('details', inspector).forEach((details) => { if (openSteps.has(details.dataset.stepId)) details.open = true })
@@ -1908,78 +1993,78 @@ function toggleSidebar() {
 async function renderMemoryPanel() {
   const [mem, dream, forgetting, screen] = await Promise.all([api('memory'), api('dream'), api('memory/forgetting'), api('screen')])
   const panel = $('#panelMemory')
-  if (!$('#memoryContents', panel)) panel.innerHTML = `<details id="relationshipSection" class="fold relationship-section"><summary>相处方式 <span class="muted small">· 按你的习惯回应</span></summary><div id="relationshipBody" class="fold-body"><p class="muted small" role="status">展开后加载。</p></div></details><div id="memoryContents" class="memory-contents"></div>`
+  if (!$('#memoryContents', panel)) panel.innerHTML = `<details id="relationshipSection" class="fold relationship-section"><summary>{{html:interactionPreferences}} <span class="muted small">{{html:howEchoResponds}}</span></summary><div id="relationshipBody" class="fold-body"><p class="muted small" role="status">{{html:expandToLoad}}</p></div></details><div id="memoryContents" class="memory-contents"></div>`
   const el = $('#memoryContents', panel)
   const f = mem.stats.forgetting ?? {}
   el.innerHTML = `
     <div class="stat-row">
-      <div class="stat"><b>${mem.stats.observations}</b><span>有效事实</span></div>
-      <div class="stat"><b>${f.avgStrength ?? 0}</b><span>平均强度</span></div>
-      <div class="stat"><b>${f.faded ?? 0}</b><span>已淡出</span></div>
-      <div class="stat"><b>${f.fadingSoon ?? 0}</b><span>接近淡出</span></div>
+      <div class="stat"><b>${mem.stats.observations}</b><span>{{html:activeFacts}}</span></div>
+      <div class="stat"><b>${f.avgStrength ?? 0}</b><span>{{html:averageStrength}}</span></div>
+      <div class="stat"><b>${f.faded ?? 0}</b><span>{{html:faded2}}</span></div>
+      <div class="stat"><b>${f.fadingSoon ?? 0}</b><span>{{html:nearFading}}</span></div>
     </div>
-    <p class="muted small">记忆强度 = 重要度 × 使用增益 × 时间衰减。被用到会变牢，太久没用会淡出；淡出不是删除，随时可以复活。已经不需要的，Dream 会明确忘掉并写下理由。</p>
+    <p class="muted small">{{html:memoryStrengthCombinesImportanceUseAndAge}}</p>
 
     ${screen.screen.enabled ? screenBlock(screen) : ''}
 
     <div class="sect">
-      <h4>核心记忆 MEMORY.md <span class="muted">· 每次对话都会注入</span></h4>
+      <h4>{{html:coreMemoryMemoryMd}} <span class="muted">{{html:includedInEachChat}}</span></h4>
       <textarea id="coreEdit" class="core-editor">${esc(mem.core)}</textarea>
       <div class="row" style="margin-top:8px">
-        <button class="btn small primary" data-action="save-core">保存</button>
-        <button class="btn small" data-action="dream-now">立即 Dream（巩固 + 遗忘）</button>
-        <span class="muted small">上次：${dream.last ? ago(dream.last) : '还没跑过'}</span>
+        <button class="btn small primary" data-action="save-core">{{html:save}}</button>
+        <button class="btn small" data-action="dream-now">{{html:reviewMemoryNow}}</button>
+        <span class="muted small">{{html:lastReview}}${dream.last ? ago(dream.last) : '{{msg:neverRun}}'}</span>
       </div>
     </div>
 
     <div class="sect">
-      <h4>跟进事项</h4>
+      <h4>{{html:followUpItems}}</h4>
       <div class="list">${
         dream.loops.length
           ? dream.loops
               .map(
-                (l) => `<div class="loop"><div class="row"><b>${esc(l.topic)}</b>${l.due ? `<span class="due">截止 ${esc(l.due)}</span>` : ''}
-                  <button class="btn small right" data-action="adopt-loop" data-id="${esc(l.id)}">接下这件事</button>
-                  <button class="btn small ghost" data-action="loop-done" data-id="${esc(l.id)}">不再跟进</button></div>
-                  <div class="muted small">${esc(l.why ?? '')}${l.raised ? ` · 已提过 ${l.raised} 次` : ''}${l.ageDays != null ? ` · ${esc(String(l.ageDays))} 天前注意到` : ''}</div></div>`,
+                (l) => `<div class="loop"><div class="row"><b>${esc(l.topic)}</b>${l.due ? `<span class="due">{{html:due}} ${esc(l.due)}</span>` : ''}
+                  <button class="btn small right" data-action="adopt-loop" data-id="${esc(l.id)}">{{html:startFollowingUp}}</button>
+                  <button class="btn small ghost" data-action="loop-done" data-id="${esc(l.id)}">{{html:stopTracking}}</button></div>
+                  <div class="muted small">${esc(l.why ?? '')}${l.raised ? ` {{msg:mentioned}} ${l.raised} {{msg:times}}` : ''}${l.ageDays != null ? ` · ${esc(String(l.ageDays))} {{msg:daysAgo3}}` : ''}</div></div>`,
               )
               .join('')
-          : '<div class="muted small">Dream 还没有整理出需要跟进的事。</div>'
+          : '<div class="muted small">{{html:noItemsToFollowUpFromMemory}}</div>'
       }</div>
     </div>
 
     <div class="sect">
-      <h4>事实清单 <span class="muted small">· 用到它才会留下</span></h4>
+      <h4>{{html:facts}} <span class="muted small">{{html:recallStrengthensFacts}}</span></h4>
       <div class="filter" style="margin-bottom:8px"><svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
-        <input id="memFilter" type="search" placeholder="过滤事实" /></div>
-      <div class="list" id="memList">${mem.observations.map(obsHtml).join('') || '<div class="muted small">还没有记录。对话中说"记住…"或者直接手动添加。</div>'}</div>
+        <input id="memFilter" type="search" placeholder="{{html:filterFacts}}" /></div>
+      <div class="list" id="memList">${mem.observations.map(obsHtml).join('') || '<div class="muted small">{{html:noFactsYetAskEchoToRemember}}</div>'}</div>
       <div class="row" style="margin-top:10px">
-        <input id="newMem" type="text" placeholder="手动记一条事实" style="flex:1;border:1px solid var(--border-strong);border-radius:9px;padding:8px 10px;background:var(--panel-2)" />
-        <button class="btn small primary" data-action="add-mem">添加</button>
+        <input id="newMem" type="text" placeholder="{{html:addAFactManually}}" style="flex:1;border:1px solid var(--border-strong);border-radius:9px;padding:8px 10px;background:var(--panel-2)" />
+        <button class="btn small primary" data-action="add-mem">{{html:add}}</button>
       </div>
     </div>
 
     <div class="sect">
-      <h4>已忘记 / 已淡出（${(forgetting.items ?? []).length}）</h4>
-      <p class="muted small">我们不是我们记住的东西，而是我们忘记的东西。这里是它丢掉的部分和原因。</p>
+      <h4>{{html:forgottenOrFaded}}${(forgetting.items ?? []).length}{{msg:closeParenthesis}}</h4>
+      <p class="muted small">{{html:reviewFactsThatHaveFadedOrBeen}}</p>
       <div class="list">${
         (forgetting.items ?? []).length
           ? forgetting.items
               .map(
                 (o) => `<div class="mem-item ${o.status === 'deleted' ? 'gone' : ''}">
                   <div class="txt">${esc(o.text)}
-                    <div class="muted small">${o.status === 'faded' ? '淡出' : '已忘'} · ${esc(o.reason)} · 重要度 ${o.importance} · 命中 ${o.hits} 次${o.strength != null ? ` · 强度 ${o.strength}` : ''}</div>
+                    <div class="muted small">${o.status === 'faded' ? '{{msg:faded}}' : '{{msg:forgotten}}'} · ${esc(o.reason)} {{msg:importance}} ${o.importance} {{msg:matches}} ${o.hits} {{msg:times}}${o.strength != null ? ` {{msg:strength}} ${o.strength}` : ''}</div>
                   </div>
-                  <button class="btn small ghost" data-action="revive" data-id="${esc(o.id)}">复活</button>
+                  <button class="btn small ghost" data-action="revive" data-id="${esc(o.id)}">{{html:restore}}</button>
                 </div>`,
               )
               .join('')
-          : '<div class="muted small">还没有忘记任何东西。</div>'
+          : '<div class="muted small">{{html:nothingForgottenYet}}</div>'
       }</div>
-      <details class="fold" style="margin-top:8px"><summary>遗忘日志（谁在什么时候被忘掉、为什么）</summary>
-        <div class="fold-body">${(forgetting.log ?? []).map((b) => `<pre style="white-space:pre-wrap;font:11.5px/1.6 var(--mono)">${esc(b)}</pre>`).join('') || '<span class="muted">（空）</span>'}</div>
+      <details class="fold" style="margin-top:8px"><summary>{{html:forgettingLog}}</summary>
+        <div class="fold-body">${(forgetting.log ?? []).map((b) => `<pre style="white-space:pre-wrap;font:11.5px/1.6 var(--mono)">${esc(b)}</pre>`).join('') || '<span class="muted">{{html:empty2}}</span>'}</div>
       </details>
-      <div class="row" style="margin-top:8px"><button class="btn small" data-action="forget-scan">试跑一次遗忘扫描（不改动）</button></div>
+      <div class="row" style="margin-top:8px"><button class="btn small" data-action="forget-scan">{{html:previewAForgettingScan}}</button></div>
     </div>`
   $('#memFilter')?.addEventListener('input', (e) => {
     const q = e.target.value.trim().toLowerCase()
@@ -1996,7 +2081,7 @@ async function loadRelationships() {
   if (!body || body.dataset.loaded || RELATIONSHIPS.loading) return
   const version = RELATIONSHIPS.version
   RELATIONSHIPS.loading = true
-  body.innerHTML = '<p class="muted small" role="status">正在加载…</p>'
+  body.innerHTML = '<p class="muted small" role="status">{{html:loading}}</p>'
   try {
     const data = await api('relationships')
     if (version !== RELATIONSHIPS.version || body !== $('#relationshipBody')) return
@@ -2006,30 +2091,30 @@ async function loadRelationships() {
     renderRelationshipPeople()
   } catch (err) {
     if (version !== RELATIONSHIPS.version || body !== $('#relationshipBody')) return
-    body.innerHTML = `<p class="small" role="status">${esc(err.message)}</p><button class="btn small" data-action="relationship-retry">重新加载</button>`
+    body.innerHTML = `<p class="small" role="status">${esc(err.message)}</p><button class="btn small" data-action="relationship-retry">{{html:reload}}</button>`
   } finally {
     if (version === RELATIONSHIPS.version) RELATIONSHIPS.loading = false
   }
 }
 
 function relationshipProfileHtml(profile) {
-  return `<p class="muted small">让回应更合你的习惯，默认保持克制。这里的人物背景只由你添加，提到相关人物时才参考；不会保存情绪画像，也不会因此增加主动消息。相关内容可能发送给你配置的模型。</p>
-    <p id="relationshipAvailability" class="muted small" ${S.boot?.config?.memory?.enabled === false || S.boot?.config?.memory?.inject === false ? '' : 'hidden'}>当前记忆注入已关闭，保存的相处方式与人物背景暂不用于回应。</p>
+  return `<p class="muted small">{{html:chooseHowEchoRespondsYouControlThe}}</p>
+    <p id="relationshipAvailability" class="muted small" ${S.boot?.config?.memory?.enabled === false || S.boot?.config?.memory?.inject === false ? '' : 'hidden'}>{{html:memoryRecallIsOffThesePreferencesAnd}}</p>
     <form id="relationshipProfileForm">
-      <label class="switch" for="relationshipEnabled">在对话中使用这些设置<input id="relationshipEnabled" name="enabled" type="checkbox" ${profile.enabled !== false ? 'checked' : ''} /></label>
+      <label class="switch" for="relationshipEnabled">{{html:useThesePreferencesInChat}}<input id="relationshipEnabled" name="enabled" type="checkbox" ${profile.enabled !== false ? 'checked' : ''} /></label>
       <div class="relationship-options">
-        <div class="field"><label for="relationshipTone">回应语气</label><select id="relationshipTone" name="tone">${[['subtle', '自然克制'], ['warm', '稍微温暖'], ['direct', '简洁直接']].map(([value, label]) => `<option value="${value}" ${(profile.tone ?? 'subtle') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
-        <div class="field"><label for="relationshipSupport">遇到难处时</label><select id="relationshipSupport" name="support">${[['balanced', '顺着当下需要'], ['listen', '先听我说'], ['practical', '先帮我解决']].map(([value, label]) => `<option value="${value}" ${(profile.support ?? 'balanced') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label for="relationshipTone">{{html:responseStyle}}</label><select id="relationshipTone" name="tone">${[['subtle', '{{msg:neutralAndRestrained}}'], ['warm', '{{msg:aLittleWarmer}}'], ['direct', '{{msg:briefAndDirect}}']].map(([value, label]) => `<option value="${value}" ${(profile.tone ?? 'subtle') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
+        <div class="field"><label for="relationshipSupport">{{html:whenSomethingIsDifficult}}</label><select id="relationshipSupport" name="support">${[['balanced', '{{msg:followTheSituation}}'], ['listen', '{{msg:listenFirst}}'], ['practical', '{{msg:helpSolveItFirst}}']].map(([value, label]) => `<option value="${value}" ${(profile.support ?? 'balanced') === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div>
       </div>
-      <details class="relationship-more"><summary>称呼与边界（可选）</summary>
-        <div class="field"><label for="relationshipName">希望怎么称呼你</label><input id="relationshipName" name="preferredName" type="text" maxlength="80" value="${esc(profile.preferredName)}" autocomplete="off" /></div>
-        <div class="field"><label for="relationshipBoundaries">希望它注意什么</label><textarea id="relationshipBoundaries" name="boundaries" maxlength="600" placeholder="例如：工作讨论直接一点，不要反复问我感觉如何。">${esc(profile.boundaries)}</textarea></div>
+      <details class="relationship-more"><summary>{{html:nameAndBoundariesOptional}}</summary>
+        <div class="field"><label for="relationshipName">{{html:whatShouldEchoCallYou}}</label><input id="relationshipName" name="preferredName" type="text" maxlength="80" value="${esc(profile.preferredName)}" autocomplete="off" /></div>
+        <div class="field"><label for="relationshipBoundaries">{{html:whatShouldEchoKeepInMind}}</label><textarea id="relationshipBoundaries" name="boundaries" maxlength="600" placeholder="{{html:forExampleBeDirectInWorkDiscussions}}">${esc(profile.boundaries)}</textarea></div>
       </details>
-      <p class="muted small">停用只暂停使用这些设置，不会删除已保存的内容。</p>
-      <button class="btn small primary" type="submit">保存相处方式</button><p class="relationship-status small" role="status"></p>
+      <p class="muted small">{{html:turningThisOffKeepsTheSavedSettings}}</p>
+      <button class="btn small primary" type="submit">{{html:savePreferences}}</button><p class="relationship-status small" role="status"></p>
     </form>
-    <div class="relationship-people"><div class="row"><h4>人物背景 <span id="relationshipPeopleCount" class="muted"></span></h4><button class="btn small right" data-action="relationship-new">添加人物</button></div>
-      <p class="muted small">只记需要的背景，随时修改或删除。最多 12 人。</p><div id="relationshipPeople" class="list"></div><div id="relationshipEditor"></div></div>`
+    <div class="relationship-people"><div class="row"><h4>{{html:people}} <span id="relationshipPeopleCount" class="muted"></span></h4><button class="btn small right" data-action="relationship-new">{{html:addPerson}}</button></div>
+      <p class="muted small">{{html:saveOnlyTheBackgroundYouNeedYou}}</p><div id="relationshipPeople" class="list"></div><div id="relationshipEditor"></div></div>`
 }
 
 function updateRelationshipAvailability() {
@@ -2039,16 +2124,16 @@ function updateRelationshipAvailability() {
 
 function relationshipPersonHtml(person) {
   return `<div class="mem-item relationship-person" data-person-id="${esc(person.id)}"><div class="txt"><b>${esc(person.name)}</b>${person.relationship ? `<span class="muted small"> · ${esc(person.relationship)}</span>` : ''}
-    ${person.aliases?.length ? `<p class="muted small">也称：${person.aliases.map(esc).join('、')}</p>` : ''}
-    ${person.context || person.boundaries ? `<details class="relationship-more"><summary>查看背景</summary>${person.context ? `<p class="relationship-text small">${esc(person.context)}</p>` : ''}${person.boundaries ? `<p class="relationship-text muted small">注意：${esc(person.boundaries)}</p>` : ''}</details>` : ''}
-    <div class="row"><button class="btn small ghost" data-action="relationship-edit" data-id="${esc(person.id)}">编辑</button><button class="btn small ghost" data-action="relationship-delete" data-id="${esc(person.id)}">删除</button></div>
-    <div class="relationship-delete-confirm" hidden><p class="small">删除后不再附加这份背景；已经出现在会话中的内容会保留。</p><div class="row"><button class="btn small" data-action="relationship-delete-confirm" data-id="${esc(person.id)}">确认删除</button><button class="btn small ghost" data-action="relationship-delete-cancel">保留</button></div></div>
+    ${person.aliases?.length ? `<p class="muted small">{{html:alsoKnownAs}}${person.aliases.map(esc).join('{{msg:listSeparator}}')}</p>` : ''}
+    ${person.context || person.boundaries ? `<details class="relationship-more"><summary>{{html:viewBackground}}</summary>${person.context ? `<p class="relationship-text small">${esc(person.context)}</p>` : ''}${person.boundaries ? `<p class="relationship-text muted small">{{html:note}}${esc(person.boundaries)}</p>` : ''}</details>` : ''}
+    <div class="row"><button class="btn small ghost" data-action="relationship-edit" data-id="${esc(person.id)}">{{html:edit}}</button><button class="btn small ghost" data-action="relationship-delete" data-id="${esc(person.id)}">{{html:delete}}</button></div>
+    <div class="relationship-delete-confirm" hidden><p class="small">{{html:removingThisNoteStopsFutureUseExisting}}</p><div class="row"><button class="btn small" data-action="relationship-delete-confirm" data-id="${esc(person.id)}">{{html:confirmRemoval}}</button><button class="btn small ghost" data-action="relationship-delete-cancel">{{html:keep}}</button></div></div>
     <p class="relationship-status small" role="status"></p></div></div>`
 }
 
 function renderRelationshipPeople() {
   const people = RELATIONSHIPS.data?.people ?? []
-  $('#relationshipPeople').innerHTML = people.map(relationshipPersonHtml).join('') || '<p class="muted small">还没有人物背景。需要时再添加。</p>'
+  $('#relationshipPeople').innerHTML = people.map(relationshipPersonHtml).join('') || '<p class="muted small">{{html:noPeopleAddedYet}}</p>'
   $('#relationshipPeopleCount').textContent = `· ${people.length}/12`
   syncRelationshipEditorButtons()
 }
@@ -2064,15 +2149,15 @@ function showRelationshipEditor(id) {
   const person = id ? RELATIONSHIPS.data?.people?.find((item) => item.id === id) : {}
   if (!person || !id && (RELATIONSHIPS.data?.people?.length ?? 0) >= 12) return
   $('#relationshipEditor').innerHTML = `<form id="relationshipPersonForm" class="relationship-editor" data-id="${esc(id ?? '')}">
-    <h4>${id ? '编辑人物背景' : '添加人物'}</h4>
-    <div class="field"><label for="relationshipPersonName">名字或常用称呼</label><input id="relationshipPersonName" name="name" type="text" minlength="2" maxlength="80" required value="${esc(person.name)}" autocomplete="off" /></div>
-    <div class="field"><label for="relationshipPersonRole">与你的关系（可选）</label><input id="relationshipPersonRole" name="relationship" type="text" maxlength="120" value="${esc(person.relationship)}" placeholder="例如：同事、朋友、导师" /></div>
-    <div class="field"><label for="relationshipPersonContext">对话需要的背景（可选）</label><textarea id="relationshipPersonContext" name="context" maxlength="1200" placeholder="例如：我们在一起做项目，最近正在协调分工。">${esc(person.context)}</textarea></div>
-    <details class="relationship-more" ${person.aliases?.length || person.boundaries ? 'open' : ''}><summary>其他称呼与边界（可选）</summary>
-      <div class="field"><label for="relationshipPersonAliases">其他称呼（用逗号分隔，最多 5 个）</label><input id="relationshipPersonAliases" name="aliases" type="text" maxlength="404" value="${esc((person.aliases ?? []).join(', '))}" /></div>
-      <div class="field"><label for="relationshipPersonBoundaries">谈到这个人时需要注意</label><textarea id="relationshipPersonBoundaries" name="boundaries" maxlength="600" placeholder="例如：讨论具体沟通方式，不猜测对方的动机。">${esc(person.boundaries)}</textarea></div>
+    <h4>${id ? '{{msg:editPerson}}' : '{{msg:addPerson}}'}</h4>
+    <div class="field"><label for="relationshipPersonName">{{html:nameOrNickname}}</label><input id="relationshipPersonName" name="name" type="text" minlength="2" maxlength="80" required value="${esc(person.name)}" autocomplete="off" /></div>
+    <div class="field"><label for="relationshipPersonRole">{{html:relationshipOptional}}</label><input id="relationshipPersonRole" name="relationship" type="text" maxlength="120" value="${esc(person.relationship)}" placeholder="{{html:forExampleColleagueFriendOrMentor}}" /></div>
+    <div class="field"><label for="relationshipPersonContext">{{html:relevantBackgroundOptional}}</label><textarea id="relationshipPersonContext" name="context" maxlength="1200" placeholder="{{html:forExampleWeWorkOnAProject}}">${esc(person.context)}</textarea></div>
+    <details class="relationship-more" ${person.aliases?.length || person.boundaries ? 'open' : ''}><summary>{{html:otherNamesAndBoundariesOptional}}</summary>
+      <div class="field"><label for="relationshipPersonAliases">{{html:otherNamesCommaSeparatedUpTo5}}</label><input id="relationshipPersonAliases" name="aliases" type="text" maxlength="404" value="${esc((person.aliases ?? []).join(', '))}" /></div>
+      <div class="field"><label for="relationshipPersonBoundaries">{{html:whatToKeepInMindAboutThis}}</label><textarea id="relationshipPersonBoundaries" name="boundaries" maxlength="600" placeholder="{{html:forExampleDiscussHowToCommunicateWithout}}">${esc(person.boundaries)}</textarea></div>
     </details>
-    <div class="row"><button class="btn small primary" type="submit">${id ? '保存修改' : '添加人物背景'}</button><button class="btn small" type="button" data-action="relationship-editor-cancel">取消</button></div><p class="relationship-status small" role="status"></p></form>`
+    <div class="row"><button class="btn small primary" type="submit">${id ? '{{msg:saveChanges}}' : '{{msg:addPerson2}}'}</button><button class="btn small" type="button" data-action="relationship-editor-cancel">{{html:cancel}}</button></div><p class="relationship-status small" role="status"></p></form>`
   syncRelationshipEditorButtons()
   $('#relationshipPersonName').focus()
 }
@@ -2097,12 +2182,12 @@ async function saveRelationshipForm(form) {
     enabled: values.get('enabled') === 'on', tone: values.get('tone'), support: values.get('support'),
     preferredName: String(values.get('preferredName') ?? '').trim(), boundaries: String(values.get('boundaries') ?? '').trim(),
   }
-  if (person && (body.aliases.length > 5 || body.aliases.some((alias) => alias.length < 2 || alias.length > 80))) { status.textContent = '其他称呼最多 5 个，每个 2–80 个字符。'; return }
+  if (person && (body.aliases.length > 5 || body.aliases.some((alias) => alias.length < 2 || alias.length > 80))) { status.textContent = '{{msg:enterUpToFiveAliasesEach2}}'; return }
   const id = form.dataset.id, version = RELATIONSHIPS.version
   const focused = form.contains(document.activeElement) ? document.activeElement : null
   form.dataset.saving = 'true'
   $$('input, textarea, select, button', form).forEach((control) => { control.disabled = true })
-  status.textContent = '正在保存…'
+  status.textContent = '{{msg:saving}}'
   try {
     const result = await api(person ? `relationships/people${id ? `/${encodeURIComponent(id)}` : ''}` : 'relationships/profile', { method: person && !id ? 'POST' : 'PATCH', body })
     if (version !== RELATIONSHIPS.version) return
@@ -2112,7 +2197,7 @@ async function saveRelationshipForm(form) {
       closeRelationshipEditor(result.person.id)
     } else {
       RELATIONSHIPS.data.profile = result.profile ?? body
-      status.textContent = body.enabled ? '已保存。' : '已停用。已保存的内容仍可在这里修改或删除。'
+      status.textContent = body.enabled ? '{{msg:saved}}' : '{{msg:turnedOffSavedItemsCanStillBe}}'
     }
   } catch (err) {
     status.textContent = err.message
@@ -2130,7 +2215,7 @@ async function deleteRelationshipPerson(button) {
   card.dataset.deleting = 'true'
   $$('button', card).forEach((control) => { control.disabled = true })
   const status = $('.relationship-status', card)
-  status.textContent = '正在删除…'
+  status.textContent = '{{msg:removing}}'
   try {
     await api(`relationships/people/${encodeURIComponent(button.dataset.id)}`, { method: 'DELETE' })
     if (version !== RELATIONSHIPS.version) return
@@ -2158,19 +2243,19 @@ function screenBlock(screen) {
   const ev = (s.events ?? []).slice(0, 5)
   const st = screen.storage
   return `<div class="sect" data-screen-capture="${s.captureRequested ? 'pending' : 'ready'}">
-    <h4>此刻在做什么 <span class="muted small">· ${s.mode === 'image' ? '截图发送给模型' : '本地 OCR'}，本机暂存图像处理后删除</span></h4>
-    ${s.lastAt ? `<div class="muted small">${s.lastOk === false ? '上次感知未完成' : '上次感知'} ${ago(s.lastAt)} · 今天 ${s.todayCount} 次 · 工作记忆 ${s.workingCount} 条</div>` : '<div class="muted small">还没感知过。点下面的按钮试一次。</div>'}
-    <div class="muted small" role="status">${s.captureRequested ? '等待状态栏 App 采集。' : s.captureExpired ? '这次请求已过期。请确认状态栏 App 正在运行，然后重试。' : s.permissionMissing ? '请在 macOS 系统设置中为状态栏 App 开启屏幕录制权限。' : ''}</div>
+    <h4>{{html:currentActivity}} <span class="muted small">· ${s.mode === 'image' ? '{{msg:screenshotsSentToModel}}' : '{{msg:localOcr}}'}{{html:temporaryImagesAreDeletedAfterProcessing}}</span></h4>
+    ${s.lastAt ? `<div class="muted small">${s.lastOk === false ? '{{msg:lastCaptureDidNotFinish}}' : '{{msg:lastCapture}}'} ${ago(s.lastAt)} {{msg:today}} ${s.todayCount} {{msg:capturesWorkingMemory}} ${s.workingCount} {{html:items}}</div>` : '<div class="muted small">{{html:noScreenActivityYetTryCaptureNow}}</div>'}
+    <div class="muted small" role="status">${s.captureRequested ? '{{msg:waitingForTheMenuBarAppTo}}' : s.captureExpired ? '{{msg:requestExpiredCheckThatTheMenuBar}}' : s.permissionMissing ? '{{msg:grantTheMenuBarAppScreenRecording}}' : ''}</div>
     <div class="list" style="margin-top:8px">${ev
       .map(
-        (e) => `<div class="mem-item"><div class="txt">${esc(e.activity || '(未识别)')}
-          <div class="muted small">${String(e.ts).slice(11, 16)} · ${esc(e.app || '?')} · ${esc(e.focus)}${e.sensitive ? ' · 敏感已隐去' : ''}</div></div></div>`,
+        (e) => `<div class="mem-item"><div class="txt">${esc(e.activity || '{{msg:unknown}}')}
+          <div class="muted small">${String(e.ts).slice(11, 16)} · ${esc(e.app || '?')} · ${esc(FOCUS_LABEL[e.focus] ?? e.focus)}${e.sensitive ? ' {{msg:sensitiveDetailsHidden}}' : ''}</div></div></div>`,
       )
       .join('')}</div>
     <div class="row" style="margin-top:8px">
-      <button class="btn small" data-action="look-now" ${s.captureRequested ? 'disabled' : ''}>现在看一眼</button>
-      <button class="btn small" data-action="screen-digest">沉淀成记忆</button>
-      <span class="muted small">磁盘：截图 ${st.screenshots.mb}MB / ${st.screenshots.budgetMB}MB · 图片 ${st.uploads.mb}MB / ${st.uploads.budgetMB}MB</span>
+      <button class="btn small" data-action="look-now" ${s.captureRequested ? 'disabled' : ''}>{{html:captureNow}}</button>
+      <button class="btn small" data-action="screen-digest">{{html:saveToMemory}}</button>
+      <span class="muted small">{{html:storageScreenshots}} ${st.screenshots.mb}MB / ${st.screenshots.budgetMB}{{msg:mbImages}} ${st.uploads.mb}MB / ${st.uploads.budgetMB}MB</span>
     </div>
   </div>`
 }
@@ -2180,36 +2265,36 @@ function obsHtml(o) {
   const strength = o.strength ?? null
   return `<div class="mem-item ${gone ? 'gone' : ''}" data-id="${esc(o.id)}">
     <div class="txt">${o.protected ? '📌 ' : ''}${esc(o.text)}
-      <div class="muted small">${esc(o.kind)} · 重要度 ${o.importance}${strength != null ? ` · 强度 ${strength}` : ''} · 命中 ${o.hits ?? 1} 次 · ${String(o.created_at ?? '').slice(0, 10)}${o.source ? ` · ${esc(o.source)}` : ''}</div>
+      <div class="muted small">${esc(FACT_LABEL[o.kind] ?? o.kind)} {{msg:importance}} ${o.importance}${strength != null ? ` {{msg:strength}} ${strength}` : ''} {{msg:matches}} ${o.hits ?? 1} {{msg:times2}} ${String(o.created_at ?? '').slice(0, 10)}${o.source ? ` · ${esc(o.source)}` : ''}</div>
     </div>
     ${gone
-      ? '<span class="tag">已淡出</span>'
-      : `<button class="btn small ghost" data-action="protect-mem" data-id="${esc(o.id)}" data-on="${o.protected ? '0' : '1'}" title="保护后不再淡出">${o.protected ? '取消保护' : '保护'}</button>
-         <button class="btn small ghost" data-action="forget-mem" data-id="${esc(o.id)}" title="让它从记忆里消失">忘掉</button>`}
+      ? '<span class="tag">{{html:faded2}}</span>'
+      : `<button class="btn small ghost" data-action="protect-mem" data-id="${esc(o.id)}" data-on="${o.protected ? '0' : '1'}" title="{{html:protectFromFading}}">${o.protected ? '{{msg:unprotect}}' : '{{msg:protect}}'}</button>
+         <button class="btn small ghost" data-action="forget-mem" data-id="${esc(o.id)}" title="{{html:removeFromMemory}}">{{html:forget}}</button>`}
   </div>`
 }
 
 const COMMITMENTS = { items: [], preparations: [], loops: [], editor: null, loading: false, version: 0, proactiveEnabled: null, research: null, researchRevision: 0 }
 const answerDrafts = new Map()
-const GOAL_STATUS = { active: '进行中', paused: '已暂停', done: '已完成', cancelled: '已取消' }
-const PREPARATION_STATUS = { idle: '尚未准备', queued: '等待准备', running: '正在准备', ready: '已有准备结果', failed: '准备失败' }
-const OUTCOME_LABEL = { accepted: '已采用', completed: '帮助完成', good_time: '来得正好', wrong_time: '时机不合适', irrelevant: '不相关', incorrect: '内容有误', good: '有用', bad: '没用' }
+const GOAL_STATUS = { active: '{{msg:active}}', paused: '{{msg:paused}}', done: '{{msg:completed}}', cancelled: '{{msg:canceled}}' }
+const PREPARATION_STATUS = { idle: '{{msg:noPreparationYet}}', queued: '{{msg:queuedForPreparation}}', running: '{{msg:preparing}}', ready: '{{msg:prepared}}', failed: '{{msg:preparationFailed}}' }
+const OUTCOME_LABEL = { accepted: '{{msg:used2}}', completed: '{{msg:helpedCompleteTheGoal}}', good_time: '{{msg:goodTiming}}', wrong_time: '{{msg:badTiming}}', irrelevant: '{{msg:irrelevant}}', incorrect: '{{msg:incorrect}}', good: '{{msg:useful}}', bad: '{{msg:notUseful}}' }
 
 function agencyTime(value) {
   const date = new Date(value)
-  return value && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { hour12: false }) : '时间未记录'
+  return value && Number.isFinite(date.getTime()) ? date.toLocaleString(UI_LANGUAGE, { hour12: false }) : '{{msg:timeUnrecorded}}'
 }
 
 function researchSettingsHtml(research = {}) {
   return `<form id="researchSettingsForm" class="research-settings">
-    <label class="goal-checkbox"><input type="checkbox" name="enabled" ${research.enabled ? 'checked' : ''} /> 允许 Echo 在后台做只读研究</label>
-    <p class="muted small">只分析启用之后的新对话，发现值得跟进的事情。自动发现的事项先限时跟进 7 天；由你选择是否继续。</p>
-    <details class="research-options"><summary>读取范围与发现方式</summary>
-      <label class="goal-checkbox"><input type="checkbox" name="discoverChats" ${research.discoverChats !== false ? 'checked' : ''} /> 从新对话发现需要跟进的事项</label>
-      <p class="muted small">对话和你为目标指定的资料可能发送给已配置的模型；搜索词会发送给搜索服务。文件只读取你明确附加或指定的文件夹，不会扫描整个 Mac。研究不会发送消息或修改外部内容。</p>
-      <p class="muted small">后台研究与主动提醒独立。关闭研究会停止后续研究，已保存的目标和结果仍保留。</p>
+    <label class="goal-checkbox"><input type="checkbox" name="enabled" ${research.enabled ? 'checked' : ''} /> {{html:allowReadOnlyBackgroundResearch}}</label>
+    <p class="muted small">{{html:analyzeNewChatsFromTheTimeYou}}</p>
+    <details class="research-options"><summary>{{html:sourcesAndDiscovery}}</summary>
+      <label class="goal-checkbox"><input type="checkbox" name="discoverChats" ${research.discoverChats !== false ? 'checked' : ''} /> {{html:discoverFollowUpsFromNewChats}}</label>
+      <p class="muted small">{{html:chatExcerptsAndGoalSourcesMayBe}}</p>
+      <p class="muted small">{{html:turningOffResearchStopsFutureResearchYour}}</p>
     </details>
-    <div class="row"><button class="btn small" type="submit">保存研究设置</button><span class="research-form-status small" role="status"></span></div>
+    <div class="row"><button class="btn small" type="submit">{{html:saveResearchSettings}}</button><span class="research-form-status small" role="status"></span></div>
   </form>`
 }
 
@@ -2227,11 +2312,11 @@ function renderResearchStatus(research = {}) {
     }
   }
   const status = $('#researchStatus')
-  const statusHtml = `<p class="muted small">${research.enabled ? '后台研究已开启' : '后台研究已关闭'}${research.lastScanAt ? ` · 上次发现检查 ${esc(agencyTime(research.lastScanAt))}` : ''}</p>
-    ${research.enabled && research.state === 'unconfigured' ? '<p class="small needs-check">尚未配置可用模型，研究暂不运行。请在设置中连接模型。</p>' : ''}
-    ${research.enabled && research.state === 'budget_wait' ? `<p class="muted small">过去 24 小时的发现检查已达上限（${esc(research.budget?.used ?? 20)}/${esc(research.budget?.limit ?? 20)} 次）${research.budget?.resetsAt ? `，最早恢复 ${esc(agencyTime(research.budget.resetsAt))}` : ''}。</p>` : ''}
-    ${research.lastError ? `<p class="small needs-check">最近发现检查失败：${esc(research.lastError)}${research.enabled && research.state === 'retry_wait' && research.nextRetryAt ? ` · 计划重试 ${esc(agencyTime(research.nextRetryAt))}` : ''}</p>` : ''}
-    <p class="muted small">仅在这台 Mac 唤醒、Echo 运行且联网时检查；恢复后补查。休眠或离线期间无法保证及时发现变化。</p>`
+  const statusHtml = `<p class="muted small">${research.enabled ? '{{msg:backgroundResearchOn}}' : '{{msg:backgroundResearchOff}}'}${research.lastScanAt ? ` {{msg:lastDiscoveryCheck}} ${esc(agencyTime(research.lastScanAt))}` : ''}</p>
+    ${research.enabled && research.state === 'unconfigured' ? '<p class="small needs-check">{{html:connectAModelInSettingsToRun}}</p>' : ''}
+    ${research.enabled && research.state === 'budget_wait' ? `<p class="muted small">{{html:discoveryChecksReachedThe24HourLimit}}${esc(research.budget?.used ?? 20)}/${esc(research.budget?.limit ?? 20)} {{msg:checks}}${research.budget?.resetsAt ? `{{msg:earliestRetry}} ${esc(agencyTime(research.budget.resetsAt))}` : ''}{{msg:period}}</p>` : ''}
+    ${research.lastError ? `<p class="small needs-check">{{html:lastDiscoveryCheckFailed}}${esc(research.lastError)}${research.enabled && research.state === 'retry_wait' && research.nextRetryAt ? ` {{msg:scheduledRetry}} ${esc(agencyTime(research.nextRetryAt))}` : ''}</p>` : ''}
+    <p class="muted small">{{html:checksRunWhileThisMacIsAwake}}</p>`
   if (status && status.innerHTML !== statusHtml) status.innerHTML = statusHtml
 }
 
@@ -2253,11 +2338,11 @@ async function saveResearchSettings(form) {
     COMMITMENTS.researchRevision++
     $('#researchSettings').dataset.signature = JSON.stringify([research.enabled, research.discoverChats])
     delete form.dataset.dirty
-    status.textContent = research.enabled ? '已开启；从现在的新对话开始' : '已关闭后台研究'
+    status.textContent = research.enabled ? '{{msg:enabledForNewChatsStartingNow}}' : '{{msg:backgroundResearchOff2}}'
     renderResearchStatus(COMMITMENTS.research)
     syncCommitmentCards()
   } catch (err) {
-    status.textContent = `保存失败：${err.message}。设置草稿仍保留。`
+    status.textContent = `{{msg:couldNotSave}}${err.message}{{msg:yourSettingsDraftIsSaved}}`
   } finally {
     delete form.dataset.saving
     controls.forEach((control) => { control.disabled = false })
@@ -2265,21 +2350,21 @@ async function saveResearchSettings(form) {
 }
 
 function deadlineLabel(date, time, timezone) {
-  return `${esc(date)}${time && timezone ? ` ${esc(time)} ${esc(timezone)}` : /^\d{4}-\d{2}-\d{2}$/.test(date ?? '') ? '（时间未指定）' : ''}`
+  return `${esc(date)}${time && timezone ? ` ${esc(time)} ${esc(timezone)}` : /^\d{4}-\d{2}-\d{2}$/.test(date ?? '') ? '{{msg:timeUnspecified}}' : ''}`
 }
 
 function deadlineAssessmentHtml(assessment, evidence = []) {
   if (!assessment || assessment.status === 'none') return ''
-  const label = { verified: '来源已核对', conflicting: '来源有冲突 · 待核实', unverified: '待核实' }[assessment.status] || '待核实'
-  return `<div class="deadline-assessment ${assessment.status === 'verified' ? '' : 'needs-check'}"><b>截止信息：${label}${assessment.date ? ` · ${deadlineLabel(assessment.date, assessment.time, assessment.timezone)}` : ''}</b>
+  const label = { verified: '{{msg:sourcesVerified}}', conflicting: '{{msg:sourcesDisagreeNeedsVerification}}', unverified: '{{msg:needsVerification}}' }[assessment.status] || '{{msg:needsVerification}}'
+  return `<div class="deadline-assessment ${assessment.status === 'verified' ? '' : 'needs-check'}"><b>{{html:deadlineEvidence}}${label}${assessment.date ? ` · ${deadlineLabel(assessment.date, assessment.time, assessment.timezone)}` : ''}</b>
     ${(assessment.claims ?? []).map((claim) => {
       const item = evidence.find((entry) => entry.id === claim.evidenceId)
       const url = typeof item?.source === 'string' ? item.source : item?.source?.url
-      const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">查看原文</a>` : ''
-      return `<div class="deadline-claim"><span class="small">${claim.status === 'verified' ? '已核对来源与事项' : '待核实'}${claim.date ? ` · ${deadlineLabel(claim.date, claim.time, claim.timezone)}` : ''}${claim.evidenceId ? ` · [${esc(claim.evidenceId)}]` : ''} ${link}</span>
+      const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">{{html:viewSource}}</a>` : ''
+      return `<div class="deadline-claim"><span class="small">${claim.status === 'verified' ? '{{msg:sourceAndGoalVerified}}' : '{{msg:needsVerification}}'}${claim.date ? ` · ${deadlineLabel(claim.date, claim.time, claim.timezone)}` : ''}${claim.evidenceId ? ` · [${esc(claim.evidenceId)}]` : ''} ${link}</span>
         ${claim.quote ? `<blockquote>${esc(claim.quote)}</blockquote>` : ''}<p class="muted small">${[claim.institution, claim.program, claim.cycle, claim.category, claim.stage].filter(Boolean).map(esc).join(' · ')}</p>
-        ${claim.reasons?.length ? `<p class="small">${claim.reasons.map(esc).join('；')}</p>` : ''}</div>`
-    }).join('')}${assessment.checkedAt ? `<p class="muted small">核对时间：${esc(agencyTime(assessment.checkedAt))}</p>` : ''}</div>`
+        ${claim.reasons?.length ? `<p class="small">${claim.reasons.map(esc).join('{{msg:listClause}}')}</p>` : ''}</div>`
+    }).join('')}${assessment.checkedAt ? `<p class="muted small">{{html:verifiedAt}}${esc(agencyTime(assessment.checkedAt))}</p>` : ''}</div>`
 }
 
 function evidenceHtml(item) {
@@ -2288,18 +2373,18 @@ function evidenceHtml(item) {
   const isGoal = typeof source === 'string' && source.startsWith('commitment:')
   const message = typeof source === 'string' ? source.match(/^conversation:([^/]+)\/(.+)$/) : null
   const isMemory = typeof source === 'string' && source.startsWith('memory:')
-  const label = isGoal ? item.discovered ? '从对话发现的目标记录' : '已确认目标' : message ? '原始消息' : isMemory ? '记忆记录（请核对当前是否成立）' : item.label || (/^https?:\/\//i.test(url ?? '') ? host(url) : '来源')
+  const label = isGoal ? item.discovered ? '{{msg:goalDiscoveredInChat}}' : '{{msg:confirmedGoal}}' : message ? '{{msg:originalMessage}}' : isMemory ? '{{msg:memoryCheckWhetherItIsCurrent}}' : item.label || (/^https?:\/\//i.test(url ?? '') ? host(url) : '{{msg:source}}')
   const link = /^https?:\/\//i.test(url ?? '') ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>` : esc(label)
   let excerpt = item.excerpt ? `<p>${esc(item.excerpt)}</p>` : ''
   if (isGoal && item.excerpt) {
     try {
       const fields = JSON.parse(item.excerpt)
-      const labels = { title: '目标', successCriteria: '完成标准', nextAction: '下一步', blocker: '待解决', deadline: '截止日期' }
+      const labels = { title: '{{msg:goal}}', successCriteria: '{{msg:completionCriteria}}', nextAction: '{{msg:nextStep}}', blocker: '{{msg:blocker}}', deadline: '{{msg:deadline}}' }
       const rows = Object.entries(labels).filter(([key]) => typeof fields?.[key] === 'string' && fields[key].trim())
       if (rows.length) excerpt = `<dl class="goal-facts">${rows.map(([key, name]) => `<dt>${name}</dt><dd>${esc(fields[key])}</dd>`).join('')}</dl>`
     } catch {}
   }
-  return `<li>${link}<div class="muted small"><time datetime="${esc(item.observedAt ?? '')}">${esc(agencyTime(item.observedAt))}</time>${item.id ? ` · [${esc(item.id)}]` : ''}</div>${excerpt}${message ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(message[1])}" data-message-id="${esc(message[2])}">查看原消息</button>` : ''}</li>`
+  return `<li>${link}<div class="muted small"><time datetime="${esc(item.observedAt ?? '')}">${esc(agencyTime(item.observedAt))}</time>${item.id ? ` · [${esc(item.id)}]` : ''}</div>${excerpt}${message ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(message[1])}" data-message-id="${esc(message[2])}">{{html:viewOriginalMessage}}</button>` : ''}</li>`
 }
 
 function preparationExpired(preparation) {
@@ -2318,16 +2403,16 @@ function preparationQuestionHtml(preparation, goal) {
   const actionable = canAnswerPreparation(goal, preparation) && !draft?.stale
   const id = esc(preparation.id)
   const answered = preparation.answer
-  const question = `<p class="preparation-question" id="question-${id}"><b>${actionable ? '待你确认' : '当时的问题'}：</b>${esc(preparation.question)}</p>`
-  const saved = answered ? `<p class="preparation-question"><b>你的回答：</b>${esc(answered.text)} · <small>${esc(agencyTime(answered.answeredAt))}</small></p>` : ''
+  const question = `<p class="preparation-question" id="question-${id}"><b>${actionable ? '{{msg:needsYourInput}}' : '{{msg:originalQuestion}}'}{{msg:labelSeparator}}</b>${esc(preparation.question)}</p>`
+  const saved = answered ? `<p class="preparation-question"><b>{{html:yourAnswer}}</b>${esc(answered.text)} · <small>${esc(agencyTime(answered.answeredAt))}</small></p>` : ''
   if (!actionable && !draft?.text) return question + saved
   const latest = goal?.preparation?.artifactId
   return `${question}${saved}<form data-answer-preparation="${id}" data-goal="${esc(goal.id)}" data-revision="${esc(preparation.revision)}">
-    <div class="field"><label for="answer-${id}">${actionable ? '你的回答' : '未提交的草稿'}</label>
+    <div class="field"><label for="answer-${id}">${actionable ? '{{msg:yourAnswer2}}' : '{{msg:unsubmittedDraft}}'}</label>
       <textarea id="answer-${id}" name="answer" rows="2" maxlength="1600" required aria-describedby="question-${id}" ${!actionable || draft?.saving ? 'readonly' : ''}>${esc(draft?.text ?? '')}</textarea></div>
-    ${actionable ? `<button class="btn small primary" type="submit" aria-disabled="${Boolean(draft?.saving)}">回答并继续准备</button>`
-      : `<button class="btn small" type="button" data-action="view-preparation" data-preparation-id="${esc(latest !== preparation.id ? latest ?? '' : '')}" data-commitment-id="${esc(goal.id)}">${latest && latest !== preparation.id ? '查看最新结果' : '查看当前目标'}</button>`}
-    <p class="form-status small" role="status">${esc(draft?.message || (!actionable ? '这个问题已更新。草稿保留在这里，供你核对。' : ''))}</p></form>`
+    ${actionable ? `<button class="btn small primary" type="submit" aria-disabled="${Boolean(draft?.saving)}">{{html:answerAndContinuePreparation}}</button>`
+      : `<button class="btn small" type="button" data-action="view-preparation" data-preparation-id="${esc(latest !== preparation.id ? latest ?? '' : '')}" data-commitment-id="${esc(goal.id)}">${latest && latest !== preparation.id ? '{{msg:viewLatestResult}}' : '{{msg:viewCurrentGoal}}'}</button>`}
+    <p class="form-status small" role="status">${esc(draft?.message || (!actionable ? '{{msg:thisQuestionHasChangedYourDraftIs}}' : ''))}</p></form>`
 }
 
 function preparationHtml(preparation, goal) {
@@ -2338,34 +2423,34 @@ function preparationHtml(preparation, goal) {
   if (preparation.delivery?.deliveredAt || timing) signals.push('good_time')
   const verified = preparation.verification?.passed === true
   const checks = preparation.verification?.checks ?? []
-  const checkText = Array.isArray(checks) ? checks.map((check) => typeof check === 'string' ? check : check.label || check.name || check.message || '').filter(Boolean).join('；') : ''
+  const checkText = Array.isArray(checks) ? checks.map((check) => typeof check === 'string' ? check : check.label || check.name || check.message || '').filter(Boolean).join('{{msg:listClause}}') : ''
   const goalStopped = ['paused', 'done', 'cancelled'].includes(preparation.goalStatus)
   const expired = preparationExpired(preparation)
   const waiting = !goalStopped && !expired && preparation.delivery?.status === 'pending' && preparation.proactiveEnabled !== false
-  const deliveryText = preparation.goalStatus === 'done' ? '目标已完成，不再准备或提醒；结果保留供回顾。'
-    : preparation.goalStatus === 'cancelled' ? '目标已取消，不再准备或提醒；结果仍保留。'
-    : preparation.goalStatus === 'paused' ? '目标已暂停，当前不会准备或提醒；结果仍可查看。'
-    : expired ? '提醒已过期，不会再推送；结果可在此查看。'
-    : preparation.delivery?.status === 'reviewed' ? '你已评阅这份结果，不再另行提醒。'
-    : preparation.delivery?.status === 'superseded' ? '已不再安排提醒，使用前请核对最新目标与来源。'
-    : preparation.delivery?.status === 'pending' && preparation.proactiveEnabled === false ? '主动提醒已关闭；结果可在此查看。'
-    : waiting ? '已准备好，等待合适时机提醒你。' : '结果保留在这里，可随时查看。'
+  const deliveryText = preparation.goalStatus === 'done' ? '{{msg:goalCompletedResultsRemainAvailableForReview}}'
+    : preparation.goalStatus === 'cancelled' ? '{{msg:goalCanceledExistingResultsAreSaved}}'
+    : preparation.goalStatus === 'paused' ? '{{msg:goalPausedResultsRemainAvailable}}'
+    : expired ? '{{msg:theReminderExpiredTheResultIsAvailable}}'
+    : preparation.delivery?.status === 'reviewed' ? '{{msg:youReviewedThisResultFurtherRemindersAre}}'
+    : preparation.delivery?.status === 'superseded' ? '{{msg:remindersEndedCheckTheCurrentGoalAnd}}'
+    : preparation.delivery?.status === 'pending' && preparation.proactiveEnabled === false ? '{{msg:proactiveRemindersAreOffYouCanView}}'
+    : waiting ? '{{msg:readyForTheNextSuitableTimeTo}}' : '{{msg:yourResultIsAvailableHereWheneverYou}}'
   return `<details class="preparation" data-preparation-id="${esc(preparation.id)}" data-detail-key="${esc(preparation.id)}" ${preparation.latest ? 'open' : ''}>
-    <summary>${esc(preparation.title || '准备结果')}<span class="muted small">${esc(agencyTime(preparation.createdAt))}</span></summary>
+    <summary>${esc(preparation.title || '{{msg:preparedWork}}')}<span class="muted small">${esc(agencyTime(preparation.createdAt))}</span></summary>
     <div class="preparation-body">
-      ${preparation.outdated && !['done', 'cancelled'].includes(preparation.goalStatus) ? '<p class="small needs-check">这份结果生成后，目标状态或内容已变化；继续使用前请核对。</p>' : ''}
+      ${preparation.outdated && !['done', 'cancelled'].includes(preparation.goalStatus) ? '<p class="small needs-check">{{html:theGoalHasChangedSinceThisResult}}</p>' : ''}
       <div class="content">${md(preparation.content ?? '')}</div>
       ${deadlineAssessmentHtml(preparation.deadlineAssessment, preparation.evidence)}
-      ${preparation.error ? `<p class="small needs-check">这次研究未完成：${esc(preparation.error)}${preparation.failedAt ? ` · ${esc(agencyTime(preparation.failedAt))}` : ''}${preparation.retryAt && !goalStopped && !preparation.researchStopped ? ` · 计划重试 ${esc(agencyTime(preparation.retryAt))}` : ''}</p>` : ''}
-      ${preparation.assumptions?.length ? `<div class="preparation-assumptions"><b>仍需确认的假设</b><ul>${preparation.assumptions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
+      ${preparation.error ? `<p class="small needs-check">{{html:researchIncomplete}}${esc(preparation.error)}${preparation.failedAt ? ` · ${esc(agencyTime(preparation.failedAt))}` : ''}${preparation.retryAt && !goalStopped && !preparation.researchStopped ? ` {{msg:scheduledRetry}} ${esc(agencyTime(preparation.retryAt))}` : ''}</p>` : ''}
+      ${preparation.assumptions?.length ? `<div class="preparation-assumptions"><b>{{html:assumptionsToCheck}}</b><ul>${preparation.assumptions.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
       ${preparationQuestionHtml(preparation, goal)}
-      <p class="verification ${verified ? '' : 'needs-check'}">${verified ? '生成时的来源引用已检查；这不等于事实已经证实。' : '来源引用尚未通过检查，请先核对。'}${checkText ? `<br><span class="small">${esc(checkText)}</span>` : ''}</p>
-      <details class="evidence" data-detail-key="evidence-${esc(preparation.id)}"><summary>查看依据 · ${(preparation.evidence ?? []).length} 条</summary>
-        <ol>${(preparation.evidence ?? []).map((item) => evidenceHtml({ ...item, discovered: preparation.goalOrigin === 'discovered' })).join('') || '<li>没有可展示的来源。</li>'}</ol>
+      <p class="verification ${verified ? '' : 'needs-check'}">${verified ? '{{msg:referencesWereCheckedWhenThisResultWas}}' : '{{msg:theSourceReferencesNeedVerification}}'}${checkText ? `<br><span class="small">${esc(checkText)}</span>` : ''}</p>
+      <details class="evidence" data-detail-key="evidence-${esc(preparation.id)}"><summary>{{html:viewEvidence}} ${(preparation.evidence ?? []).length} {{html:items}}</summary>
+        <ol>${(preparation.evidence ?? []).map((item) => evidenceHtml({ ...item, discovered: preparation.goalOrigin === 'discovered' })).join('') || '<li>{{html:noSourcesAvailable}}</li>'}</ol>
       </details>
-      <p class="muted small">${deliveryText}${waiting && preparation.delivery.expiresAt ? ` 提醒有效至 ${esc(agencyTime(preparation.delivery.expiresAt))}。` : ''}</p>
-      <div class="outcome-actions" role="group" aria-label="评价这份结果及提醒时间">${signals.map((signal) => `<button class="btn small ${signal === outcome || signal === timing ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === timing}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
-      <p class="muted small">${outcome ? `已反馈：${esc(OUTCOME_LABEL[outcome])}` : '效果未知 · 沉默不会被当作没用。'}${timing && OUTCOME_LABEL[timing] ? ` 时机反馈：${esc(OUTCOME_LABEL[timing])}。` : ''}</p>
+      <p class="muted small">${deliveryText}${waiting && preparation.delivery.expiresAt ? ` {{msg:reminderExpires}} ${esc(agencyTime(preparation.delivery.expiresAt))}{{msg:period}}` : ''}</p>
+      <div class="outcome-actions" role="group" aria-label="{{html:rateThisResultAndItsTiming}}">${signals.map((signal) => `<button class="btn small ${signal === outcome || signal === timing ? 'selected' : 'ghost'}" data-action="preparation-feedback" data-signal="${signal}" data-id="${esc(preparation.commitmentId)}" data-preparation-id="${esc(preparation.id)}" aria-pressed="${signal === outcome || signal === timing}">${OUTCOME_LABEL[signal]}</button>`).join('')}</div>
+      <p class="muted small">${outcome ? `{{msg:yourFeedback}}${esc(OUTCOME_LABEL[outcome])}` : '{{msg:outcomeUnknownSilenceDoesNotCountAs}}'}${timing && OUTCOME_LABEL[timing] ? ` {{msg:timingFeedback}}${esc(OUTCOME_LABEL[timing])}{{msg:period}}` : ''}</p>
     </div>
   </details>`
 }
@@ -2377,34 +2462,34 @@ function commitmentHtml(goal, preparations) {
   const discovered = goal.origin === 'discovered'
   const discoverySource = goal.discovery?.source ?? goal.source
   const unadopted = discovered && !goal.discovery?.adopted
-  const situation = Object.entries({ institution: '机构', program: '项目', cycle: '届次', category: '类别', stage: '阶段' }).filter(([key]) => goal.situation?.[key])
+  const situation = Object.entries({ institution: '{{msg:organization}}', program: '{{msg:project}}', cycle: '{{msg:edition}}', category: '{{msg:category}}', stage: '{{msg:stage}}' }).filter(([key]) => goal.situation?.[key])
   const answered = goal.preparation?.reason === 'answered'
-  const progress = goal.status === 'done' ? '目标已完成，不再准备'
-    : goal.status === 'cancelled' ? '目标已取消，不再准备'
-    : goal.status === 'paused' ? '已暂停准备和提醒'
-    : answered && goal.preparation.state === 'queued' ? researchStopped ? '回答已保存；开启后台研究后可继续准备' : '回答已保存，下一版已加入准备队列'
-    : answered && goal.preparation.state === 'running' ? '正在根据你的回答准备下一版' : PREPARATION_STATUS[goal.preparation?.state] || '尚未准备'
+  const progress = goal.status === 'done' ? '{{msg:goalCompletePreparationHasEnded}}'
+    : goal.status === 'cancelled' ? '{{msg:goalCanceledPreparationHasEnded}}'
+    : goal.status === 'paused' ? '{{msg:preparationAndRemindersPaused}}'
+    : answered && goal.preparation.state === 'queued' ? researchStopped ? '{{msg:answerSavedEnableBackgroundResearchToContinue}}' : '{{msg:answerSavedTheNextVersionIsQueued}}'
+    : answered && goal.preparation.state === 'running' ? '{{msg:preparingAnUpdateWithYourAnswer}}' : PREPARATION_STATUS[goal.preparation?.state] || '{{msg:noPreparationYet}}'
   return `<div class="goal-heading"><h4>${esc(goal.title)}</h4><span class="goal-status">${esc(GOAL_STATUS[goal.status] || goal.status)}</span></div>
-    ${discovered ? `<div class="goal-discovery"><p class="small">${unadopted ? '从对话发现 · 事项待你核实' : '从对话发现 · 你已选择继续跟进'}${unadopted && goal.discovery?.expiresAt && !stopped ? ` · 临时跟进至 ${esc(agencyTime(goal.discovery.expiresAt))}` : ''}</p>
+    ${discovered ? `<div class="goal-discovery"><p class="small">${unadopted ? '{{msg:discoveredInChatAwaitingVerification}}' : '{{msg:discoveredInChatYouChoseToFollow}}'}${unadopted && goal.discovery?.expiresAt && !stopped ? ` {{msg:followingTemporarilyUntil}} ${esc(agencyTime(goal.discovery.expiresAt))}` : ''}</p>
       ${goal.discovery?.quote ? `<blockquote class="goal-source">${esc(goal.discovery.quote)}</blockquote>` : ''}
-      ${discoverySource?.conversationId && discoverySource?.messageId ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(discoverySource.conversationId)}" data-message-id="${esc(discoverySource.messageId)}">查看发现依据的原消息</button>` : ''}</div>` : ''}
-    <dl class="goal-facts"><dt>完成标准</dt><dd>${esc(goal.successCriteria || '尚未填写')}</dd><dt>下一步</dt><dd>${esc(goal.nextAction || '尚未填写')}</dd>${goal.blocker ? `<dt>待解决</dt><dd>${esc(goal.blocker)}</dd>` : ''}${goal.deadline ? `<dt>目标截止</dt><dd>${esc(goal.deadline)}${/^\d{4}-\d{2}-\d{2}$/.test(goal.deadline) ? '（时间未指定）' : ''}</dd>` : ''}</dl>
-    ${situation.length ? `<details class="goal-context" data-detail-key="situation-${esc(goal.id)}"><summary>事项背景${unadopted ? ' · 待核实' : ''}</summary><dl class="goal-facts">${situation.map(([key, label]) => `<dt>${label}</dt><dd>${esc(goal.situation[key])}</dd>`).join('')}</dl></details>` : ''}
-    ${goal.situation?.questions?.length ? `<p class="preparation-question"><b>还需要确认：</b>${goal.situation.questions.map(esc).join('；')}</p>` : ''}
+      ${discoverySource?.conversationId && discoverySource?.messageId ? `<button class="btn small ghost" data-action="view-source-message" data-conversation-id="${esc(discoverySource.conversationId)}" data-message-id="${esc(discoverySource.messageId)}">{{html:viewOriginalMessage2}}</button>` : ''}</div>` : ''}
+    <dl class="goal-facts"><dt>{{html:completionCriteria}}</dt><dd>${esc(goal.successCriteria || '{{msg:unspecified}}')}</dd><dt>{{html:nextStep}}</dt><dd>${esc(goal.nextAction || '{{msg:unspecified}}')}</dd>${goal.blocker ? `<dt>{{html:blocker}}</dt><dd>${esc(goal.blocker)}</dd>` : ''}${goal.deadline ? `<dt>{{html:goalDeadline}}</dt><dd>${esc(goal.deadline)}${/^\d{4}-\d{2}-\d{2}$/.test(goal.deadline) ? '{{msg:timeUnspecified}}' : ''}</dd>` : ''}</dl>
+    ${situation.length ? `<details class="goal-context" data-detail-key="situation-${esc(goal.id)}"><summary>{{html:background2}}${unadopted ? ' {{msg:needsVerification2}}' : ''}</summary><dl class="goal-facts">${situation.map(([key, label]) => `<dt>${label}</dt><dd>${esc(goal.situation[key])}</dd>`).join('')}</dl></details>` : ''}
+    ${goal.situation?.questions?.length ? `<p class="preparation-question"><b>{{html:stillToConfirm}}</b>${goal.situation.questions.map(esc).join('{{msg:listClause}}')}</p>` : ''}
     ${!preparations.some((item) => item.deadlineAssessment) ? deadlineAssessmentHtml(goal.deadlineAssessment) : ''}
     <p class="goal-progress small" role="status">${esc(progress)}${!stopped && goal.preparation?.error ? ` · ${esc(goal.preparation.error)}` : ''}</p>
-    ${goal.watch?.lastError ? `<p class="small needs-check">来源检查失败：${esc(goal.watch.lastError)}</p>` : ''}
-    <p class="muted small">读取范围：${goal.scope?.memory ? '本地记忆' : '未授权记忆'}${goal.scope?.urls?.length ? ` · ${goal.scope.urls.length} 个指定网页` : ' · 未指定网页'}${goal.scope?.research ? ' · 网页研究' : ''}${goal.scope?.documents?.length ? ` · ${goal.scope.documents.length} 份附加资料` : ''}${goal.scope?.folders?.length ? ` · ${goal.scope.folders.length} 个工作区文件夹` : ''} · ${stopped ? '当前不自动跟进' : goal.watch?.type === 'combined' ? '按来源变化与截止进展跟进' : goal.watch?.type === 'deadline' ? '临近截止时准备' : goal.watch?.type === 'source_change' ? '来源变化时准备' : '手动准备'}</p>
-    ${goal.scope?.research && COMMITMENTS.research?.enabled === false ? '<p class="muted small">后台研究已关闭，这个目标的研究暂不运行。</p>' : ''}
-    ${goal.watch?.lastCheckAt || goal.watch?.nextCheckAt || goal.preparation?.retryAt ? `<p class="muted small">${goal.watch?.lastCheckAt ? `上次核对 ${esc(agencyTime(goal.watch.lastCheckAt))}` : '尚未核对'}${!stopped && !researchStopped && goal.watch?.nextCheckAt ? ` · 下次计划 ${esc(agencyTime(goal.watch.nextCheckAt))}` : ''}${!stopped && !researchStopped && goal.preparation?.retryAt ? ` · 失败重试 ${esc(agencyTime(goal.preparation.retryAt))}` : ''}</p>` : ''}
-    ${goal.completionEvidence ? `<p class="small">完成依据：${esc(typeof goal.completionEvidence === 'string' ? goal.completionEvidence : JSON.stringify(goal.completionEvidence))}</p>` : ''}
+    ${goal.watch?.lastError ? `<p class="small needs-check">{{html:sourceCheckFailed}}${esc(goal.watch.lastError)}</p>` : ''}
+    <p class="muted small">{{html:sourcesInScope}}${goal.scope?.memory ? '{{msg:localMemory}}' : '{{msg:memoryAccessOff}}'}${goal.scope?.urls?.length ? ` · ${goal.scope.urls.length} {{msg:selectedPages}}` : ' {{msg:noPagesSpecified}}'}${goal.scope?.research ? ' {{msg:webResearch}}' : ''}${goal.scope?.documents?.length ? ` · ${goal.scope.documents.length} {{msg:attachments}}` : ''}${goal.scope?.folders?.length ? ` · ${goal.scope.folders.length} {{msg:workspaceFolders}}` : ''} · ${stopped ? '{{msg:automaticFollowUpOff}}' : goal.watch?.type === 'combined' ? '{{msg:followSourceChangesAndApproachingDeadlines}}' : goal.watch?.type === 'deadline' ? '{{msg:prepareNearDeadline}}' : goal.watch?.type === 'source_change' ? '{{msg:prepareWhenSourcesChange}}' : '{{msg:manualPreparation}}'}</p>
+    ${goal.scope?.research && COMMITMENTS.research?.enabled === false ? '<p class="muted small">{{html:backgroundResearchIsOffForThisGoal}}</p>' : ''}
+    ${goal.watch?.lastCheckAt || goal.watch?.nextCheckAt || goal.preparation?.retryAt ? `<p class="muted small">${goal.watch?.lastCheckAt ? `{{msg:lastChecked}} ${esc(agencyTime(goal.watch.lastCheckAt))}` : '{{msg:neverChecked}}'}${!stopped && !researchStopped && goal.watch?.nextCheckAt ? ` {{msg:scheduledFor}} ${esc(agencyTime(goal.watch.nextCheckAt))}` : ''}${!stopped && !researchStopped && goal.preparation?.retryAt ? ` {{msg:retryingAfterFailure}} ${esc(agencyTime(goal.preparation.retryAt))}` : ''}</p>` : ''}
+    ${goal.completionEvidence ? `<p class="small">{{html:completionEvidence}}${esc(typeof goal.completionEvidence === 'string' ? goal.completionEvidence : JSON.stringify(goal.completionEvidence))}</p>` : ''}
     <div class="goal-actions">
-      ${unadopted && !finished ? `<button class="btn small primary" data-action="goal-adopt" data-id="${esc(goal.id)}">继续帮我跟进</button>` : ''}
-      ${!finished ? `<button class="btn small primary" data-action="goal-prepare" data-id="${esc(goal.id)}" ${goal.status !== 'active' || researchStopped || ['queued', 'running'].includes(goal.preparation?.state) ? 'disabled' : ''}${researchStopped ? ' title="请先在上方开启后台研究"' : ''}>准备下一步</button>
-      <button class="btn small" data-action="goal-edit" data-id="${esc(goal.id)}">编辑</button>
-      <button class="btn small ghost" data-action="goal-status" data-status="${goal.status === 'paused' ? 'active' : 'paused'}" data-id="${esc(goal.id)}">${goal.status === 'paused' ? '恢复' : '暂停'}</button>
-      <button class="btn small ghost" data-action="goal-complete" data-id="${esc(goal.id)}">完成目标</button>
-      <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">${discovered ? '停止这项研究' : '取消目标'}</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">重新开启</button>`}
+      ${unadopted && !finished ? `<button class="btn small primary" data-action="goal-adopt" data-id="${esc(goal.id)}">{{html:keepFollowingUp}}</button>` : ''}
+      ${!finished ? `<button class="btn small primary" data-action="goal-prepare" data-id="${esc(goal.id)}" ${goal.status !== 'active' || researchStopped || ['queued', 'running'].includes(goal.preparation?.state) ? 'disabled' : ''}${researchStopped ? ' title="{{html:enableBackgroundResearchAboveFirst}}"' : ''}>{{html:prepareNextStep}}</button>
+      <button class="btn small" data-action="goal-edit" data-id="${esc(goal.id)}">{{html:edit}}</button>
+      <button class="btn small ghost" data-action="goal-status" data-status="${goal.status === 'paused' ? 'active' : 'paused'}" data-id="${esc(goal.id)}">${goal.status === 'paused' ? '{{msg:resume}}' : '{{msg:pause}}'}</button>
+      <button class="btn small ghost" data-action="goal-complete" data-id="${esc(goal.id)}">{{html:completeGoal}}</button>
+      <button class="btn small ghost" data-action="goal-status" data-status="cancelled" data-id="${esc(goal.id)}">${discovered ? '{{msg:stopThisResearch}}' : '{{msg:cancelGoal}}'}</button>` : `<button class="btn small ghost" data-action="goal-status" data-status="active" data-id="${esc(goal.id)}">{{html:reopen}}</button>`}
     </div>
     ${preparations.length ? `<div class="goal-results">${preparations.map((item, index) => preparationHtml({ ...item, latest: index === 0, goalOrigin: goal.origin, goalStatus: goal.status, researchStopped, proactiveEnabled: COMMITMENTS.proactiveEnabled, outdated: item.revision != null && goal.revision != null && item.revision !== goal.revision }, goal)).join('')}</div>` : ''}`
 }
@@ -2469,17 +2554,17 @@ function restoreGoalActionFocus(button) {
 async function renderProactivePanel({ poll = false, force = false } = {}) {
   const el = $('#panelProactive')
   if (!$('#commitmentList', el)) {
-    el.innerHTML = `<section class="sect"><div class="row"><h3 class="agency-title">提醒预览</h3><button class="btn small right" data-action="preview-reminders">预览候选提醒</button></div>
-      <p class="muted small">查看本机排序、暂缓原因和静音话题。预览不会调用模型或发送通知。</p><div id="reminderPreview" aria-live="polite"></div></section>
-      <section class="sect"><h3 class="agency-title">让 Echo 先做一点功课</h3><div id="researchSettings"></div><div id="researchStatus"></div></section>
-      <section class="sect"><div class="row"><h3 class="agency-title">持续推进的目标</h3><button class="btn small primary right" data-action="goal-new">新增目标</button></div>
-      <p class="muted small">Echo 准备下一步，保留依据。自动发现的事项会标明出处与待核实信息，你可以随时停止。</p>
-      <p class="muted small">准备上限：24 小时内每个目标 2 次，全部目标 5 次。只读取目标授权的范围。</p>
+    el.innerHTML = `<section class="sect"><div class="row"><h3 class="agency-title">{{html:reminderPreview}}</h3><button class="btn small right" data-action="preview-reminders">{{html:previewCandidates}}</button></div>
+      <p class="muted small">{{html:previewLocalRankingsReasonsForDeferralAnd}}</p><div id="reminderPreview" aria-live="polite"></div></section>
+      <section class="sect"><h3 class="agency-title">{{html:letEchoResearchANextStep}}</h3><div id="researchSettings"></div><div id="researchStatus"></div></section>
+      <section class="sect"><div class="row"><h3 class="agency-title">{{html:ongoingGoals}}</h3><button class="btn small primary right" data-action="goal-new">{{html:addGoal}}</button></div>
+      <p class="muted small">{{html:echoPreparesTheNextStepAndRecords}}</p>
+      <p class="muted small">{{html:preparationLimitPer24HoursTwicePer}}</p>
       <div id="commitmentEditor"></div><p id="commitmentLoadStatus" class="muted small" role="status"></p>
-      <p id="commitmentEmpty" class="muted small">还没有已确认目标。可以从一条自己的消息或下面的候选事项开始。</p>
+      <p id="commitmentEmpty" class="muted small">{{html:noConfirmedGoalsYetStartFromOne}}</p>
       <div id="commitmentList" class="list"></div></section>
-      <section class="sect"><h4>待你确认的事项</h4><p class="muted small">Dream 根据上下文推测的事项，尚未成为承诺。</p><div id="commitmentCandidates" class="list"></div></section>
-      <details class="agency-settings"><summary>打扰时机与反馈学习</summary><div id="proactiveOverview"></div></details>`
+      <section class="sect"><h4>{{html:itemsToConfirm}}</h4><p class="muted small">{{html:memoryReviewInferredTheseFromContextConfirm}}</p><div id="commitmentCandidates" class="list"></div></section>
+      <details class="agency-settings"><summary>{{html:interruptionTimingAndFeedback}}</summary><div id="proactiveOverview"></div></details>`
   }
   if (COMMITMENTS.loading) {
     await COMMITMENTS.pending.catch(() => {})
@@ -2502,7 +2587,7 @@ async function renderProactivePanel({ poll = false, force = false } = {}) {
     const candidates = $('#commitmentCandidates')
     if (!candidates.contains(document.activeElement)) {
       const loops = COMMITMENTS.loops.filter((loop) => loop.status !== 'done' && !COMMITMENTS.items.some((goal) => goal.candidateLoopId === loop.id))
-      candidates.innerHTML = loops.map((loop) => `<div class="mem-item"><div class="txt"><b>${esc(loop.topic)}</b><p class="muted small">${esc(loop.why ?? '')}${loop.due ? ` · 截止 ${esc(loop.due)}` : ''}${loop.ageDays != null ? ` · ${esc(String(loop.ageDays))} 天前注意到` : ''}</p><button class="btn small" data-action="adopt-loop" data-id="${esc(loop.id)}">接下这件事</button></div></div>`).join('') || '<p class="muted small">暂无待确认事项。</p>'
+      candidates.innerHTML = loops.map((loop) => `<div class="mem-item"><div class="txt"><b>${esc(loop.topic)}</b><p class="muted small">${esc(loop.why ?? '')}${loop.due ? ` {{msg:due2}} ${esc(loop.due)}` : ''}${loop.ageDays != null ? ` · ${esc(String(loop.ageDays))} {{msg:daysAgo3}}` : ''}</p><button class="btn small" data-action="adopt-loop" data-id="${esc(loop.id)}">{{html:startFollowingUp}}</button></div></div>`).join('') || '<p class="muted small">{{html:noItemsToConfirm}}</p>'
     }
     const overview = $('#proactiveOverview')
     const signature = JSON.stringify([p, dream.nudges, agency])
@@ -2513,7 +2598,7 @@ async function renderProactivePanel({ poll = false, force = false } = {}) {
     $('#commitmentLoadStatus').textContent = ''
   } catch (err) {
     const status = $('#commitmentLoadStatus')
-    if (status) status.textContent = `目标刷新失败：${err.message}。现有草稿仍保留。`
+    if (status) status.textContent = `{{msg:failedToRefreshGoals}}${err.message}{{msg:yourDraftIsSaved}}`
     if (!poll) throw err
   } finally {
     COMMITMENTS.loading = false
@@ -2523,42 +2608,42 @@ async function renderProactivePanel({ poll = false, force = false } = {}) {
 function showCommitmentEditor(goal = {}, { mode = 'edit', source, candidateLoopId, preparationId, quote } = {}) {
   const el = $('#commitmentEditor')
   if ($('#commitmentForm')) {
-    toast('请先保存或取消当前目标草稿')
+    toast('{{msg:saveOrCancelYourCurrentGoalDraft}}')
     $('input, textarea', el)?.focus()
     return
   }
   COMMITMENTS.editor = { id: goal.id, revision: goal.revision, source: source ?? goal.source, candidateLoopId: candidateLoopId ?? goal.candidateLoopId, preparationId, mode, documents: [...(goal.scope?.documents ?? [])] }
   if (mode === 'complete') {
-    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>完成「${esc(goal.title)}」</h4>
-      <div class="field"><label for="goalCompletion">依据什么确认已经完成？</label><textarea id="goalCompletion" name="completionEvidence" rows="2" maxlength="2000" required placeholder="例如：最终稿已交付，或已核对的结果链接"></textarea></div>
-      <div class="row"><button class="btn small primary" type="submit">记录完成</button><button class="btn small" type="button" data-action="goal-editor-cancel">返回</button></div><p class="form-status small" role="status"></p></form>`
+    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>{{html:complete}}${esc(goal.title)}{{msg:quoteEnd}}</h4>
+      <div class="field"><label for="goalCompletion">{{html:whatConfirmsThatThisGoalIsComplete}}</label><textarea id="goalCompletion" name="completionEvidence" rows="2" maxlength="2000" required placeholder="{{html:forExampleALinkToTheDelivered}}"></textarea></div>
+      <div class="row"><button class="btn small primary" type="submit">{{html:recordCompletion}}</button><button class="btn small" type="button" data-action="goal-editor-cancel">{{html:back2}}</button></div><p class="form-status small" role="status"></p></form>`
   } else {
-    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>${goal.id ? '编辑目标' : '确认一个目标'}</h4>
+    el.innerHTML = `<form id="commitmentForm" class="commitment-editor"><h4>${goal.id ? '{{msg:editGoal}}' : '{{msg:confirmAGoal}}'}</h4>
       ${quote ? `<blockquote class="goal-source">${esc(quote)}</blockquote>` : ''}
-      <div class="field"><label for="goalTitle">目标</label><input id="goalTitle" name="title" type="text" maxlength="160" required value="${esc(goal.title ?? '')}" placeholder="例如：周五交付项目周报" /></div>
-      <div class="field"><label for="goalCriteria">怎样算完成</label><textarea id="goalCriteria" name="successCriteria" rows="2" maxlength="2000" required placeholder="写清可以核对的结果">${esc(goal.successCriteria ?? '')}</textarea></div>
-      <div class="field"><label for="goalNext">先准备哪一步</label><input id="goalNext" name="nextAction" type="text" maxlength="1000" required value="${esc(goal.nextAction ?? '')}" placeholder="例如：整理本周进展与待解决问题" /></div>
-      <div class="field"><label for="goalDeadline">截止日期（可不填）</label><input id="goalDeadline" name="deadline" type="date" value="${esc(goal.deadline ?? '')}" /></div>
-      <fieldset class="goal-scope"><legend>允许读取的范围</legend>
-        <label class="goal-checkbox"><input name="memory" type="checkbox" ${goal.scope?.memory ? 'checked' : ''} /> 使用本地记忆中与目标相关的内容</label>
-        <label class="goal-checkbox"><input name="research" type="checkbox" ${goal.scope?.research ? 'checked' : ''} /> 为这个目标做只读研究（搜索网页和读取所选资料）</label>
-        <p class="muted small">${COMMITMENTS.research?.enabled ? '研究使用上方的全局授权；只读，不执行外部操作。' : '后台研究目前关闭。可以先保存目标范围，再在上方开启。'}</p>
-        <div class="field"><label for="goalUrls">指定网页（最多 3 个，每行一个）</label><textarea id="goalUrls" name="urls" rows="3" placeholder="https://…">${esc((goal.scope?.urls ?? []).join('\n'))}</textarea></div>
-        <details class="goal-extra-sources"><summary>附加资料与已确认的官方网站（可选）</summary>
-          <div class="field"><label for="goalDocuments">为这个目标附加资料（最多 5 份）</label><input id="goalDocuments" type="file" accept=".pdf,.txt,.md" multiple aria-describedby="goalDocumentsHelp" /><p id="goalDocumentsHelp" class="muted small">PDF、TXT 或 Markdown，每份最多 5 MB。本地 Echo 只保存提取的文字，只有加入这个目标才会用于研究。取消草稿不会删除已上传的资料。</p></div>
+      <div class="field"><label for="goalTitle">{{html:goal}}</label><input id="goalTitle" name="title" type="text" maxlength="160" required value="${esc(goal.title ?? '')}" placeholder="{{html:forExampleDeliverTheWeeklyProjectReport}}" /></div>
+      <div class="field"><label for="goalCriteria">{{html:completionCriteria2}}</label><textarea id="goalCriteria" name="successCriteria" rows="2" maxlength="2000" required placeholder="{{html:describeAResultYouCanVerify}}">${esc(goal.successCriteria ?? '')}</textarea></div>
+      <div class="field"><label for="goalNext">{{html:firstStepToPrepare}}</label><input id="goalNext" name="nextAction" type="text" maxlength="1000" required value="${esc(goal.nextAction ?? '')}" placeholder="{{html:forExampleSummarizeThisWeekSProgress}}" /></div>
+      <div class="field"><label for="goalDeadline">{{html:deadlineOptional}}</label><input id="goalDeadline" name="deadline" type="date" value="${esc(goal.deadline ?? '')}" /></div>
+      <fieldset class="goal-scope"><legend>{{html:allowedSources}}</legend>
+        <label class="goal-checkbox"><input name="memory" type="checkbox" ${goal.scope?.memory ? 'checked' : ''} /> {{html:useRelevantInformationFromLocalMemory}}</label>
+        <label class="goal-checkbox"><input name="research" type="checkbox" ${goal.scope?.research ? 'checked' : ''} /> {{html:allowReadOnlyResearchForThisGoal}}</label>
+        <p class="muted small">${COMMITMENTS.research?.enabled ? '{{msg:researchUsesTheReadOnlyAccessGranted}}' : '{{msg:backgroundResearchIsOffYouCanSave}}'}</p>
+        <div class="field"><label for="goalUrls">{{html:webPagesUpTo3OnePer}}</label><textarea id="goalUrls" name="urls" rows="3" placeholder="https://…">${esc((goal.scope?.urls ?? []).join('\n'))}</textarea></div>
+        <details class="goal-extra-sources"><summary>{{html:attachmentsAndVerifiedOfficialWebsitesOptional}}</summary>
+          <div class="field"><label for="goalDocuments">{{html:attachFilesToThisGoalUpTo}}</label><input id="goalDocuments" type="file" accept=".pdf,.txt,.md" multiple aria-describedby="goalDocumentsHelp" /><p id="goalDocumentsHelp" class="muted small">{{html:pdfTxtOrMarkdownUpTo5}}</p></div>
           <div id="goalDocumentList"></div><p id="goalUploadStatus" class="small" role="status"></p>
-          <div class="field"><label for="goalFolders">工作区文件夹（最多 3 个，每行一个）</label><textarea id="goalFolders" name="folders" rows="2" placeholder="例如：admissions/2027">${esc((goal.scope?.folders ?? []).join('\n'))}</textarea><p class="muted small">相对于设置中的工作区，只授权这些文件夹。留空不读取其他本地文件。</p></div>
-          <div class="field"><label for="goalOfficialDomains">已确认的官方网站域名（最多 5 个，可选）</label><textarea id="goalOfficialDomains" name="officialDomains" rows="2" placeholder="例如：admissions.example.edu">${esc((goal.scope?.officialDomains ?? []).join('\n'))}</textarea><p class="muted small">每行一个你已确认的域名。没有它也能寻找线索；只有匹配此范围的来源才能核对为官方截止信息。找到的网页不会自动成为官网。</p></div>
+          <div class="field"><label for="goalFolders">{{html:workspaceFoldersUpTo3OnePer}}</label><textarea id="goalFolders" name="folders" rows="2" placeholder="{{html:forExampleAdmissions2027}}">${esc((goal.scope?.folders ?? []).join('\n'))}</textarea><p class="muted small">{{html:specifyPathsRelativeToTheConfiguredWorkspace}}</p></div>
+          <div class="field"><label for="goalOfficialDomains">{{html:verifiedOfficialDomainsUpTo5Optional}}</label><textarea id="goalOfficialDomains" name="officialDomains" rows="2" placeholder="{{html:forExampleAdmissionsExampleEdu}}">${esc((goal.scope?.officialDomains ?? []).join('\n'))}</textarea><p class="muted small">{{html:enterOneVerifiedDomainPerLineEcho}}</p></div>
         </details>
-        <p class="muted small">准备内容只保存到 Echo。发送消息、发布或修改外部内容需要另行授权。</p>
+        <p class="muted small">{{html:echoSavesPreparedMaterialLocallySendingMessages}}</p>
       </fieldset>
-      <details class="goal-context"><summary>事项背景（可选）</summary>
-        ${Object.entries({ institution: ['机构', 160], program: ['项目', 200], cycle: ['届次或年份', 80], category: ['申请或活动类别', 80], stage: ['当前阶段', 80] }).map(([key, [label, max]]) => `<div class="field"><label for="goal-${key}">${label}</label><input id="goal-${key}" name="${key}" maxlength="${max}" value="${esc(goal.situation?.[key] ?? '')}" /></div>`).join('')}
-        <div class="field"><label for="goalQuestions">还需要确认的问题（最多 5 个，每行一个）</label><textarea id="goalQuestions" name="questions" rows="2" maxlength="1504">${esc((goal.situation?.questions ?? []).join('\n'))}</textarea></div>
+      <details class="goal-context"><summary>{{html:backgroundOptional}}</summary>
+        ${Object.entries({ institution: ['{{msg:organization}}', 160], program: ['{{msg:project}}', 200], cycle: ['{{msg:editionOrYear}}', 80], category: ['{{msg:applicationOrEventCategory}}', 80], stage: ['{{msg:currentStage}}', 80] }).map(([key, [label, max]]) => `<div class="field"><label for="goal-${key}">${label}</label><input id="goal-${key}" name="${key}" maxlength="${max}" value="${esc(goal.situation?.[key] ?? '')}" /></div>`).join('')}
+        <div class="field"><label for="goalQuestions">{{html:openQuestionsUpTo5OnePer}}</label><textarea id="goalQuestions" name="questions" rows="2" maxlength="1504">${esc((goal.situation?.questions ?? []).join('\n'))}</textarea></div>
       </details>
-      <p class="muted small">${goal.status === 'paused' ? '目标暂停期间不会准备，恢复时会准备一次。' : '确认、修改或恢复目标时会准备一次。'}后续按下面的方式跟进，所有准备共用次数预算。</p>
-      <div class="field"><label for="goalWatch">后续何时准备</label><select id="goalWatch" name="watch"><option value="manual" ${!goal.watch?.type || goal.watch.type === 'manual' ? 'selected' : ''}>之后由我点击「准备下一步」</option><option value="combined" ${goal.watch?.type === 'combined' ? 'selected' : ''}>综合跟进来源变化和截止进展</option><option value="deadline" ${goal.watch?.type === 'deadline' ? 'selected' : ''}>临近截止日期</option><option value="source_change" ${goal.watch?.type === 'source_change' ? 'selected' : ''}>指定网页有变化时</option></select></div>
-      <div class="row"><button class="btn small primary" type="submit">${goal.id ? '保存修改' : '确认并加入目标'}</button><button class="btn small" type="button" data-action="goal-editor-cancel">取消</button></div><p class="form-status small" role="status"></p></form>`
+      <p class="muted small">${goal.status === 'paused' ? '{{msg:preparationPausesWithThisGoalResumingIt}}' : '{{msg:confirmingEditingOrResumingThisGoalPrepares}}'}{{msg:wordSpace}}{{html:chooseWhenToPrepareUpdatesAllUpdates}}</p>
+      <div class="field"><label for="goalWatch">{{html:prepareFutureUpdates}}</label><select id="goalWatch" name="watch"><option value="manual" ${!goal.watch?.type || goal.watch.type === 'manual' ? 'selected' : ''}>{{html:whenIClickPrepareNextStep}}</option><option value="combined" ${goal.watch?.type === 'combined' ? 'selected' : ''}>{{html:onSourceChangesOrApproachingDeadlines}}</option><option value="deadline" ${goal.watch?.type === 'deadline' ? 'selected' : ''}>{{html:nearTheDeadline}}</option><option value="source_change" ${goal.watch?.type === 'source_change' ? 'selected' : ''}>{{html:whenASelectedWebPageChanges}}</option></select></div>
+      <div class="row"><button class="btn small primary" type="submit">${goal.id ? '{{msg:saveChanges}}' : '{{msg:confirmAndAddGoal}}'}</button><button class="btn small" type="button" data-action="goal-editor-cancel">{{html:cancel}}</button></div><p class="form-status small" role="status"></p></form>`
   }
   if (mode !== 'complete') renderGoalDocuments()
   el.scrollIntoView({ block: 'nearest' })
@@ -2570,7 +2655,7 @@ function renderGoalDocuments() {
   if (!list || !COMMITMENTS.editor) return
   list.innerHTML = (COMMITMENTS.editor.documents ?? []).map((id) => {
     const document = COMMITMENTS.research?.documents?.find((item) => item.id === id)
-    return `<div class="goal-document"><span>${esc(document?.name || '已附加资料')}<small class="muted">${esc(id)}</small></span><button class="btn small ghost" type="button" data-action="goal-document-remove" data-id="${esc(id)}" aria-label="从这个目标移除${esc(document?.name || '资料')}">移除</button></div>`
+    return `<div class="goal-document"><span>${esc(document?.name || '{{msg:attachedFiles}}')}<small class="muted">${esc(id)}</small></span><button class="btn small ghost" type="button" data-action="goal-document-remove" data-id="${esc(id)}" aria-label="{{msg:removeFromThisGoal}}${esc(document?.name || '{{msg:file}}')}">{{html:remove2}}</button></div>`
   }).join('')
 }
 
@@ -2583,26 +2668,26 @@ async function uploadGoalDocuments(input) {
   editor.uploading = true
   input.disabled = true
   try {
-    if (editor.documents.length + files.length > 5) throw new Error('每个目标最多附加 5 份资料。')
-    if (files.some((file) => !/\.(pdf|txt|md)$/i.test(file.name))) throw new Error('请选择 PDF、TXT 或 Markdown 文件。')
-    if (files.some((file) => file.size > 5 * 1024 * 1024)) throw new Error('每份资料不能超过 5 MB。')
+    if (editor.documents.length + files.length > 5) throw new Error('{{msg:attachUpToFiveFilesPerGoal}}')
+    if (files.some((file) => !/\.(pdf|txt|md)$/i.test(file.name))) throw new Error('{{msg:selectAPdfTxtOrMarkdownFile}}')
+    if (files.some((file) => file.size > 5 * 1024 * 1024)) throw new Error('{{msg:eachFileMustBe5MbOr}}')
     for (const file of files) {
       if (COMMITMENTS.editor !== editor) return
-      status.textContent = `正在上传 ${file.name}…`
+      status.textContent = `{{msg:uploading}} ${file.name}…`
       const data = String(await readAsDataUrl(file)).split(',')[1]
       if (COMMITMENTS.editor !== editor) return
       const result = await api('research/documents', { method: 'POST', body: { name: file.name, data } })
       if (COMMITMENTS.editor !== editor) return
-      if (!result.document?.id) throw new Error('上传响应缺少资料信息，请重试。')
+      if (!result.document?.id) throw new Error('{{msg:theUploadResponseDidNotIncludeThe}}')
       editor.documents.push(result.document.id)
       COMMITMENTS.research ??= {}
       COMMITMENTS.research.documents ??= []
       COMMITMENTS.research.documents.push(result.document)
       renderGoalDocuments()
     }
-    status.textContent = '资料已附加到草稿；保存目标后才会用于研究。'
+    status.textContent = '{{msg:fileAttachedToTheDraftSaveThe}}'
   } catch (err) {
-    if (COMMITMENTS.editor === editor) status.textContent = `上传失败：${err.message} 已上传的资料与目标草稿仍保留。`
+    if (COMMITMENTS.editor === editor) status.textContent = `{{msg:uploadFailed}}${err.message} {{msg:yourUploadsAndGoalDraftAreSaved}}`
   } finally {
     editor.uploading = false
     input.disabled = false
@@ -2612,7 +2697,7 @@ async function uploadGoalDocuments(input) {
 
 async function saveCommitmentForm(form) {
   if (!form.reportValidity() || form.dataset.saving) return
-  if (COMMITMENTS.editor?.uploading) return toast('资料还在上传，请稍候再保存', true)
+  if (COMMITMENTS.editor?.uploading) return toast('{{msg:waitForFileUploadsToFinishBefore}}', true)
   const editor = { ...COMMITMENTS.editor }
   const values = new FormData(form)
   const status = $('.form-status', form)
@@ -2622,40 +2707,40 @@ async function saveCommitmentForm(form) {
   try {
     if (editor.mode === 'complete') {
       const completionEvidence = String(values.get('completionEvidence') ?? '').trim()
-      if (!completionEvidence) throw new Error('请填写完成依据。')
+      if (!completionEvidence) throw new Error('{{msg:enterCompletionEvidence}}')
       await api(`commitments/${encodeURIComponent(editor.id)}`, { method: 'PATCH', body: { status: 'done', completionEvidence } })
       if (editor.preparationId) {
         try {
           const feedback = await api('feedback', { method: 'POST', body: { commitmentId: editor.id, preparationId: editor.preparationId, signal: 'completed' } })
-          if (feedback.ignored) throw new Error('原准备结果已不可用')
-        } catch (err) { toast(`目标已完成，但结果反馈未保存：${err.message}`, true) }
+          if (feedback.ignored) throw new Error('{{msg:theOriginalResultIsUnavailable}}')
+        } catch (err) { toast(`{{msg:goalCompletedResultFeedbackCouldNotBe}}${err.message}`, true) }
       }
     } else {
       const urls = [...new Set(String(values.get('urls') ?? '').split(/\r?\n/).map((url) => url.trim()).filter(Boolean))]
-      if (urls.length > 3) throw new Error('最多添加 3 个网页。')
+      if (urls.length > 3) throw new Error('{{msg:addUpToThreeWebPages}}')
       for (const url of urls) {
         let parsed
         try { parsed = new URL(url) } catch {}
-        if (!parsed || !['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('网页地址需以 https:// 或 http:// 开头，且不能包含登录信息。')
+        if (!parsed || !['https:', 'http:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('{{msg:useAnHttpsOrHttpAddressWithout}}')
       }
       const watch = String(values.get('watch'))
       const deadline = String(values.get('deadline') ?? '') || null
-      if (watch === 'deadline' && !deadline) throw new Error('请填写截止日期，或选择手动准备。')
-      if (watch === 'source_change' && !urls.length && values.get('research') !== 'on') throw new Error('来源变化触发需要至少一个指定网页，或勾选只读研究。')
+      if (watch === 'deadline' && !deadline) throw new Error('{{msg:enterADeadlineOrChooseManualPreparation}}')
+      if (watch === 'source_change' && !urls.length && values.get('research') !== 'on') throw new Error('{{msg:toFollowSourceChangesSpecifyAWeb}}')
       const body = { title: String(values.get('title')).trim(), successCriteria: String(values.get('successCriteria')).trim(), nextAction: String(values.get('nextAction')).trim(), deadline, scope: { memory: values.get('memory') === 'on', urls }, watch: { type: watch } }
       if (values.get('folders') !== null) {
         const lines = (key) => [...new Set(String(values.get(key) ?? '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean))]
         const folders = lines('folders'), officialDomains = lines('officialDomains').map((domain) => domain.toLowerCase())
-        if (folders.length > 3 || folders.some((folder) => /^(?:\/|~|[a-z]:)/i.test(folder) || folder.includes('\\') || folder.split('/').includes('..') || folder === '.')) throw new Error('请填写最多 3 个工作区内的相对文件夹路径，不能使用绝对路径或上级目录。')
-        if (officialDomains.length > 5 || officialDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(domain))) throw new Error('请填写最多 5 个完整官方网站域名，不含协议、路径或通配符。')
+        if (folders.length > 3 || folders.some((folder) => /^(?:\/|~|[a-z]:)/i.test(folder) || folder.includes('\\') || folder.split('/').includes('..') || folder === '.')) throw new Error('{{msg:listUpToThreeRelativeWorkspaceFolders}}')
+        if (officialDomains.length > 5 || officialDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(domain))) throw new Error('{{msg:enterUpToFiveFullOfficialDomains}}')
         body.scope = { ...body.scope, research: values.get('research') === 'on', documents: editor.documents ?? [], folders, officialDomains }
         body.situation = Object.fromEntries(['institution', 'program', 'cycle', 'category', 'stage'].map((key) => [key, String(values.get(key) ?? '').trim()]))
         body.situation.questions = lines('questions')
-        if (body.situation.questions.length > 5 || body.situation.questions.some((question) => question.length > 300)) throw new Error('最多填写 5 个待确认问题，每个最多 300 字。')
-        if (!body.scope.research && (body.scope.documents.length || folders.length || officialDomains.length)) throw new Error('使用附加资料、工作区文件夹或官网域名，需要先勾选这个目标的只读研究。')
+        if (body.situation.questions.length > 5 || body.situation.questions.some((question) => question.length > 300)) throw new Error('{{msg:enterUpToFiveQuestions300Characters}}')
+        if (!body.scope.research && (body.scope.documents.length || folders.length || officialDomains.length)) throw new Error('{{msg:enableReadOnlyResearchToUseAttachments}}')
       }
-      if (watch === 'combined' && !deadline && !urls.length && !body.scope.research) throw new Error('综合跟进需要截止日期、指定网页，或勾选只读研究。')
-      if (!body.title || !body.successCriteria || !body.nextAction) throw new Error('请填写目标、完成标准和下一步。')
+      if (watch === 'combined' && !deadline && !urls.length && !body.scope.research) throw new Error('{{msg:toFollowSourcesAndDeadlinesEnterA}}')
+      if (!body.title || !body.successCriteria || !body.nextAction) throw new Error('{{msg:enterAGoalCompletionCriteriaAndNext}}')
       if (!editor.id && editor.source) body.source = editor.source
       if (!editor.id && editor.candidateLoopId) body.candidateLoopId = editor.candidateLoopId
       if (editor.id && editor.revision) body.expectedRevision = editor.revision
@@ -2663,7 +2748,7 @@ async function saveCommitmentForm(form) {
     }
     COMMITMENTS.editor = null
     $('#commitmentEditor').innerHTML = ''
-    toast(editor.mode === 'complete' ? '已记录完成依据' : '目标已保存')
+    toast(editor.mode === 'complete' ? '{{msg:completionEvidenceRecorded}}' : '{{msg:goalSaved}}')
     await renderProactivePanel({ force: true })
     $('[data-action="goal-new"]')?.focus()
   } catch (err) {
@@ -2688,8 +2773,8 @@ async function submitPreparationAnswer(form) {
   const input = $('textarea', form), submit = $('button[type="submit"]', form), status = $('[role="status"]', form)
   if (!submit) return
   const answer = input.value.trim()
-  if (!answer || answer.length > 1600) { status.textContent = '请输入 1 到 1600 字的回答。'; input.focus(); return }
-  const draft = { text: input.value, saving: true, message: '正在保存回答…' }
+  if (!answer || answer.length > 1600) { status.textContent = '{{msg:enterAnAnswerOf1To1}}'; input.focus(); return }
+  const draft = { text: input.value, saving: true, message: '{{msg:savingAnswer}}' }
   answerDrafts.set(preparationId, draft)
   input.readOnly = true
   submit.setAttribute('aria-disabled', 'true')
@@ -2705,12 +2790,12 @@ async function submitPreparationAnswer(form) {
     if (preparation) preparation.answer = result.answer
     answerDrafts.delete(preparationId)
     COMMITMENTS.version++
-    toast('回答已保存')
+    toast('{{msg:answerSaved}}')
   } catch (err) {
     if (answerDrafts.get(preparationId) !== draft) return
     draft.saving = false
     draft.stale = err.status === 409
-    draft.message = draft.stale ? `${err.message}。请查看当前目标和最新结果。` : `回答未确认保存：${err.message}。你可以重试。`
+    draft.message = draft.stale ? `${err.message}{{msg:seeTheCurrentGoalAndLatestResult}}` : `{{msg:couldNotConfirmYourAnswerWasSaved}}${err.message}{{msg:youCanTryAgain}}`
     const card = form.closest('[data-goal-id]')
     if (card) delete card.dataset.signature
     syncCommitmentCards({ force: true })
@@ -2736,62 +2821,62 @@ document.addEventListener('submit', (event) => {
   saveCommitmentForm(event.target).catch((err) => toast(err.message, true))
 })
 
-const ATTENTION_STYLE_LABELS = { quiet: '安静', balanced: '均衡', engaged: '积极' }
+const ATTENTION_STYLE_LABELS = { quiet: '{{msg:quiet}}', balanced: '{{msg:balanced}}', engaged: '{{msg:active2}}' }
 const ATTENTION_STYLE_HINTS = {
-  quiet: '较长间隔，较高筛选门槛',
-  balanced: '适中的筛选门槛',
-  engaged: '较短等待，较低筛选门槛',
+  quiet: '{{msg:longerIntervalsAndAHigherScoreThreshold}}',
+  balanced: '{{msg:moderateScoreThreshold}}',
+  engaged: '{{msg:shorterIntervalsAndALowerScoreThreshold}}',
 }
 const PROACTIVE_REASON_LABELS = {
-  topic_muted: '这个话题已静音。',
-  sparse_history: '聊天记录还不足以判断常聊时段。',
-  usual_chat_window: '现在是你常跟 Echo 聊天的时段。',
-  outside_usual_window: '当前在常聊时段之外。',
-  waiting_for_usual_window: '常聊的时段快到了，提醒暂缓。',
-  repeated_wrong_time: '你在这个时段多次反馈过时机不合适，提醒暂缓。',
-  quiet_style_gap: '距上次打扰还未达到当前的建议间隔。',
-  learned_timing_gap: '距上次提醒还未达到按时机反馈调整后的间隔。',
-  requested_goal: '这是你要求跟进的事项，可以在常聊时段之外提醒。',
-  quiet_hours: '现在是你设置的静默时段。', wrong_time_pause: '你反馈过时机不合适，提醒正在暂停。',
-  recent_chat_activity: '你刚发过消息，稍后再提醒。', user_active: '对话正在进行中。',
-  focus_deep: '屏幕状态显示你正在专注。', focus_meeting: '屏幕状态显示你正在开会。',
-  shared_daily_budget: '今天各渠道合计的提醒次数已用完。', daily_budget: '今天的主动消息次数已用完。',
-  shared_min_gap: '距上一次提醒的时间还太短。', min_gap: '距上一次主动消息的时间还太短。',
-  delivery_in_progress: '已有一条提醒正在送达。', disabled: '主动提醒已关闭。',
-  no_material: '目前没有可跟进的内容。', duplicate: '已提醒过相同内容。', unchanged_evidence: '同一事项还没有新依据。',
-  unchanged_context: '提醒依据和上次评估时相同，这次无需再次询问模型。',
-  expired: '这条提醒已经过期。', stale_preparation: '准备结果已经更新或失效。', stale_evidence: '提醒依据已经变化或失效。',
-  already_delivered: '这条提醒已送达。', tick_running: '另一次检查正在进行。',
-  below_threshold: '候选内容的本地评分低于提醒门槛。', empty_message: '这次没有生成可发送的提醒。',
-  feedback_suppressed: '你最近认为这个事项帮助有限。', composer_abstained: '模型未能为选定的事项提供措辞。',
-  unusable_wording: '返回的措辞不适合选定的事项。', composer_error: '已选定事项，措辞请求暂时失败。',
-  unsupported_evidence: '这次提醒缺少可用依据。', bad_json: '未能读取这次内容评估。', error: '这次检查未完成。',
+  topic_muted: '{{msg:youMutedThisTopic}}',
+  sparse_history: '{{msg:moreChatHistoryIsNeededToIdentify}}',
+  usual_chat_window: '{{msg:thisIsATimeYouOftenChat}}',
+  outside_usual_window: '{{msg:thisFallsOutsideYourUsualChatTimes}}',
+  waiting_for_usual_window: '{{msg:aUsualChatTimeIsApproachingSo}}',
+  repeated_wrong_time: '{{msg:youHaveRepeatedlyRatedThisTimeAs}}',
+  quiet_style_gap: '{{msg:theRecommendedInterruptionIntervalHasNotElapsed}}',
+  learned_timing_gap: '{{msg:echoIsWaitingForTheIntervalLearned}}',
+  requested_goal: '{{msg:youAskedForThisFollowUpSo}}',
+  quiet_hours: '{{msg:yourQuietHoursAreInEffect}}', wrong_time_pause: '{{msg:remindersArePausedAfterYourTimingFeedback}}',
+  recent_chat_activity: '{{msg:youJustSentAMessageEchoWill}}', user_active: '{{msg:aConversationIsInProgress}}',
+  focus_deep: '{{msg:screenContextSuggestsYouAreFocused}}', focus_meeting: '{{msg:screenContextSuggestsYouAreInA}}',
+  shared_daily_budget: '{{msg:dailyReminderBudgetUsedAcrossAllChannels}}', daily_budget: '{{msg:dailyProactiveMessageLimitReached}}',
+  shared_min_gap: '{{msg:tooSoonSinceTheLastReminder}}', min_gap: '{{msg:tooSoonSinceTheLastProactiveMessage}}',
+  delivery_in_progress: '{{msg:aReminderIsBeingDelivered}}', disabled: '{{msg:proactiveRemindersAreOff}}',
+  no_material: '{{msg:nothingToFollowUpOn}}', duplicate: '{{msg:thisContentHasAlreadyBeenDelivered}}', unchanged_evidence: '{{msg:noNewEvidenceForThisItem}}',
+  unchanged_context: '{{msg:theEvidenceIsUnchangedSinceTheLast}}',
+  expired: '{{msg:thisReminderExpired}}', stale_preparation: '{{msg:thePreparedResultChangedOrExpired}}', stale_evidence: '{{msg:theEvidenceForThisReminderChangedOr}}',
+  already_delivered: '{{msg:reminderDelivered}}', tick_running: '{{msg:anotherCheckIsInProgress}}',
+  below_threshold: '{{msg:theLocalScoreIsBelowTheReminder}}', empty_message: '{{msg:noReminderTextWasGenerated}}',
+  feedback_suppressed: '{{msg:youRecentlyRatedThisItemAsLess}}', composer_abstained: '{{msg:theModelSuppliedNoWordingForThis}}',
+  unusable_wording: '{{msg:theSuggestedWordingDidNotFitThe}}', composer_error: '{{msg:itemSelectedTheWordingRequestFailedTemporarily}}',
+  unsupported_evidence: '{{msg:thisReminderLacksSupportingEvidence}}', bad_json: '{{msg:couldNotReadTheContentEvaluation}}', error: '{{msg:checkIncomplete}}',
 }
 
 function policyParametersHtml(policy) {
   if (!policy?.base || !policy.effective) return ''
-  const rows = [['ambientGapMinutes', '建议间隔（分钟）'], ['habitWaitMinutes', '可等候常聊时段（分钟）'], ['minScore', '内容最低分（0–1）']]
+  const rows = [['ambientGapMinutes', '{{msg:recommendedIntervalMinutes}}'], ['habitWaitMinutes', '{{msg:maximumWaitForAUsualChatTime}}'], ['minScore', '{{msg:minimumContentScore01}}']]
   const value = (n) => Number.isFinite(n) ? Number(n.toFixed(2)) : '—'
   const explanations = {
-    timing_feedback: '近期有时机不合适的反馈', welcome_timing: '近期有来得正好的反馈',
-    regular_chat_hours: '已观察到常聊时段', score_calibration: '已计入设置中的内容筛选强度',
+    timing_feedback: '{{msg:recentFeedbackMarkedTheTimingInconvenient}}', welcome_timing: '{{msg:recentFeedbackMarkedTheTimingHelpful}}',
+    regular_chat_hours: '{{msg:usualChatTimesIdentified}}', score_calibration: '{{msg:contentThresholdPreferenceApplied}}',
   }
   const adjustments = (Array.isArray(policy.reasons) ? policy.reasons : []).map((key) => explanations[key]).filter(Boolean)
-  return `<table class="policy-parameters"><caption>当前触发类型的参数</caption>
-    <thead><tr><th scope="col">参数</th><th scope="col">预设</th><th scope="col">当前</th></tr></thead>
+  return `<table class="policy-parameters"><caption>{{html:parametersForThisTriggerType}}</caption>
+    <thead><tr><th scope="col">{{html:parameter}}</th><th scope="col">{{html:preset}}</th><th scope="col">{{html:current}}</th></tr></thead>
     <tbody>${rows.map(([key, label]) => `<tr><th scope="row">${label}</th><td>${value(policy.base[key])}</td><td>${value(policy.effective[key])}</td></tr>`).join('')}</tbody></table>
-    ${adjustments.length ? `<p class="muted small">${esc(adjustments.join('；'))}。</p>` : ''}`
+    ${adjustments.length ? `<p class="muted small">${esc(adjustments.join('{{msg:listClause}}'))}{{msg:period}}</p>` : ''}`
 }
 
 function lastSelectionHtml(decision) {
-  if (!decision) return '<p class="muted small">尚无内容选择记录。</p>'
-  if (decision.policy !== 'local') return `<p class="muted small">旧版模型评估 · ${esc(decision.reason ?? '未记录理由')}</p>`
+  if (!decision) return '<p class="muted small">{{html:noContentSelectionsYet}}</p>'
+  if (decision.policy !== 'local') return `<p class="muted small">{{html:legacyModelEvaluation}} ${esc(decision.reason ?? '{{msg:noReasonRecorded}}')}</p>`
   const selection = decision.selection
-  const wording = { drafted: '已生成措辞', abstained: '模型未提供措辞', unusable: '措辞未通过检查', prepared: '直接使用已有成果', error: '措辞请求暂时失败' }
-  return `<dl class="kv"><dt>${decision.act ? '选中内容' : '暂缓原因'}</dt><dd>${esc(decision.act ? selection?.label ?? '—' : PROACTIVE_REASON_LABELS[decision.reason] ?? decision.reason ?? '—')}</dd>
-    ${Number.isFinite(selection?.score) ? `<dt>本地排序分（0–1）</dt><dd>${selection.score.toFixed(2)}</dd>` : ''}
-    ${Array.isArray(selection?.reasons) && selection.reasons.length ? `<dt>选择依据</dt><dd>${esc(selection.reasons.join('；'))}</dd>` : ''}
-    ${wording[decision.wording] ? `<dt>内容呈现</dt><dd>${wording[decision.wording]}</dd>` : ''}</dl>`
+  const wording = { drafted: '{{msg:wordingGenerated}}', abstained: '{{msg:noWordingSupplied}}', unusable: '{{msg:wordingCheckFailed}}', prepared: '{{msg:usedThePreparedResult}}', error: '{{msg:wordingRequestTemporarilyFailed}}' }
+  return `<dl class="kv"><dt>${decision.act ? '{{msg:selectedItem}}' : '{{msg:deferralReason}}'}</dt><dd>${esc(decision.act ? selection?.label ?? '—' : PROACTIVE_REASON_LABELS[decision.reason] ?? decision.reason ?? '—')}</dd>
+    ${Number.isFinite(selection?.score) ? `<dt>{{html:localRankingScore01}}</dt><dd>${selection.score.toFixed(2)}</dd>` : ''}
+    ${Array.isArray(selection?.reasons) && selection.reasons.length ? `<dt>{{html:selectionEvidence}}</dt><dd>${esc(selection.reasons.join('{{msg:listClause}}'))}</dd>` : ''}
+    ${wording[decision.wording] ? `<dt>{{html:presentation}}</dt><dd>${wording[decision.wording]}</dd>` : ''}</dl>`
 }
 
 function renderProactiveOverview(p, dream, agency) {
@@ -2799,75 +2884,75 @@ function renderProactiveOverview(p, dream, agency) {
   const timing = p.nextGate?.timing ?? p.attention?.timing
   const style = timing?.style ?? S.boot?.config?.attention?.style ?? 'balanced'
   const gate = p.nextGate
-  const gateSummary = gate?.allow ? '当前条件允许主动提醒。' : PROACTIVE_REASON_LABELS[gate?.reason] ?? '暂未取得判断结果。'
-  const usualHours = (timing?.usualStartHours ?? []).map((hour) => `${String(hour).padStart(2, '0')}:00–${String(hour + 3).padStart(2, '0')}:00`).join('、')
+  const gateSummary = gate?.allow ? '{{msg:aReminderIsCurrentlyAllowed}}' : PROACTIVE_REASON_LABELS[gate?.reason] ?? '{{msg:noDecisionAvailable}}'
+  const usualHours = (timing?.usualStartHours ?? []).map((hour) => `${String(hour).padStart(2, '0')}:00–${String(hour + 3).padStart(2, '0')}:00`).join('{{msg:listSeparator}}')
   const nudgeHtml = (dream.nudges ?? [])
-    .map((n) => `<div class="mem-item"><div class="txt">${esc(n.topic)}<div class="muted small">${esc(n.angle ?? '')} · 急迫度 ${n.urgency}</div></div></div>`)
+    .map((n) => `<div class="mem-item"><div class="txt">${esc(n.topic)}<div class="muted small">${esc(n.angle ?? '')} {{msg:urgency}} ${n.urgency}</div></div></div>`)
     .join('')
   const kindRows = (agency.kinds ?? [])
     .map((k) => {
       return `<div class="mem-item"><div class="txt">${esc(KIND_LABEL[k.kind] ?? k.kind)}
-        <div class="muted small">有用程度估计 ${(k.mean * 100).toFixed(0)}% · 明确反馈 ${k.trials} 次</div>
+        <div class="muted small">{{html:estimatedUsefulness}} ${(k.mean * 100).toFixed(0)}{{msg:explicitFeedback}} ${k.trials} {{html:times}}</div>
       </div><div class="bar" style="width:56px"><i style="width:${Math.round(k.mean * 100)}%"></i></div></div>`
     })
     .join('')
   el.innerHTML = `
     <div class="stat-row">
-      <div class="stat"><b>${p.todayCount}/${p.budget}</b><span>今日主动开口</span></div>
-      <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>采用或帮助完成</span></div>
-      <div class="stat"><b>${agency.outcomes?.unknown ?? 0}</b><span>尚无明确反馈</span></div>
+      <div class="stat"><b>${p.todayCount}/${p.budget}</b><span>{{html:proactiveMessagesToday}}</span></div>
+      <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>{{html:adoptedOrHelpedComplete}}</span></div>
+      <div class="stat"><b>${agency.outcomes?.unknown ?? 0}</b><span>{{html:noExplicitFeedbackYet}}</span></div>
     </div>
-    <p class="muted small">共同打扰预算：今天 ${p.attention?.todayCount ?? 0}/${p.attention?.budget ?? S.boot?.config?.attention?.dailyBudget ?? 20} 次 · 最少间隔 ${p.attention?.minGapSeconds ?? 75} 秒。主动消息、伴随气泡和准备结果一起计数。</p>
-    <p class="muted small">${p.queue?.length ? `${p.queue.length} 项等待合适时机提醒。` : '没有等待提醒的事项。'}${p.attention?.focus ? ` 当前状态：${esc(({ deep: '专注中', meeting: '会议中', normal: '工作中', idle: '空闲', entertainment: '休闲' })[p.attention.focus] || p.attention.focus)}。` : ''}${p.attention?.observedAt ? ` 状态依据：${esc(agencyTime(p.attention.observedAt))}。` : ''}</p>
-    <label class="switch"><span>启用主动提醒</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
+    <p class="muted small">{{html:sharedInterruptionBudgetToday}} ${p.attention?.todayCount ?? 0}/${p.attention?.budget ?? S.boot?.config?.attention?.dailyBudget ?? 20} {{msg:timesMinimumGap}} ${p.attention?.minGapSeconds ?? 75} {{html:secondsRemindersCompanionBubblesAndReadyDrafts}}</p>
+    <p class="muted small">${p.queue?.length ? `${p.queue.length} {{msg:itemsWaitingForASuitableTime}}` : '{{msg:noRemindersWaiting}}'}${p.attention?.focus ? ` {{msg:currentActivity2}}${esc(FOCUS_LABEL[p.attention.focus] || p.attention.focus)}{{msg:period}}` : ''}${p.attention?.observedAt ? ` {{msg:evidence}}${esc(agencyTime(p.attention.observedAt))}{{msg:period}}` : ''}</p>
+    <label class="switch"><span>{{html:enableProactiveReminders}}</span><input type="checkbox" id="proEnabled" ${p.enabled ? 'checked' : ''} /></label>
     <div class="row">
-      <button class="btn small" data-action="pro-run">现在检查一次</button>
-      <span class="muted small">上次内容评估：${p.lastCheckAt ? ago(p.lastCheckAt) : '—'}｜上次开口：${p.lastAt ? ago(p.lastAt) : '从未'}</span>
+      <button class="btn small" data-action="pro-run">{{html:checkNow}}</button>
+      <span class="muted small">{{html:lastContentCheck}}{{msg:wordSpace}}${p.lastCheckAt ? ago(p.lastCheckAt) : '—'} {{msg:lastReminder}}{{msg:wordSpace}}${p.lastAt ? ago(p.lastAt) : '{{msg:never}}'}</span>
     </div>
     <div class="sect">
-      <h4>当前提醒时机（本机判断）</h4>
+      <h4>{{html:reminderTimingOnThisMac}}</h4>
       <dl class="kv">
-        <dt>提醒风格</dt><dd>${esc(ATTENTION_STYLE_LABELS[style] ?? ATTENTION_STYLE_LABELS.balanced)}</dd>
-        ${timing?.trigger ? `<dt>提醒类型</dt><dd>${esc(({ requested_goal: '你要求跟进的事项', suggestion: '一般建议', companion: '伴随气泡' })[timing.trigger] ?? '主动提醒')}</dd>` : ''}
-        <dt>当前判断</dt><dd>${esc(gateSummary)}</dd>
-        ${gate?.allow && gate.selection?.label ? `<dt>当前优先内容</dt><dd>${esc(gate.selection.label)}</dd>` : ''}
-        ${timing && timing.reason !== gate?.reason && PROACTIVE_REASON_LABELS[timing.reason] ? `<dt>时段依据</dt><dd>${esc(PROACTIVE_REASON_LABELS[timing.reason])}</dd>` : ''}
-        ${usualHours ? `<dt>常聊时段（Echo 本地时间）</dt><dd>${esc(usualHours)}</dd>` : ''}
-        ${timing?.reason === 'sparse_history' && Number.isInteger(timing.observedDays) ? `<dt>近两周已有记录的聊天日</dt><dd>${timing.observedDays} 天（截至昨天）</dd>` : ''}
-        ${timing?.reason === 'repeated_wrong_time' && Number.isInteger(timing.wrongTimeDays) ? `<dt>同类提醒时机不合适</dt><dd>近两周的 ${timing.wrongTimeDays} 天</dd>` : ''}
-        ${timing?.nextEligibleAt && timing.reason === gate?.reason ? `<dt>按此规则最早可提醒</dt><dd>${esc(agencyTime(timing.nextEligibleAt))}</dd>` : ''}
-        <dt>静默时段</dt><dd>${esc(p.quietHours?.start ?? '—')} → ${esc(p.quietHours?.end ?? '—')}</dd>
+        <dt>{{html:reminderStyle}}</dt><dd>${esc(ATTENTION_STYLE_LABELS[style] ?? ATTENTION_STYLE_LABELS.balanced)}</dd>
+        ${timing?.trigger ? `<dt>{{html:reminderType}}</dt><dd>${esc(({ requested_goal: '{{msg:followUpYouRequested}}', suggestion: '{{msg:generalSuggestion}}', companion: '{{msg:companionBubble}}' })[timing.trigger] ?? '{{msg:proactiveReminder}}')}</dd>` : ''}
+        <dt>{{html:currentDecision}}</dt><dd>${esc(gateSummary)}</dd>
+        ${gate?.allow && gate.selection?.label ? `<dt>{{html:highestPriorityNow}}</dt><dd>${esc(gate.selection.label)}</dd>` : ''}
+        ${timing && timing.reason !== gate?.reason && PROACTIVE_REASON_LABELS[timing.reason] ? `<dt>{{html:timingEvidence}}</dt><dd>${esc(PROACTIVE_REASON_LABELS[timing.reason])}</dd>` : ''}
+        ${usualHours ? `<dt>{{html:usualChatTimesEchoLocalTime}}</dt><dd>${esc(usualHours)}</dd>` : ''}
+        ${timing?.reason === 'sparse_history' && Number.isInteger(timing.observedDays) ? `<dt>{{html:daysWithChatHistoryInThePast}}</dt><dd>${timing.observedDays} {{html:daysThroughYesterday}}</dd>` : ''}
+        ${timing?.reason === 'repeated_wrong_time' && Number.isInteger(timing.wrongTimeDays) ? `<dt>{{html:inconvenientTimingForSimilarReminders}}</dt><dd>{{html:inThePastTwoWeeks}} ${timing.wrongTimeDays} {{html:days}}</dd>` : ''}
+        ${timing?.nextEligibleAt && timing.reason === gate?.reason ? `<dt>{{html:earliestReminderUnderThisRule}}</dt><dd>${esc(agencyTime(timing.nextEligibleAt))}</dd>` : ''}
+        <dt>{{html:quietHours}}</dt><dd>${esc(p.quietHours?.start ?? '—')} → ${esc(p.quietHours?.end ?? '—')}</dd>
       </dl>
       ${policyParametersHtml(timing?.policy)}
     </div>
     <div class="sect">
-      <h4>最近一次内容选择</h4>
+      <h4>{{html:latestContentSelection}}</h4>
       ${lastSelectionHtml(p.lastDecision)}
     </div>
     <div class="sect">
-      <h4>反馈学习（哪种开口方式你更受用）</h4>
-      <p class="muted small">「有用」和「没用」调整同类内容和话题的排序。「来得正好」和「时机不合适」调整同类提醒的打扰时机。时机不合适时也会立即暂停打扰 30 分钟。</p>
-      <div class="list">${kindRows || '<div class="muted small">还没有样本。</div>'}</div>
+      <h4>{{html:howYourFeedbackShapesReminders}}</h4>
+      <p class="muted small">{{html:usefulAndNotUsefulAdjustTheRanking}}</p>
+      <div class="list">${kindRows || '<div class="muted small">{{html:noSamplesYet}}</div>'}</div>
       <div class="row" style="margin-top:8px">
-        <button class="btn small" data-action="fb" data-signal="more" data-kind="global">多说一点</button>
-        <button class="btn small" data-action="fb" data-signal="less" data-kind="global">少说一点</button>
+        <button class="btn small" data-action="fb" data-signal="more" data-kind="global">{{html:moreOften}}</button>
+        <button class="btn small" data-action="fb" data-signal="less" data-kind="global">{{html:lessOften}}</button>
       </div>
     </div>
     <div class="sect">
-      <h4>候选话题（来自 Dream）</h4>
-      <div class="list">${nudgeHtml || '<div class="muted small">还没有候选话题。</div>'}</div>
+      <h4>{{html:topicsFromMemoryReview}}</h4>
+      <div class="list">${nudgeHtml || '<div class="muted small">{{html:noCandidateTopicsYet}}</div>'}</div>
     </div>
     <div class="sect">
-      <h4>最近的主动消息</h4>
+      <h4>{{html:recentProactiveMessages}}</h4>
       <div class="list">${
         (p.history ?? []).length
           ? [...p.history].reverse()
               .map(
                 (h) => `<div class="mem-item"><div class="txt">${esc(h.message)}
-                  <div class="muted small">${fmtTime(h.at)} · ${esc(KIND_LABEL[h.kind] ?? h.kind)} · ${esc(OUTCOME_LABEL[h.outcome?.signal ?? h.outcome] || '效果未知')}</div></div></div>`,
+                  <div class="muted small">${fmtTime(h.at)} · ${esc(KIND_LABEL[h.kind] ?? h.kind)} · ${esc(OUTCOME_LABEL[h.outcome?.signal ?? h.outcome] || '{{msg:outcomeUnknown}}')}</div></div></div>`,
               )
               .join('')
-          : '<div class="muted small">还没有主动发过消息。</div>'
+          : '<div class="muted small">{{html:noProactiveMessagesYet}}</div>'
       }</div>
     </div>`
   $('#proEnabled').addEventListener('change', async (e) => {
@@ -2875,7 +2960,7 @@ function renderProactiveOverview(p, dream, agency) {
     input.disabled = true
     try {
       await api('proactive', { method: 'PATCH', body: { enabled: input.checked } })
-      toast(input.checked ? '主动服务已开启' : '主动服务已暂停')
+      toast(input.checked ? '{{msg:proactiveRemindersAreOn}}' : '{{msg:proactiveRemindersArePaused}}')
       if (S.boot?.proactive) S.boot.proactive.enabled = input.checked
       COMMITMENTS.proactiveEnabled = input.checked
       syncCommitmentCards()
@@ -2891,12 +2976,12 @@ let settingsRequest = 0
 async function renderSettingsPanel() {
   const el = $('#panelSettings')
   const request = ++settingsRequest
-  el.innerHTML = '<p class="muted small" role="status">正在读取设置…</p>'
+  el.innerHTML = '<p class="muted small" role="status">{{html:loadingSettings}}</p>'
   let response
   try {
     response = await Promise.all([api('settings'), api('screen'), api('providers'), api('permissions').catch(() => null), api('companion').catch(() => null)])
   } catch (err) {
-    if (request === settingsRequest) el.innerHTML = `<p role="alert">未能读取设置：${esc(err.message)}</p><button class="btn small" data-action="open-panel" data-panel="settings">重新读取设置</button>`
+    if (request === settingsRequest) el.innerHTML = `<p role="alert">{{html:couldNotLoadSettings}}${esc(err.message)}</p><button class="btn small" data-action="open-panel" data-panel="settings">{{html:reloadSettings}}</button>`
     return
   }
   if (request !== settingsRequest) return
@@ -2906,185 +2991,186 @@ async function renderSettingsPanel() {
   S.screen = screen
   W.catalog = providers
   el.innerHTML = `
+    <div class="sect">${languageSelector()}</div>
     <div class="sect">
-      <h4>对话</h4>
-      <div class="field"><label>默认模型</label>
+      <h4>{{html:chat}}</h4>
+      <div class="field"><label>{{html:defaultModel2}}</label>
         <select id="setModel">${c.models.map((m) => `<option value="${esc(m.id)}" ${m.id === c.defaultModel ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select></div>
-      <div class="field"><label>温度 <b>${c.generation.temperature}</b></label>
+      <div class="field"><label>{{html:temperature}} <b>${c.generation.temperature}</b></label>
         <input type="range" id="setTemp" min="0" max="1.4" step="0.05" value="${c.generation.temperature}" /></div>
-      <div class="field"><label>系统提示词</label><textarea id="setSystem">${esc(c.systemPrompt)}</textarea></div>
+      <div class="field"><label>{{html:systemPrompt}}</label><textarea id="setSystem">${esc(c.systemPrompt)}</textarea></div>
     </div>
     <div class="sect">
-      <h4>联网搜索</h4>
-      <div class="switch"><span>允许联网搜索</span><input type="checkbox" id="setSearchOn" ${c.search.enabled ? 'checked' : ''} /></div>
-      <p class="muted small" style="margin:6px 0">勾选要用的提供方，按顺序依次尝试（前面的失败自动交给下一个，保存后生效）。密钥写进本机 echo.env，不进仓库。</p>
+      <h4>{{html:webSearch}}</h4>
+      <div class="switch"><span>{{html:allowWebSearch}}</span><input type="checkbox" id="setSearchOn" ${c.search.enabled ? 'checked' : ''} /></div>
+      <p class="muted small" style="margin:6px 0">{{html:selectSearchProvidersInTheOrderEcho}}</p>
       ${wizardChainRows()}
-      <div class="field" style="margin-top:10px"><label>搜索结果条数 <b>${c.search.maxResults}</b></label>
+      <div class="field" style="margin-top:10px"><label>{{html:searchResultsPerQuery}} <b>${c.search.maxResults}</b></label>
         <input type="range" id="setCount" min="3" max="10" step="1" value="${c.search.maxResults}" /></div>
-      <div class="switch"><span>自动读取首条结果正文</span><input type="checkbox" id="setReadPages" ${c.search.readPages ? 'checked' : ''} /></div>
-      <div class="field"><label>一轮回答最多调用工具次数 <b>${c.search.maxToolRounds}</b></label>
+      <div class="switch"><span>{{html:readTheFirstSearchResultAutomatically}}</span><input type="checkbox" id="setReadPages" ${c.search.readPages ? 'checked' : ''} /></div>
+      <div class="field"><label>{{html:maximumToolRoundsPerReply}} <b>${c.search.maxToolRounds}</b></label>
         <input type="range" id="setRounds" min="1" max="12" step="1" value="${c.search.maxToolRounds}" /></div>
-      <div class="row"><button class="btn small" data-action="search-test">测试搜索链路</button></div>
+      <div class="row"><button class="btn small" data-action="search-test">{{html:testSearchProviders}}</button></div>
     </div>
     <div class="sect">
-      <h4>引导与权限</h4>
+      <h4>{{html:setupAndPermissions}}</h4>
       <div class="row">
-        <button class="btn small" data-action="rerun-wizard">重新运行引导</button>
-        <span class="muted small">端点 ${c.upstreamConfigured ? '已配置' : '未配置'} · 记忆档 ${esc(c.memory.profile ?? 'standard')} · 搜索链 ${esc((c.search.order ?? []).join(' → ') || '不联网')}</span>
+        <button class="btn small" data-action="rerun-wizard">{{html:runSetupAgain}}</button>
+        <span class="muted small">{{html:endpoint}} ${c.upstreamConfigured ? '{{msg:configured}}' : '{{msg:notConfigured}}'} {{msg:memoryProfile2}} ${esc(providers.profiles[c.memory.profile ?? 'standard']?.label ?? c.memory.profile ?? '')} {{msg:searchProviders2}} ${esc((c.search.order ?? []).map(id => providers.search.find(p => p.id === id)?.label ?? id).join(' → ') || '{{msg:webSearchOff}}')}</span>
       </div>
       ${
         perms
           ? `<div class="chain" style="margin-top:8px">
-              <div class="chain-row"><span class="idx">${perms.configured ? '✓' : '!'}</span><span style="flex:1">模型端点${perms.configured ? '已配置' : '未配置'}</span></div>
-              <div class="chain-row"><span class="idx">${perms.runningUnderLaunchd ? '✓' : '!'}</span><span style="flex:1">${perms.runningUnderLaunchd ? 'launchd 常驻中（登录自启）' : '手动启动：跑 ./install.sh 让它常驻'}</span></div>
-              <div class="chain-row"><span class="idx">${perms.tools.swiftc ? '✓' : '!'}</span><span style="flex:1">swiftc ${perms.tools.swiftc ? '可用' : '缺失（xcode-select --install）'}</span></div>
-              <div class="chain-row"><span class="idx">${perms.authRequired ? '✓' : '·'}</span><span style="flex:1">${perms.authRequired ? '已开启口令验证' : '免登录'} · ${esc(perms.bind)} :${perms.port}</span></div>
-              <div class="chain-row"><span class="idx">·</span><span style="flex:1">数据目录：${esc(perms.dataDir)}</span></div>
+              <div class="chain-row"><span class="idx">${perms.configured ? '✓' : '!'}</span><span style="flex:1">{{html:modelEndpoint}}{{msg:wordSpace}}${perms.configured ? '{{msg:configured}}' : '{{msg:notConfigured}}'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.runningUnderLaunchd ? '✓' : '!'}</span><span style="flex:1">${perms.runningUnderLaunchd ? '{{msg:runningWithLaunchdAtLogin}}' : '{{msg:startedManuallyRunInstallShToStart}}'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.tools.swiftc ? '✓' : '!'}</span><span style="flex:1">swiftc ${perms.tools.swiftc ? '{{msg:available}}' : '{{msg:missingRunXcodeSelectInstall}}'}</span></div>
+              <div class="chain-row"><span class="idx">${perms.authRequired ? '✓' : '·'}</span><span style="flex:1">${perms.authRequired ? '{{msg:passwordProtectionIsOn}}' : '{{msg:noSignInRequired}}'} · ${esc(perms.bind)} :${perms.port}</span></div>
+              <div class="chain-row"><span class="idx">·</span><span style="flex:1">{{html:dataFolder}}${esc(perms.dataDir)}</span></div>
             </div>
-            <div class="row" style="margin-top:8px"><button class="btn small" data-action="perm-test">测试屏幕录制权限</button>
+            <div class="row" style="margin-top:8px"><button class="btn small" data-action="perm-test">{{html:testScreenRecordingPermission}}</button>
             <span class="muted small" id="permOut">${esc(perms.notes.screen)}</span></div>`
-          : '<div class="muted small">权限信息读取失败</div>'
+          : '<div class="muted small">{{html:couldNotLoadPermissions}}</div>'
       }
     </div>
     <div class="sect">
-      <h4>自我报告 <span class="muted small">· 来自本机 metrics.jsonl</span></h4>
-      <div id="diagBox" class="list"><div class="muted small">加载中…</div></div>
+      <h4>{{html:diagnostics}} <span class="muted small">{{html:fromLocalMetricsJsonl}}</span></h4>
+      <div id="diagBox" class="list"><div class="muted small">{{html:loading3}}</div></div>
       <div class="row" style="margin-top:8px">
-        <button class="btn small" data-action="load-diag">刷新自报告</button>
-        <button class="btn small" data-action="backup">导出备份（JSON）</button>
+        <button class="btn small" data-action="load-diag">{{html:refreshDiagnostics}}</button>
+        <button class="btn small" data-action="backup">{{html:exportJsonBackup}}</button>
       </div>
     </div>
     <div class="sect">
-      <h4>隐私兜底</h4>
-      <p class="muted small">「全部忘掉」会清空事实清单、工作记忆、实体图、核心记忆、相处方式、人物背景、目标和准备结果，并在遗忘日志里留一条记录。会话记录默认保留。</p>
+      <h4>{{html:privacyControls}}</h4>
+      <p class="muted small">{{html:forgetEverythingClearsFactsWorkingAndCore}}</p>
       <div class="row">
-        <button class="btn small" data-action="wipe" data-scope="memory">清空全部记忆</button>
-        <button class="btn small" data-action="wipe" data-scope="all">连会话一起清空</button>
+        <button class="btn small" data-action="wipe" data-scope="memory">{{html:clearAllMemory}}</button>
+        <button class="btn small" data-action="wipe" data-scope="all">{{html:alsoClearConversations}}</button>
       </div>
     </div>
     <div class="sect">
-      <h4>图片与多模态</h4>
-      <div class="switch"><span>允许发图（视觉理解）</span><input type="checkbox" id="setImageIn" ${c.media?.imageInput !== false ? 'checked' : ''} /></div>
-      <div class="switch"><span>允许出图（image_gen 工具）</span><input type="checkbox" id="setImageOut" ${c.media?.imageOutput !== false ? 'checked' : ''} /></div>
-      <div class="field"><label>出图模型</label>
+      <h4>{{html:imagesAndMultimodalInput}}</h4>
+      <div class="switch"><span>{{html:allowImageInput}}</span><input type="checkbox" id="setImageIn" ${c.media?.imageInput !== false ? 'checked' : ''} /></div>
+      <div class="switch"><span>{{html:allowImageGeneration}}</span><input type="checkbox" id="setImageOut" ${c.media?.imageOutput !== false ? 'checked' : ''} /></div>
+      <div class="field"><label>{{html:imageModel}}</label>
         <select id="setImageModel">${(c.imageModels ?? [])
           .map((m) => `<option value="${esc(m.id)}" ${m.id === c.defaultImageModel ? 'selected' : ''}>${esc(m.label)}${m.note ? ` · ${esc(m.note)}` : ''}</option>`)
           .join('')}</select></div>
-      <div class="field"><label>发图前压缩最长边 <b>${c.media?.maxEdge ?? 1536}</b> px</label>
+      <div class="field"><label>{{html:maximumImageEdgeBeforeUpload}} <b>${c.media?.maxEdge ?? 1536}</b> px</label>
         <input type="range" id="setMaxEdge" min="768" max="2048" step="128" value="${c.media?.maxEdge ?? 1536}" /></div>
-      <p class="muted small">图片输入需要支持视觉的聊天模型。画图使用上方选择的出图模型，具体能力与费用取决于你的服务商。</p>
+      <p class="muted small">{{html:imageInputRequiresAChatModelWith}}</p>
     </div>
     <div class="sect">
-      <h4>屏幕感知</h4>
-      <div class="switch"><span>开启屏幕感知（状态栏 App 采集）</span><input type="checkbox" id="setScreenOn" ${c.screen?.enabled ? 'checked' : ''} /></div>
-      <div class="field"><label>采集间隔 <b>${c.screen?.intervalMinutes ?? 5}</b> 分钟</label>
+      <h4>{{html:screenAwareness}}</h4>
+      <div class="switch"><span>{{html:enableCaptureFromTheMenuBar}}</span><input type="checkbox" id="setScreenOn" ${c.screen?.enabled ? 'checked' : ''} /></div>
+      <div class="field"><label>{{html:captureInterval}} <b>${c.screen?.intervalMinutes ?? 5}</b> {{html:minutes}}</label>
         <input type="range" id="setScreenGap" min="1" max="30" step="1" value="${c.screen?.intervalMinutes ?? 5}" /></div>
-      <div class="field"><label>分析方式</label>
+      <div class="field"><label>{{html:analysisMethod}}</label>
         <select id="setScreenMode">
-          <option value="ocr" ${c.screen?.mode !== 'image' ? 'selected' : ''}>本地 OCR 文字（推荐：原始截图不出本机）</option>
-          <option value="image" ${c.screen?.mode === 'image' ? 'selected' : ''}>连截图一起发给模型（更准，图片会离开本机）</option>
+          <option value="ocr" ${c.screen?.mode !== 'image' ? 'selected' : ''}>{{html:onDeviceOcrRecommendedScreenshotsStayOn}}</option>
+          <option value="image" ${c.screen?.mode === 'image' ? 'selected' : ''}>{{html:sendScreenshotsToTheModel}}</option>
         </select></div>
-      <div class="field"><label>屏幕会话摘要保留天数 <b>${c.screen?.retentionDays ?? 7}</b></label>
+      <div class="field"><label>{{html:daysToKeepScreenSessionSummaries}} <b>${c.screen?.retentionDays ?? 7}</b></label>
         <input type="range" id="setScreenDays" min="0" max="14" step="1" value="${c.screen?.retentionDays ?? 7}" /></div>
-      <div class="field"><label>屏蔽应用（命中完全不采集，逗号分隔；默认空）</label>
-        <input type="text" id="setBlocklist" placeholder="例如：1Password、Alipay、Terminal" value="${esc((c.screen?.blocklist ?? []).join('、'))}" /></div>
-      <div class="field"><label>屏蔽关键词正则（命中跳过，逗号分隔；默认空）</label>
-        <input type="text" id="setExcludes" placeholder="例如：password、身份证" value="${esc((c.screen?.excludeTitlePatterns ?? []).join(','))}" /></div>
-      <p class="muted small">锁屏、键鼠空闲不会被采集。默认只把本地 OCR 出的文字发给模型；原始截图分析完即删，绝不进归档。模型若识别出敏感内容，只记"在处理敏感信息"，不写任何事实进记忆。</p>
+      <div class="field"><label>{{html:excludedAppsCommaSeparatedEmptyByDefault}}</label>
+        <input type="text" id="setBlocklist" placeholder="{{html:forExample1passwordAlipayTerminal}}" value="${esc((c.screen?.blocklist ?? []).join('{{msg:listSeparator}}'))}" /></div>
+      <div class="field"><label>{{html:excludedTextPatternsCommaSeparatedRegularExpressions}}</label>
+        <input type="text" id="setExcludes" placeholder="{{html:forExamplePasswordPassportNumber}}" value="${esc((c.screen?.excludeTitlePatterns ?? []).join(','))}" /></div>
+      <p class="muted small">{{html:echoSkipsLockedAndIdleScreensBy}}</p>
     </div>
     <div class="sect">
-      <h4>伴随模式 <span class="muted small">· 跟着你一起看，用气泡偶尔说一句</span></h4>
-      <div class="switch"><span>开启伴随模式（会大幅提高看屏幕的频率）</span><input type="checkbox" id="setCompOn" ${c.companion?.enabled ? 'checked' : ''} /></div>
-      <p class="muted small">开启后状态栏会每 ${c.companion?.intervalSeconds ?? 20} 秒看一眼（本地 OCR，截图即删），在右上角用气泡冒出来：
-        聊天时帮你判断语气、给可复制的回复；看片时当个一起看的同伴；办公/写代码时给一条具体建议。点气泡进入小对话窗细聊。
-        屏幕没变化时它不会调模型，气泡有预算与间隔，连续被你忽略会自动安静一会儿。</p>
-      <div class="field"><label>看屏幕间隔 <b>${c.companion?.intervalSeconds ?? 20}</b> 秒</label>
+      <h4>{{html:companionMode}} <span class="muted small">{{html:occasionalSuggestionsAboutYourCurrentScreen}}</span></h4>
+      <div class="switch"><span>{{html:enableCompanionModeMoreFrequentScreenChecks}}</span><input type="checkbox" id="setCompOn" ${c.companion?.enabled ? 'checked' : ''} /></div>
+      <p class="muted small">{{html:theMenuBarAppChecksTheScreen}} ${c.companion?.intervalSeconds ?? 20} {{html:secondsUsingLocalOcrAndDeletesEach}}
+        {{html:echoCanHelpWithTheToneOf}}
+        {{html:echoSkipsUnchangedScreensBubblesRespectHourly}}</p>
+      <div class="field"><label>{{html:screenCheckInterval}} <b>${c.companion?.intervalSeconds ?? 20}</b> {{html:seconds}}</label>
         <input type="range" id="setCompInterval" min="5" max="120" step="5" value="${c.companion?.intervalSeconds ?? 20}" /></div>
-      <div class="field"><label>每小时气泡上限 <b>${c.companion?.hourlyBudget ?? 15}</b></label>
+      <div class="field"><label>{{html:maximumBubblesPerHour}} <b>${c.companion?.hourlyBudget ?? 15}</b></label>
         <input type="range" id="setCompBudget" min="1" max="40" step="1" value="${c.companion?.hourlyBudget ?? 15}" /></div>
-      <div class="field"><label>气泡最小间隔 <b>${c.companion?.minGapSeconds ?? 75}</b> 秒</label>
+      <div class="field"><label>{{html:minimumGapBetweenBubbles}} <b>${c.companion?.minGapSeconds ?? 75}</b> {{html:seconds}}</label>
         <input type="range" id="setCompGap" min="20" max="600" step="5" value="${c.companion?.minGapSeconds ?? 75}" /></div>
-      <div class="field"><label>只在哪些场景开口（不勾就完全不冒泡）</label>
+      <div class="field"><label>{{html:showSuggestionsInTheseContextsClearAll}}</label>
         <div class="row">${(S.companion?.scenarios ? Object.entries(S.companion.scenarios) : []).map(([id, label]) =>
-          `<label class="pill" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-cscenario="${id}" ${(S.companion?.enabledScenarios ?? []).includes(id) ? 'checked' : ''} />${esc(label)}</label>`).join('') || '<span class="muted small">（读取中…）</span>'}</div></div>
-      <div class="row"><button class="btn small" data-action="comp-pause">${S.companion?.paused ? '恢复伴随' : '暂停 30 分钟'}</button>
-        <span class="muted small">今日看过 ${S.companion?.framesToday ?? 0} 帧 · 本小时气泡 ${S.companion?.hourCount ?? 0}/${c.companion?.hourlyBudget ?? 15} · 连续被忽略 ${S.companion?.dismissStreak ?? 0} 次</span></div>
+          `<label class="pill" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-cscenario="${id}" ${(S.companion?.enabledScenarios ?? []).includes(id) ? 'checked' : ''} />${esc(label)}</label>`).join('') || '<span class="muted small">{{html:loading2}}</span>'}</div></div>
+      <div class="row"><button class="btn small" data-action="comp-pause">${S.companion?.paused ? '{{msg:resumeCompanion}}' : '{{msg:pauseFor30Minutes}}'}</button>
+        <span class="muted small">{{html:framesSeenToday}} ${S.companion?.framesToday ?? 0} {{msg:bubblesThisHour}} ${S.companion?.hourCount ?? 0}/${c.companion?.hourlyBudget ?? 15} {{msg:consecutiveDismissals}} ${S.companion?.dismissStreak ?? 0} {{html:times}}</span></div>
       <div class="list" style="margin-top:8px">${(S.companion?.recent ?? []).slice(0, 5).map((b) =>
         `<div class="mem-item"><div class="txt">${esc(b.bubble)}
-          <div class="muted small">${esc(b.scenario)} · ${esc(b.topic)} · ${String(b.ts).slice(11, 16)} · ${esc(b.status)}${b.why && !b.selection ? ` · ${esc(b.why.slice(0, 60))}` : ''}</div>${selectionDetails(b.selection)}</div></div>`).join('')}</div>
+          <div class="muted small">${esc(S.companion.scenarios?.[b.scenario] ?? b.scenario)} · ${esc(b.topic)} · ${String(b.ts).slice(11, 16)} · ${esc(BUBBLE_STATUS[b.status] ?? b.status)}${b.why && !b.selection ? ` · ${esc(b.why.slice(0, 60))}` : ''}</div>${selectionDetails(b.selection)}</div></div>`).join('')}</div>
     </div>
     <div class="sect">
-      <h4>磁盘预算</h4>
-      <div class="muted small">当前：截图 ${(S.screen?.storage?.screenshots?.mb ?? 0)}MB · 生成图片 ${(S.screen?.storage?.uploads?.mb ?? 0)}MB · 文本数据 ${(S.screen?.storage?.texts?.kb ?? 0)}KB</div>
-      <div class="field"><label>截图目录上限 <b>${c.storage?.screenImageBudgetMB ?? 200}</b> MB</label>
+      <h4>{{html:storageLimits}}</h4>
+      <div class="muted small">{{html:currentUsageScreenshots}} ${(S.screen?.storage?.screenshots?.mb ?? 0)}{{msg:mbGeneratedImages}} ${(S.screen?.storage?.uploads?.mb ?? 0)}{{msg:mbTextRecords}} ${(S.screen?.storage?.texts?.kb ?? 0)}KB</div>
+      <div class="field"><label>{{html:screenshotStorageLimit}} <b>${c.storage?.screenImageBudgetMB ?? 200}</b> MB</label>
         <input type="range" id="setShotBudget" min="20" max="1000" step="20" value="${c.storage?.screenImageBudgetMB ?? 200}" /></div>
-      <div class="field"><label>生成图片上限 <b>${c.storage?.uploadsBudgetMB ?? 300}</b> MB</label>
+      <div class="field"><label>{{html:generatedImageStorageLimit}} <b>${c.storage?.uploadsBudgetMB ?? 300}</b> MB</label>
         <input type="range" id="setUploadBudget" min="50" max="2000" step="50" value="${c.storage?.uploadsBudgetMB ?? 300}" /></div>
-      <div class="row"><button class="btn small" data-action="storage-prune">立即清理</button>
-        <span class="muted small">超过 80% 预算会自动从最旧的删；最近对话引用到的图片永不删。</span></div>
+      <div class="row"><button class="btn small" data-action="storage-prune">{{html:cleanUpNow}}</button>
+        <span class="muted small">{{html:at80OfAStorageLimitEcho}}</span></div>
     </div>
     <div class="sect">
-      <h4>记忆</h4>
-      <div class="field"><label>记忆档位（选档会一次性写实下面的具体旋钮）</label>
+      <h4>{{html:memory}}</h4>
+      <div class="field"><label>{{html:memoryProfileSelectingOneAppliesItsSettings}}</label>
         <select id="setProfile">${Object.entries(providers.profiles)
           .map(([id, p]) => `<option value="${id}" ${(c.memory.profile ?? 'standard') === id ? 'selected' : ''}>${esc(p.label)}</option>`)
           .join('')}</select></div>
-      <div class="switch"><span>启用长期记忆</span><input type="checkbox" id="setMemOn" ${c.memory.enabled ? 'checked' : ''} /></div>
-      <div class="switch"><span>对话后自动抽取事实</span><input type="checkbox" id="setExtract" ${c.memory.extract ? 'checked' : ''} /></div>
-      <div class="switch"><span>把记忆注入提示词</span><input type="checkbox" id="setInject" ${c.memory.inject ? 'checked' : ''} /></div>
+      <div class="switch"><span>{{html:enableLongTermMemory}}</span><input type="checkbox" id="setMemOn" ${c.memory.enabled ? 'checked' : ''} /></div>
+      <div class="switch"><span>{{html:extractFactsAfterAConversation}}</span><input type="checkbox" id="setExtract" ${c.memory.extract ? 'checked' : ''} /></div>
+      <div class="switch"><span>{{html:includeMemoryInModelPrompts}}</span><input type="checkbox" id="setInject" ${c.memory.inject ? 'checked' : ''} /></div>
     </div>
     <div class="sect">
-      <h4>Dream 与主动服务</h4>
-      <div class="switch"><span>定期 Dream 提炼</span><input type="checkbox" id="setDreamOn" ${c.dream.enabled ? 'checked' : ''} /></div>
-      <div class="field"><label>提炼间隔（小时）<b>${c.dream.intervalHours}</b></label>
+      <h4>{{html:memoryReviewAndProactiveAssistance}}</h4>
+      <div class="switch"><span>{{html:reviewMemoryPeriodically}}</span><input type="checkbox" id="setDreamOn" ${c.dream.enabled ? 'checked' : ''} /></div>
+      <div class="field"><label>{{html:reviewIntervalInHours}}<b>${c.dream.intervalHours}</b></label>
         <input type="range" id="setDreamGap" min="1" max="24" step="1" value="${c.dream.intervalHours}" /></div>
-      <div class="field"><label>每日主动消息上限 <b>${c.proactive.dailyBudget}</b></label>
+      <div class="field"><label>{{html:maximumProactiveMessagesPerDay}} <b>${c.proactive.dailyBudget}</b></label>
         <input type="range" id="setBudget" min="0" max="12" step="1" value="${c.proactive.dailyBudget}" /></div>
-      <div class="field"><label>最少间隔（分钟）<b>${c.proactive.minGapMinutes}</b></label>
+      <div class="field"><label>{{html:minimumIntervalInMinutes}}<b>${c.proactive.minGapMinutes}</b></label>
         <input type="range" id="setMinGap" min="10" max="240" step="5" value="${c.proactive.minGapMinutes}" /></div>
-      <div class="field"><label for="setThresh">内容筛选强度 <b>${c.proactive.confidenceThreshold}</b></label>
+      <div class="field"><label for="setThresh">{{html:contentSelectionThreshold}} <b>${c.proactive.confidenceThreshold}</b></label>
         <input type="range" id="setThresh" min="0.3" max="0.95" step="0.01" value="${c.proactive.confidenceThreshold}" /></div>
-      <div class="field"><label>静默时段（本地时间）</label>
+      <div class="field"><label>{{html:quietHoursInLocalTime}}</label>
         <div class="row"><input type="text" id="setQuietStart" value="${esc(c.proactive.quietHours.start)}" style="width:110px" />
         <span class="muted">→</span><input type="text" id="setQuietEnd" value="${esc(c.proactive.quietHours.end)}" style="width:110px" /></div></div>
-      <div class="switch"><span>主动消息弹 macOS 通知</span><input type="checkbox" id="setNotify" ${c.proactive.notify ? 'checked' : ''} /></div>
+      <div class="switch"><span>{{html:showMacosNotificationsForProactiveMessages}}</span><input type="checkbox" id="setNotify" ${c.proactive.notify ? 'checked' : ''} /></div>
     </div>
     <div class="sect">
-      <h4>提醒时机与共同打扰预算</h4>
-      <div class="field"><label for="setAttentionStyle">提醒风格</label>
+      <h4>{{html:reminderTimingAndSharedInterruptionBudget}}</h4>
+      <div class="field"><label for="setAttentionStyle">{{html:reminderStyle}}</label>
         <select id="setAttentionStyle" aria-describedby="attentionStyleHelp">${Object.entries(ATTENTION_STYLE_LABELS).map(([value, label]) =>
           `<option value="${value}" ${value === (c.attention?.style ?? 'balanced') ? 'selected' : ''}>${label} · ${ATTENTION_STYLE_HINTS[value]}</option>`).join('')}</select></div>
-      <p class="muted small" id="attentionStyleHelp">预设提供起始参数。Echo 会根据聊天时段和明确反馈调整等待时间、筛选门槛与话题排序。静默时段和次数上限始终生效。</p>
-      <p class="muted small">主动消息、伴随气泡和准备结果共用此预算，也保留各自的频率上限。安静准备不占打扰次数。</p>
-      <div class="field"><label for="setAttentionBudget">每天合计最多打扰几次</label><input id="setAttentionBudget" type="number" min="0" max="100" step="1" required value="${c.attention?.dailyBudget ?? 20}" /></div>
-      <div class="field"><label for="setAttentionGap">不同渠道之间至少间隔（秒）</label><input id="setAttentionGap" type="number" min="0" max="3600" step="5" required value="${c.attention?.minGapSeconds ?? 75}" /></div>
+      <p class="muted small" id="attentionStyleHelp">{{html:aPresetSetsTheStartingValuesEcho}}</p>
+      <p class="muted small">{{html:remindersCompanionBubblesAndDeliveredDraftsShare}}</p>
+      <div class="field"><label for="setAttentionBudget">{{html:maximumInterruptionsPerDay}}</label><input id="setAttentionBudget" type="number" min="0" max="100" step="1" required value="${c.attention?.dailyBudget ?? 20}" /></div>
+      <div class="field"><label for="setAttentionGap">{{html:minimumSecondsBetweenChannels}}</label><input id="setAttentionGap" type="number" min="0" max="3600" step="5" required value="${c.attention?.minGapSeconds ?? 75}" /></div>
     </div>
     <div class="sect">
-      <h4>MCP 服务</h4>
+      <h4>{{html:mcpServers}}</h4>
       <div class="list">${
         mcp.length
-          ? mcp.map((s) => `<div class="mem-item"><div class="txt">${esc(s.name)}<div class="muted small">${s.state} · ${s.tools} 个工具${s.error ? ` · ${esc(s.error)}` : ''}</div></div></div>`).join('')
-          : '<div class="muted small">没有配置 MCP。在 config.json 的 mcpServers 里加 stdio 或 http 服务后点重新加载。</div>'
+          ? mcp.map((s) => `<div class="mem-item"><div class="txt">${esc(s.name)}<div class="muted small">${esc(MCP_STATE[s.state] ?? s.state)} · ${s.tools} {{msg:tools}}${s.error ? ` · ${esc(s.error)}` : ''}</div></div></div>`).join('')
+          : '<div class="muted small">{{html:noMcpServersConfiguredAddAStdio}}</div>'
       }</div>
-      <div class="row" style="margin-top:8px"><button class="btn small" data-action="mcp-reload">重新加载 MCP</button>
-      <button class="btn small" data-action="search-test">测试搜索链路</button></div>
+      <div class="row" style="margin-top:8px"><button class="btn small" data-action="mcp-reload">{{html:reloadMcpServers}}</button>
+      <button class="btn small" data-action="search-test">{{html:testSearchProviders}}</button></div>
     </div>
     <div class="sect">
-      <h4>访问控制</h4>
-      <div class="switch"><span>要求访问口令${c.listener?.bind === 'all' ? '（当前监听局域网）' : ''}</span>
+      <h4>{{html:accessControl}}</h4>
+      <div class="switch"><span>{{html:requireAPassword}}{{msg:wordSpace}}${c.listener?.bind === 'all' ? '{{msg:availableOnTheLocalNetwork}}' : ''}</span>
         <input type="checkbox" id="setAuthRequired" ${c.auth?.required ? 'checked' : ''} /></div>
       <div class="row" style="margin-top:6px">
-        <button class="btn small" data-action="set-passwd">${c.auth?.passwordSet ? '修改口令' : '设置口令'}</button>
-        <span class="muted small">${c.auth?.required ? '当前：需要登录' : '当前：免登录'}</span>
+        <button class="btn small" data-action="set-passwd">${c.auth?.passwordSet ? '{{msg:changePassword}}' : '{{msg:setPassword}}'}</button>
+        <span class="muted small">${c.auth?.required ? '{{msg:signInRequired}}' : '{{msg:signInOptional}}'}</span>
       </div>
     </div>
     <div class="sect">
-      <h4>服务</h4>
-      <div class="kv"><dt>监听</dt><dd>${c.listener ? `${c.listener.bind === 'all' ? '局域网' : '仅本机'} · ${esc(c.listener.address)}:${esc(c.listener.port)}` : '未取得监听信息'}</dd>
-      ${c.listener?.lanUrl ? `<dt>同一网络访问</dt><dd>${esc(c.listener.lanUrl)}</dd>` : ''}
-      <dt>数据目录</dt><dd style="text-align:left;font:11px var(--mono)">data/</dd></div>
-      <div class="row" style="margin-top:8px"><button class="btn small" data-action="change-passwd">改访问口令</button></div>
-      <div class="row"><button class="btn small primary" data-action="save-settings">保存设置</button><span id="setSaved" class="muted small"></span></div>
+      <h4>{{html:service}}</h4>
+      <div class="kv"><dt>{{html:listeningAddress}}</dt><dd>${c.listener ? `${c.listener.bind === 'all' ? '{{msg:localNetwork}}' : '{{msg:thisMacOnly}}'} · ${esc(c.listener.address)}:${esc(c.listener.port)}` : '{{msg:listenerInformationUnavailable}}'}</dd>
+      ${c.listener?.lanUrl ? `<dt>{{html:accessOnTheSameNetwork}}</dt><dd>${esc(c.listener.lanUrl)}</dd>` : ''}
+      <dt>{{html:dataFolder2}}</dt><dd style="text-align:left;font:11px var(--mono)">data/</dd></div>
+      <div class="row" style="margin-top:8px"><button class="btn small" data-action="change-passwd">{{html:changeAccessPassword}}</button></div>
+      <div class="row"><button class="btn small primary" data-action="save-settings">{{html:saveSettings}}</button><span id="setSaved" class="muted small"></span></div>
     </div>`
 }
 
@@ -3144,15 +3230,15 @@ async function saveSettings() {
     if (i.value.trim()) env[i.dataset.pkey] = i.value.trim()
   })
   await api('settings', { method: 'PATCH', body: { ...body, env } })
-  $('#setSaved').textContent = '已保存，立即生效'
-  toast('设置已保存')
+  $('#setSaved').textContent = '{{msg:savedAndApplied}}'
+  toast('{{msg:settingsSaved}}')
   await boot({ keep: true })
 }
 
 /* ------------------------------- conversations ------------------------------ */
 
 async function selectConv(id) {
-  if (S.stream || S.preparing) return toast('正在生成，先停止', true)
+  if (S.stream || S.preparing) return toast('{{msg:stopTheCurrentReplyFirst}}', true)
   const request = Symbol()
   S.selecting = request
   updateComposer()
@@ -3173,7 +3259,7 @@ async function selectConv(id) {
   S.conv = conv
   const meta = S.convs.find((c) => c.id === id)
   if (meta) meta.unread = 0
-  $('#convTitle').textContent = S.conv.title ?? '对话'
+  $('#convTitle').textContent = S.conv.title ?? '{{msg:chat}}'
   const preferredModel = S.conv.model || prefs.model
   $('#modelSelect').value = S.boot.config.models?.some((m) => m.id === preferredModel) ? preferredModel : S.boot.config.defaultModel
   $('#searchSelect').value = S.conv.searchMode ?? prefs.searchMode
@@ -3192,8 +3278,8 @@ async function selectConv(id) {
 }
 
 async function newChat() {
-  if (S.stream || S.selecting || S.preparing) return toast('请先等待当前操作完成', true)
-  const conv = await api('conversations', { method: 'POST', body: { title: '新对话' } })
+  if (S.stream || S.selecting || S.preparing) return toast('{{msg:waitForTheCurrentOperationToFinish}}', true)
+  const conv = await api('conversations', { method: 'POST', body: {} })
   await refreshList()
   await selectConv(conv.id)
   $('#input').focus()
@@ -3203,6 +3289,17 @@ async function newChat() {
 
 async function boot({ keep = false } = {}) {
   const b = await api('bootstrap')
+  const pending = globalThis.sessionStorage?.getItem('echo.pendingLanguage')
+  if (supportedLanguage(pending)) {
+    if (b.config.language !== pending) await api('settings', { method: 'PATCH', body: { config: { language: pending } } })
+    sessionStorage.removeItem('echo.pendingLanguage')
+    localStorage.setItem('echo.language', pending)
+    b.config.language = pending
+  }
+  if (supportedLanguage(b.config.language) && b.config.language !== UI_LANGUAGE) {
+    navigateLanguage(b.config.language)
+    return
+  }
   S.boot = b
   S.convs = b.conversations
   $('#gate').hidden = true
@@ -3225,9 +3322,13 @@ async function boot({ keep = false } = {}) {
   if (target) await selectConv(target)
   await maybeShowReturnBrief()
   startPolling()
-  // 没配置端点/密钥时，直接把引导推上来（可随时"以后再配"）
+  // On first use, open setup until the user connects an endpoint or skips it.
   if (b.config.onboarding?.needed && !localStorage.getItem('echo.onboardSkipped')) {
-    openWizard().catch(() => {})
+    await openWizard().catch(() => {})
+  } else if (globalThis.sessionStorage?.getItem('echo.reopenLanguageSettings')) {
+    sessionStorage.removeItem('echo.reopenLanguageSettings')
+    await openPanel('settings')
+    $('#panelSettings [data-language]')?.focus()
   }
 }
 
@@ -3255,6 +3356,10 @@ function startPolling() {
         conv = await api(`conversations/${conversationId}`)
         if (S.stream || S.selecting || S.preparing || $('.edit-box') || S.current !== conversationId) return
       }
+      if (supportedLanguage(b.config?.language) && b.config.language !== UI_LANGUAGE && !transientWork() && !unsavedInputs()) {
+        navigateLanguage(b.config.language)
+        return
+      }
       S.boot = b
       updateWorkspaceBadge()
       updateComposer()
@@ -3263,7 +3368,7 @@ function startPolling() {
       if (conv) {
         S.conv = conv
         renderThread({ resetScroll: false })
-        if (S.current === 'main') toast('Echo 主动发了一条消息')
+        if (S.current === 'main') toast('{{msg:echoSentAProactiveMessage}}')
       }
     } catch {}
   }, 20000)
@@ -3275,7 +3380,7 @@ function autogrow() {
   t.style.height = `${Math.min(t.scrollHeight, innerHeight * 0.4)}px`
   const model = $('#modelSelect').selectedOptions[0]?.textContent ?? ''
   const mode = $('#searchSelect').value
-  $('#ctxChip').textContent = `${model} · ${mode === 'off' ? '不联网' : mode === 'on' ? '强制搜索' : '按需搜索'}${prefs.thinking ? ' · 思考开' : ''}`
+  $('#ctxChip').textContent = `${model} · ${mode === 'off' ? '{{msg:webSearchOff}}' : mode === 'on' ? '{{msg:alwaysSearch}}' : '{{msg:searchWhenNeeded}}'}${prefs.thinking ? ' {{msg:thinkingOn}}' : ''}`
   updateComposer()
 }
 
@@ -3298,7 +3403,7 @@ async function copyText(text) {
   document.body.append(area)
   area.select()
   try {
-    if (!document.execCommand('copy')) throw new Error('复制失败，请选中文字后复制')
+    if (!document.execCommand('copy')) throw new Error('{{msg:copyFailedSelectTheTextAndCopy}}')
   } finally {
     area.remove()
     previous?.focus()
@@ -3367,7 +3472,7 @@ async function handleAction(e) {
   if (act === 'adopt-loop') {
     await openPanel('proactive')
     const loop = COMMITMENTS.loops.find((item) => item.id === id)
-    if (!loop) return toast('这条候选事项已更新，请查看最新列表', true)
+    if (!loop) return toast('{{msg:thisSuggestionHasChangedCheckTheLatest}}', true)
     return showCommitmentEditor({ title: loop.topic, deadline: loop.due, watch: { type: loop.due ? 'deadline' : 'manual' } }, { candidateLoopId: loop.id, quote: loop.why })
   }
   if (act === 'goal-edit' || act === 'goal-complete') {
@@ -3380,13 +3485,13 @@ async function handleAction(e) {
     try {
       if (act === 'goal-prepare') {
         await api(`commitments/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: {} })
-        toast('已加入准备队列，结果会保留在这个目标下')
+        toast('{{msg:preparationQueuedTheResultWillBeSaved}}')
       } else if (act === 'goal-adopt') {
         await api(`commitments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { adopt: true } })
-        toast('已选择继续跟进，不再受临时七天期限限制')
+        toast('{{msg:followUpAdoptedTheSevenDayExpiry}}')
       } else {
         await api(`commitments/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status: btn.dataset.status } })
-        toast(`目标${GOAL_STATUS[btn.dataset.status] === '进行中' ? '已恢复' : GOAL_STATUS[btn.dataset.status]}`)
+        toast(`{{msg:goal}}{{msg:wordSpace}}${btn.dataset.status === 'active' ? '{{msg:resumed}}' : GOAL_STATUS[btn.dataset.status]}`)
       }
       await renderProactivePanel({ force: true })
     } finally { btn.disabled = false; restoreGoalActionFocus(btn) }
@@ -3401,8 +3506,8 @@ async function handleAction(e) {
     btn.disabled = true
     try {
       const feedback = await api('feedback', { method: 'POST', body: { commitmentId: id, preparationId: btn.dataset.preparationId, signal: btn.dataset.signal } })
-      if (feedback.ignored) throw new Error('原准备结果已不可用，请刷新后重试')
-      toast(btn.dataset.signal === 'wrong_time' && Date.parse(feedback.pausedUntil) > Date.now() ? `已记录时机反馈，暂停至 ${agencyTime(feedback.pausedUntil)}` : `已记录：${OUTCOME_LABEL[btn.dataset.signal]}`)
+      if (feedback.ignored) throw new Error('{{msg:theOriginalDraftIsUnavailableRefreshAnd}}')
+      toast(btn.dataset.signal === 'wrong_time' && Date.parse(feedback.pausedUntil) > Date.now() ? `{{msg:timingFeedbackSavedPausedUntil}} ${agencyTime(feedback.pausedUntil)}` : `{{msg:recorded2}}${OUTCOME_LABEL[btn.dataset.signal]}`)
       await renderProactivePanel({ force: true })
     } finally { btn.disabled = false; restoreGoalActionFocus(btn) }
     return
@@ -3420,11 +3525,11 @@ async function handleAction(e) {
     } else if (card) {
       card.focus()
       card.scrollIntoView({ block: 'nearest' })
-    } else toast('这份结果已不可用，请查看当前目标列表', true)
+    } else toast('{{msg:thisResultIsUnavailableCheckTheCurrent}}', true)
     return
   }
   if (act === 'view-source-message') {
-    if (S.stream || S.preparing) return toast('请先等待当前回复完成', true)
+    if (S.stream || S.preparing) return toast('{{msg:waitForTheCurrentReplyToFinish}}', true)
     closeDrawer()
     await selectConv(btn.dataset.conversationId)
     const message = $$('#threadInner .msg').find((node) => node.dataset.id === btn.dataset.messageId)
@@ -3432,7 +3537,7 @@ async function handleAction(e) {
       message.tabIndex = -1
       message.focus()
       message.scrollIntoView({ block: 'center' })
-    } else toast('原消息已不存在，准备结果仍保留了当时的摘录', true)
+    } else toast('{{msg:theOriginalMessageIsUnavailableItsExcerpt}}', true)
     return
   }
   if (act === 'jump-latest') {
@@ -3443,28 +3548,28 @@ async function handleAction(e) {
   if (act === 'copy-code') {
     const pre = btn.closest('pre')
     await copyText($('code', pre).textContent)
-    toast('代码已复制')
+    toast('{{msg:codeCopied}}')
     return
   }
   if (act === 'copy-msg') {
     const msg = btn.closest('.msg')
     const text = (msg.classList.contains('user') ? $('.body', msg) : $('.content', msg))?.innerText ?? msg.innerText
     await copyText(text)
-    toast('已复制')
+    toast('{{msg:copied}}')
     return
   }
   if (act === 'edit-user') {
-    if (S.stream || S.preparing) return toast('正在生成，先停止', true)
+    if (S.stream || S.preparing) return toast('{{msg:stopTheCurrentReplyFirst}}', true)
     const node = btn.closest('.msg')
-    if ($('.gallery', node)) return toast('含图片的消息请重新发送，以保留原图', true)
+    if ($('.gallery', node)) return toast('{{msg:resendTheMessageWithItsImagesTo}}', true)
     const body = node.querySelector('.body')
     const current = body.innerText
     node.originalBody = body.outerHTML
     const messages = $$('#threadInner .msg')
     const following = Math.max(0, messages.length - messages.indexOf(node) - 1)
-    body.outerHTML = `<div class="body edit-box"><textarea aria-label="编辑消息">${esc(current)}</textarea>
-      <p class="edit-hint">保存后将从这里重新开始${following ? `，替换后面的 ${following} 条消息` : ''}。</p>
-      <div class="row"><button class="btn small" data-action="edit-cancel">取消</button><button class="btn small primary" data-action="edit-save">保存并重发</button></div></div>`
+    body.outerHTML = `<div class="body edit-box"><textarea aria-label="{{html:editMessage}}">${esc(current)}</textarea>
+      <p class="edit-hint">{{html:savingWillRestartTheConversationFromHere}}${following ? `{{msg:replacingTheFollowing}} ${following} {{msg:proactiveMessages}}` : ''}{{msg:period}}</p>
+      <div class="row"><button class="btn small" data-action="edit-cancel">{{html:cancel}}</button><button class="btn small primary" data-action="edit-save">{{html:saveAndResend}}</button></div></div>`
     $('textarea', node).focus()
     return
   }
@@ -3478,7 +3583,7 @@ async function handleAction(e) {
     const node = btn.closest('.msg')
     const text = $('textarea', node).value.trim()
     if (!text) return
-    if (S.stream) return toast('正在生成', true)
+    if (S.stream) return toast('{{msg:generating2}}', true)
     const editId = node.dataset.id
     return startStream({ userText: text, editId })
   }
@@ -3502,9 +3607,9 @@ async function handleAction(e) {
       for (const b of $$('button[data-action="topic-mute"][data-id]')) {
         if (b.dataset.topicKey !== topicKey) continue
         b.dataset.muted = String(result.muted)
-        b.textContent = result.muted ? '取消静音' : topicKey.startsWith('companion:') ? '静音这类气泡' : '静音此话题'
+        b.textContent = result.muted ? '{{msg:unmute}}' : topicKey.startsWith('companion:') ? '{{msg:muteThisKindOfSuggestion}}' : '{{msg:muteThisTopic}}'
       }
-      toast(result.muted ? '话题已静音。你要求的目标仍会跟进。' : '已取消话题静音')
+      toast(result.muted ? '{{msg:topicMutedFollowUpsYouRequestedWill}}' : '{{msg:topicUnmuted}}')
       if (S.panel === 'proactive' && !$('#drawer').hidden) {
         await refreshReminderPreview()
         if (!id) $('[data-action="preview-reminders"]')?.focus()
@@ -3523,16 +3628,16 @@ async function handleAction(e) {
     } finally {
       controls.forEach((b) => { b.disabled = false })
     }
-    if (r.ignored) return toast('这条反馈未能关联到原消息，请刷新后重试', true)
+    if (r.ignored) return toast('{{msg:couldNotMatchThisFeedbackToIts}}', true)
     if (r.outcome) {
       const message = S.conv?.id === conversationId && S.conv.messages.find((m) => m.id === btn.dataset.id)
       if (message) Object.assign(message, { feedback: r.outcome.utility, feedbackTiming: r.outcome.timing })
       controls.forEach((b) =>
         b.setAttribute('aria-pressed', String([r.outcome.utility, r.outcome.timing].includes(b.dataset.signal))))
     }
-    const confirmations = { more: '已增加主动服务频率', less: '已减少主动服务频率', good: '已记录：这条内容有用', bad: '已记录：这条内容没用',
-      good_time: '已记录这条提醒出现的时间合适',
-      wrong_time: r.duplicate ? '已记录过这条提醒的时机反馈' : (r.pausedUntil && Date.parse(r.pausedUntil) > Date.now() ? `已记录时机反馈，暂停至 ${agencyTime(r.pausedUntil)}` : '已记录时机反馈') }
+    const confirmations = { more: '{{msg:proactiveRemindersWillAppearMoreOften}}', less: '{{msg:proactiveRemindersWillAppearLessOften}}', good: '{{msg:recordedAsUseful}}', bad: '{{msg:recordedAsNotUseful}}',
+      good_time: '{{msg:goodTimingRecorded}}',
+      wrong_time: r.duplicate ? '{{msg:timingFeedbackAlreadyRecordedForThisReminder}}' : (r.pausedUntil && Date.parse(r.pausedUntil) > Date.now() ? `{{msg:timingFeedbackSavedPausedUntil}} ${agencyTime(r.pausedUntil)}` : '{{msg:timingFeedbackSaved}}') }
     toast(confirmations[signal])
     return
   }
@@ -3553,9 +3658,9 @@ async function handleAction(e) {
   if (act === 'attach') { $('#fileInput').click(); return }
   if (act === 'rm-att') { S.att.splice(Number(btn.dataset.i), 1); saveDraft(); renderAttachments(); autogrow(); return }
   if (act === 'draw') {
-    if (S.drawing || S.stream || S.selecting) return toast('请等待当前生成完成', true)
-    if (!S.boot?.config?.upstreamConfigured || !S.boot.config.defaultImageModel) return toast('请先在设置中配置出图模型', true)
-    const prompt = $('#input').value.trim() || window.prompt('要画什么？可以带上风格、构图、光线')
+    if (S.drawing || S.stream || S.selecting) return toast('{{msg:waitForTheCurrentReplyToFinish2}}', true)
+    if (!S.boot?.config?.upstreamConfigured || !S.boot.config.defaultImageModel) return toast('{{msg:chooseAnImageModelInSettingsFirst}}', true)
+    const prompt = $('#input').value.trim() || window.prompt('{{msg:whatShouldEchoDrawYouCanSpecify}}')
     if (!prompt) return
     const conversationId = S.current
     S.drawing = conversationId
@@ -3564,7 +3669,7 @@ async function handleAction(e) {
       const r = await api('images', { method: 'POST', body: { prompt, model: S.boot.config.defaultImageModel, conversationId } })
       if (S.current !== conversationId || S.selecting) {
         await refreshList()
-        return toast('图片已保存到原会话')
+        return toast('{{msg:imageSavedToTheOriginalConversation}}')
       }
       const inner = $('#threadInner')
       $('.hero', inner)?.remove()
@@ -3573,7 +3678,7 @@ async function handleAction(e) {
           r.message ?? {
             id: uid(),
             role: 'assistant',
-            content: `画好了：${prompt}`,
+            content: `{{msg:imageReady}}${prompt}`,
             images: [{ url: r.path, prompt }],
             createdAt: new Date().toISOString(),
             model: r.model,
@@ -3583,7 +3688,7 @@ async function handleAction(e) {
       scrollBottom()
       await refreshList()
     } catch (err) {
-      toast(`出图失败：${err.message}`, true)
+      toast(`{{msg:imageGenerationFailed}}${err.message}`, true)
     } finally {
       S.drawing = null
       updateComposer()
@@ -3601,8 +3706,8 @@ async function handleAction(e) {
     return refreshList()
   }
   if (act === 'del-conv') {
-    if (id === S.current && (S.stream || S.preparing)) return toast('请先停止当前生成', true)
-    if (!confirm('删除这个会话？')) return
+    if (id === S.current && (S.stream || S.preparing)) return toast('{{msg:stopTheCurrentReplyFirst2}}', true)
+    if (!confirm('{{msg:deleteThisConversation}}')) return
     await api(`conversations/${id}`, { method: 'DELETE' })
     if (S.current === id) { const m = S.convs.find((c) => c.isMain); await refreshList(); return selectConv(m.id) }
     return refreshList()
@@ -3622,16 +3727,16 @@ async function handleAction(e) {
     return
   }
   if (act === 'dream-now') {
-    toast('Dream 正在提炼…')
+    toast('{{msg:reviewingMemory}}')
     const r = await api('dream', { method: 'POST', body: {} })
-    toast(r.result?.ok ? `Dream 完成：${r.result.summary?.join('；') ?? ''}` : `Dream 失败：${r.result?.error ?? ''}`, !r.result?.ok)
+    toast(r.result?.ok ? `{{msg:memoryReviewComplete}}${r.result.summary?.join('{{msg:listClause}}') ?? ''}` : `{{msg:memoryReviewFailed}}${r.result?.error ?? ''}`, !r.result?.ok)
     await boot({ keep: true })
     if (!$('#panelMemory').hidden) await renderMemoryPanel()
     return
   }
   if (act === 'save-core') {
     await api('memory/core', { method: 'PUT', body: { text: $('#coreEdit').value } })
-    toast('核心记忆已保存')
+    toast('{{msg:coreMemorySaved}}')
     return renderMemoryPanel()
   }
   if (act === 'add-mem') {
@@ -3646,54 +3751,54 @@ async function handleAction(e) {
     return renderMemoryPanel()
   }
   if (act === 'forget-mem') {
-    const why = prompt('为什么要忘掉它？（会写进遗忘日志）', '用户要求忘记')
+    const why = prompt('{{msg:whyShouldEchoForgetThisYourReason}}', '{{msg:forgottenAtYourRequest}}')
     if (why === null) return
     await api('memory/forget', { method: 'POST', body: { id, why } })
-    toast('已忘掉，并记下了理由')
+    toast('{{msg:forgottenYourReasonHasBeenRecorded}}')
     return renderMemoryPanel()
   }
   if (act === 'protect-mem') {
     const on = btn.dataset.on === '1'
     await api('memory/protect', { method: 'POST', body: { id, on } })
-    toast(on ? '已保护：不再自动淡出' : '已取消保护')
+    toast(on ? '{{msg:protectedFromAutomaticFading}}' : '{{msg:protectionRemoved}}')
     return renderMemoryPanel()
   }
   if (act === 'revive') {
     await api('memory/protect', { method: 'POST', body: { id, on: true } })
-    toast('已复活并保护')
+    toast('{{msg:restoredAndProtected}}')
     return renderMemoryPanel()
   }
   if (act === 'forget-scan') {
     const r = await api('memory/forget-scan', { method: 'POST', body: { dryRun: true } })
     const n = r.result.faded.length
-    toast(n ? `扫描 ${r.result.scanned} 条，有 ${n} 条将淡出（未改动）` : `扫描 ${r.result.scanned} 条，暂时没有该淡出的`)
+    toast(n ? `{{msg:scanned}} ${r.result.scanned} {{msg:entriesWith}} ${n} {{msg:markedToFadePreviewOnly}}` : `{{msg:scanned}} ${r.result.scanned} {{msg:entriesNoneAreDueToFade}}`)
     return
   }
   if (act === 'look-now') {
     const result = await api('screen/capture', { method: 'POST', body: { reason: 'ui' } })
-    if (!result.requested) return toast('请先在设置中开启屏幕感知')
+    if (!result.requested) return toast('{{msg:enableScreenAwarenessInSettingsFirst}}')
     const capture = btn.closest('[data-screen-capture]')
     if (capture) {
       capture.dataset.screenCapture = 'pending'
       btn.disabled = true
-      $('[role="status"]', capture).textContent = '等待状态栏 App 采集。'
+      $('[role="status"]', capture).textContent = '{{msg:waitingForTheMenuBarAppTo}}'
     }
     return
   }
   if (act === 'screen-digest') {
     const r = await api('screen/digest', { method: 'POST', body: {} })
-    toast(r.session ? `已沉淀：${r.session.summary}` : `样本不足（${r.count ?? 0} 条）`, !r.session)
+    toast(r.session ? `{{msg:summarySaved}}${r.session.summary}` : `{{msg:tooFewSamples}}${r.count ?? 0} {{msg:entries}}`, !r.session)
     return renderMemoryPanel()
   }
   if (act === 'comp-pause') {
     const r = await api('companion/pause', { method: 'POST', body: { minutes: S.companion?.paused ? 0 : 30 } })
-    toast(r.paused ? '已暂停伴随模式 30 分钟' : '已恢复伴随模式')
+    toast(r.paused ? '{{msg:companionPausedFor30Minutes}}' : '{{msg:companionResumed}}')
     await boot({ keep: true })
     return renderSettingsPanel()
   }
   if (act === 'storage-prune') {
     const r = await api('storage/prune', { method: 'POST', body: {} })
-    toast(`清理完成，释放 ${r.report.freedMB}MB`)
+    toast(`{{msg:cleanupCompleteFreed}} ${r.report.freedMB}MB`)
     return renderSettingsPanel()
   }
   if (act === 'loop-done') {
@@ -3701,10 +3806,10 @@ async function handleAction(e) {
     return renderMemoryPanel()
   }
   if (act === 'pro-run') {
-    toast('正在判断该不该开口…')
+    toast('{{msg:checkingReminderEligibility}}')
     const r = await api('proactive/run', { method: 'POST', body: {} })
-    if (r.result?.acted) { toast(`已发一条：${KIND_LABEL[r.result.message.kind] ?? ''}`); await selectConv('main') }
-    else toast(PROACTIVE_REASON_LABELS[r.result?.skipped] ?? '这次没有发送提醒。')
+    if (r.result?.acted) { toast(`{{msg:sent}}${KIND_LABEL[r.result.message.kind] ?? ''}`); await selectConv('main') }
+    else toast(PROACTIVE_REASON_LABELS[r.result?.skipped] ?? '{{msg:noReminderWasSentThisTime}}')
     return renderProactivePanel()
   }
   if (act === 'load-diag') {
@@ -3712,23 +3817,23 @@ async function handleAction(e) {
     const m = d.metrics ?? {}
     const t = m.turns ?? {}
     const toolRows = Object.entries(m.tools ?? {})
-      .map(([k, v]) => `<div class="mem-item"><div class="txt">${esc(k)}<div class="muted small">${v.count} 次 · 成功率 ${(v.okRate * 100).toFixed(0)}% · P50 ${v.p50Ms}ms · P95 ${v.p95Ms}ms</div></div></div>`)
+      .map(([k, v]) => `<div class="mem-item"><div class="txt">${esc(k)}<div class="muted small">${v.count} {{msg:runsSuccessRate}} ${(v.okRate * 100).toFixed(0)}% · P50 ${v.p50Ms}ms · P95 ${v.p95Ms}ms</div></div></div>`)
       .join('')
     const searchRows = Object.entries(m.search ?? {})
-      .map(([k, v]) => `<div class="mem-item"><div class="txt">搜索 · ${esc(k)}<div class="muted small">${v.count} 次 · 成功率 ${(v.okRate * 100).toFixed(0)}% · P50 ${v.p50Ms}ms</div></div></div>`)
+      .map(([k, v]) => `<div class="mem-item"><div class="txt">{{html:search2}} ${esc(k)}<div class="muted small">${v.count} {{msg:runsSuccessRate}} ${(v.okRate * 100).toFixed(0)}% · P50 ${v.p50Ms}ms</div></div></div>`)
       .join('')
     $('#diagBox').innerHTML = `
       <div class="stat-row">
-        <div class="stat"><b>${t.count ?? 0}</b><span>近 7 天生成</span></div>
-        <div class="stat"><b>${((t.errorRate ?? 0) * 100).toFixed(0)}%</b><span>失败率</span></div>
-        <div class="stat"><b>${t.p95Ms ?? 0}</b><span>P95 延迟(ms)</span></div>
-        <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>累计采用或帮助完成</span></div>
+        <div class="stat"><b>${t.count ?? 0}</b><span>{{html:repliesInTheLast7Days}}</span></div>
+        <div class="stat"><b>${((t.errorRate ?? 0) * 100).toFixed(0)}%</b><span>{{html:failureRate}}</span></div>
+        <div class="stat"><b>${t.p95Ms ?? 0}</b><span>{{html:label95thPercentileLatencyMs}}</span></div>
+        <div class="stat"><b>${(agency.outcomes?.accepted ?? 0) + (agency.outcomes?.completed ?? 0)}</b><span>{{html:totalAdoptedOrHelpedComplete}}</span></div>
       </div>
-      <div class="muted small">用量：入 ${t.tokensIn ?? 0} / 出 ${t.tokensOut ?? 0} tokens · 平均 ${t.avgRounds ?? 0} 轮工具调用 · 模型 ${esc(JSON.stringify(t.models ?? {}))}</div>
-      ${m.polish?.count ? `<div class="muted small">润色：${m.polish.count} 次 · 平均 ${m.polish.avgMs}ms · 改动率 ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}% · 模式 ${esc(JSON.stringify(m.polish.byMode ?? {}))}</div>` : ''}
+      <div class="muted small">{{html:usageInput}} ${t.tokensIn ?? 0} {{msg:output3}} ${t.tokensOut ?? 0} {{msg:tokensAverage}} ${t.avgRounds ?? 0} {{msg:toolRoundsModel}} ${esc(JSON.stringify(t.models ?? {}))}</div>
+      ${m.polish?.count ? `<div class="muted small">{{html:rewrite}}${m.polish.count} {{msg:runsAverage}} ${m.polish.avgMs}{{msg:msChangeRate}} ${((m.polish.changedRate ?? 0) * 100).toFixed(0)}{{msg:mode}} ${esc(JSON.stringify(m.polish.byMode ?? {}))}</div>` : ''}
       ${toolRows}${searchRows}
-      ${m.errors?.top?.length ? `<div class="muted small">错误 Top：${m.errors.top.map(([k, v]) => `${esc(String(k))}×${v}`).join('，')}</div>` : ''}
-      <div class="muted small">存储：截图 ${d.storage?.screenshots?.mb}MB / 图片 ${d.storage?.uploads?.mb}MB · 记忆 ${d.memory?.observations} 条（淡出 ${d.memory?.forgetting?.faded}）· 图谱 ${d.graph?.nodes} 节点</div>`
+      ${m.errors?.top?.length ? `<div class="muted small">{{html:mostCommonErrors}}${m.errors.top.map(([k, v]) => `${esc(String(k))}×${v}`).join('{{msg:commaSeparator}}')}</div>` : ''}
+      <div class="muted small">{{html:storageScreenshots2}} ${d.storage?.screenshots?.mb}{{msg:mbImages2}} ${d.storage?.uploads?.mb}{{msg:mbMemory}} ${d.memory?.observations} {{msg:entriesFaded}} ${d.memory?.forgetting?.faded}{{msg:graph}} ${d.graph?.nodes} {{html:nodes}}</div>`
     return
   }
   if (act === 'backup') {
@@ -3737,7 +3842,7 @@ async function handleAction(e) {
   }
   if (act === 'wipe') {
     const scope = btn.dataset.scope
-    const word = prompt(`这会清空${scope === 'all' ? '全部记忆和会话' : '全部记忆'}，以及相处方式、人物背景、目标、准备结果和相关记录，不可撤销。输入 WIPE 确认：`)
+    const word = prompt(`{{msg:thisWillPermanentlyClear}}{{msg:wordSpace}}${scope === 'all' ? '{{msg:allMemoryAndConversations}}' : '{{msg:allMemory}}'}{{msg:alongWithCommunicationPreferencesPeopleGoalsDrafts}}`)
     if (word !== 'WIPE') return
     const r = await api('memory/wipe', { method: 'POST', body: { confirm: 'WIPE', scope } })
     COMMITMENTS.editor = null
@@ -3750,7 +3855,7 @@ async function handleAction(e) {
     RELATIONSHIPS.data = null
     RELATIONSHIPS.loading = false
     $('#panelMemory').innerHTML = ''
-    toast(`已清空：${r.before.observations} 条事实${scope === 'all' ? `、${r.wiped.conversations} 个会话` : ''}`)
+    toast(`{{msg:cleared}}${r.before.observations} {{msg:facts2}}${scope === 'all' ? `{{msg:listSeparator}}${r.wiped.conversations} {{msg:conversations}}` : ''}`)
     await boot({ keep: true })
     return renderSettingsPanel()
   }
@@ -3760,36 +3865,36 @@ async function handleAction(e) {
   }
   if (act === 'perm-test') {
     const out = $('#permOut')
-    if (out) out.textContent = '测试中（系统可能弹授权窗）…'
+    if (out) out.textContent = '{{msg:testingMacosMayRequestPermission}}'
     const r = await api('permissions/screen-test', { method: 'POST', body: {} })
-    toast(r.granted ? '屏幕录制权限已就绪' : r.hint, !r.granted)
-    if (out) out.textContent = r.granted ? '✓ 已授权，能抓到画面' : `✗ ${r.hint}`
+    toast(r.granted ? '{{msg:screenRecordingPermissionIsReady}}' : r.hint, !r.granted)
+    if (out) out.textContent = r.granted ? '{{msg:screenRecordingPermissionGranted}}' : `✗ ${r.hint}`
     return
   }
   if (act === 'save-settings') return saveSettings()
   if (act === 'mcp-reload') {
     const r = await api('mcp/reload', { method: 'POST', body: {} })
-    toast(`MCP：${r.servers.map((s) => `${s.name}=${s.state}`).join(' ') || '没有配置'}`)
+    toast(`MCP{{msg:labelSeparator}}${r.servers.map((s) => `${s.name}=${MCP_STATE[s.state] ?? s.state}`).join(' ') || '{{msg:notConfigured2}}'}`)
     return renderSettingsPanel()
   }
   if (act === 'search-test') {
-    toast('测试搜索链路…')
-    const r = await api('search/test', { method: 'POST', body: { query: '今天 美元 人民币 汇率' } })
-    toast(`${r.engine} · ${r.ms}ms · ${r.results.length} 条`)
+    toast('{{msg:testingSearchProviders}}')
+    const r = await api('search/test', { method: 'POST', body: { query: '{{msg:usdToCnyExchangeRateToday}}' } })
+    toast(`${r.engine} · ${r.ms}ms · ${r.results.length} {{msg:items}}`)
     return
   }
   if (act === 'set-passwd') {
-    const next = prompt('设置访问口令（≥6 位）')
+    const next = prompt('{{msg:setAnAccessPasswordAtLeast6}}')
     if (!next) return
     await api('password', { method: 'POST', body: { next } })
-    toast('口令已保存（开启验证后才需要输入）')
+    toast('{{msg:passwordSavedItWillBeRequiredWhen}}')
     return renderSettingsPanel()
   }
   if (act === 'change-passwd') {
-    const next = prompt('新口令（≥6 位，只能在 Mac 本机浏览器改）')
+    const next = prompt('{{msg:newPasswordAtLeast6CharactersChange}}')
     if (!next) return
     await api('password', { method: 'POST', body: { next } })
-    return toast('口令已更新')
+    return toast('{{msg:passwordUpdated}}')
   }
   if (act === 'logout') {
     await api('logout', { method: 'POST', body: {} })
@@ -3799,6 +3904,7 @@ async function handleAction(e) {
 }
 
 document.addEventListener('change', async (e) => {
+  if (e.target.matches?.('[data-language]')) return changeLanguage(e.target)
   if (e.target.closest?.('#researchSettingsForm')) e.target.closest('#researchSettingsForm').dataset.dirty = 'true'
   if (e.target.id === 'goalDocuments') {
     await uploadGoalDocuments(e.target).catch((err) => toast(err.message, true))
@@ -3813,7 +3919,7 @@ document.addEventListener('change', async (e) => {
     const r = await api('auth', { method: 'PATCH', body: { required } })
     saved = true
     input.checked = r.required
-    toast(r.required ? '已开启口令验证（下次打开需要登录）' : '已关闭口令验证，本机自用')
+    toast(r.required ? '{{msg:passwordRequiredOnYourNextVisit}}' : '{{msg:passwordSignInDisabled}}')
     await boot({ keep: true })
     await renderSettingsPanel()
   } catch (err) {
@@ -3829,7 +3935,7 @@ $('#convTitle').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); renameNow() }
 })
 function renameNow() {
-  const t = prompt('会话标题', $('#convTitle').textContent)
+  const t = prompt('{{msg:conversationTitle}}', $('#convTitle').textContent)
   if (t) {
     api(`conversations/${S.current}`, { method: 'PATCH', body: { title: t } }).then(async () => {
       $('#convTitle').textContent = t
@@ -3842,7 +3948,7 @@ $('#composer').addEventListener('submit', (e) => {
   e.preventDefault()
   const text = $('#input').value.trim()
   if ((!text && !S.att.length) || S.stream || S.selecting || S.preparing || S.uploading || S.drawing === S.current) return
-  if (!chatReady()) return toast('请先在引导中完成模型设置，草稿会保留在这里', true)
+  if (!chatReady()) return toast('{{msg:finishModelSetupFirstYourDraftIs}}', true)
   $('#input').value = ''
   localStorage.removeItem(`echo.draft.${S.current}`)
   autogrow()
@@ -3899,7 +4005,7 @@ async function changeWorkspaceMode(select) {
   updateComposer()
   try {
     const saved = await api(`conversations/${encodeURIComponent(id)}`, { method: 'PATCH', body: { workspaceMode: mode } })
-    if (saved.id !== id || saved.workspaceMode !== mode) throw new Error('工作区模式保存失败，请刷新后重试。')
+    if (saved.id !== id || saved.workspaceMode !== mode) throw new Error('{{msg:couldNotSaveTheWorkspaceModeRefresh}}')
     if (S.conv?.id === id) S.conv.workspaceMode = saved.workspaceMode
   } catch (error) {
     toast(error.message, true)
@@ -3993,6 +4099,10 @@ addEventListener('resize', () => {
   try {
     await boot()
   } catch (err) {
-    showGate('first')
+    if (err.status !== 401) {
+      showGate('again')
+      $('#gateError').textContent = err.message
+      $('#gateError').hidden = false
+    }
   }
 })()

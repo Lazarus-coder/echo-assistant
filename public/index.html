@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{msg:locale}}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -7,8 +7,8 @@
     <meta name="theme-color" content="#131311" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Echo" />
-    <meta name="description" content="跑在自己机器上的私人对话窗口" />
-    <title>Echo · 本地对话</title>
+    <meta name="description" content="{{html:privateChatOnYourOwnComputer}}" />
+    <title>{{html:echoLocalChat}}</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/logo.svg" />
     <link rel="apple-touch-icon" href="/logo.svg" />
@@ -18,10 +18,11 @@
     <div id="gate" class="gate" hidden>
       <form id="gateForm" class="gate-card" autocomplete="off">
         <img src="/logo.svg" alt="" class="gate-logo" width="44" height="44" />
+        <div id="gateLanguage"></div>
         <h1 id="gateTitle">Echo</h1>
-        <p id="gateHint" class="gate-hint">输入访问口令</p>
-        <input id="gateInput" type="password" inputmode="text" aria-labelledby="gateHint" placeholder="访问口令" minlength="6" required />
-        <button type="submit" class="btn primary block" id="gateSubmit">进入</button>
+        <p id="gateHint" class="gate-hint">{{html:enterYourPassword}}</p>
+        <input id="gateInput" type="password" inputmode="text" aria-labelledby="gateHint" placeholder="{{html:password}}" minlength="6" required />
+        <button type="submit" class="btn primary block" id="gateSubmit">{{html:signIn}}</button>
         <p id="gateError" class="gate-error" hidden></p>
       </form>
     </div>
@@ -31,17 +32,17 @@
         <div class="brand">
           <img src="/logo.svg" alt="" width="22" height="22" />
           <span>Echo</span>
-          <button class="icon-btn" data-action="toggle-sidebar" title="收起侧栏 (⌘/)" aria-label="收起侧栏">
+          <button class="icon-btn" data-action="toggle-sidebar" title="{{html:collapseSidebar}}" aria-label="{{html:collapseSidebar2}}">
             <svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" /></svg>
           </button>
         </div>
 
         <button class="btn primary block" data-action="new-chat">
-          <svg viewBox="0 0 24 24" class="i"><path d="M12 5v14M5 12h14" /></svg>新对话
+          <svg viewBox="0 0 24 24" class="i"><path d="M12 5v14M5 12h14" /></svg>{{html:newChat}}
         </button>
         <label class="filter">
           <svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
-          <input id="convFilter" type="search" aria-label="搜索会话" placeholder="搜索会话" />
+          <input id="convFilter" type="search" aria-label="{{html:searchChats}}" placeholder="{{html:searchChats}}" />
         </label>
 
         <ul id="convList" class="conv-list"></ul>
@@ -49,57 +50,57 @@
         <div class="sidebar-foot">
           <button class="ghost" data-action="open-panel" data-panel="memory">
             <svg viewBox="0 0 24 24" class="i"><path d="M12 4a4 4 0 00-4 4 3 3 0 00-1 5.8A3 3 0 009 19a3 3 0 003-1.5V4z" /><path d="M12 4a4 4 0 014 4 3 3 0 011 5.8A3 3 0 0115 19a3 3 0 01-3-1.5" /></svg>
-            记忆 <b id="memCount" class="chip-num">0</b>
+            {{html:memory}} <b id="memCount" class="chip-num">0</b>
           </button>
           <button class="ghost" data-action="open-panel" data-panel="proactive">
             <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-            主动服务 <b id="proCount" class="chip-num">0</b>
+            {{html:proactiveAssistance}} <b id="proCount" class="chip-num">0</b>
           </button>
           <button class="ghost" data-action="open-panel" data-panel="settings">
             <svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 00-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 00-1.7-1l-.3-2.6h-4l-.3 2.6a7 7 0 00-1.7 1l-2.3-1-2 3.4 2 1.5a7 7 0 000 2l-2 1.5 2 3.4 2.3-1a7 7 0 001.7 1l.3 2.6h4l.3-2.6a7 7 0 001.7-1l2.3 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z" /></svg>
-            设置
+            {{html:settings}}
           </button>
           <div class="row-split">
-            <button class="ghost tiny" data-action="cycle-theme" id="themeBtn">主题</button>
-            <button class="ghost tiny" data-action="dream-now" id="dreamBtn">Dream</button>
-            <button class="ghost tiny" data-action="logout">退出</button>
+            <button class="ghost tiny" data-action="cycle-theme" id="themeBtn">{{html:theme}}</button>
+            <button class="ghost tiny" data-action="dream-now" id="dreamBtn">{{html:reviewMemory}}</button>
+            <button class="ghost tiny" data-action="logout">{{html:signOut}}</button>
           </div>
         </div>
       </aside>
 
       <main class="main">
         <header class="topbar">
-          <button class="icon-btn only-mobile" data-action="toggle-sidebar" aria-label="打开侧栏">
+          <button class="icon-btn only-mobile" data-action="toggle-sidebar" aria-label="{{html:openSidebar}}">
             <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
           </button>
           <div class="title-wrap">
-            <h2 id="convTitle" class="title" tabindex="0" title="点击或按 Enter 重命名">主对话</h2>
+            <h2 id="convTitle" class="title" tabindex="0" title="{{html:clickOrPressEnterToRename}}">{{html:mainChat}}</h2>
             <span id="badges" class="badges"></span>
-            <button type="button" id="workspaceBadge" class="badge workspace-badge" data-action="open-panel" data-panel="workspace" title="配置工作区与查看执行记录">工作区 · 未启用</button>
-            <button type="button" id="followBadge" class="badge workspace-badge" data-action="open-panel" data-panel="proactive" title="查看持续跟进与后台准备" hidden></button>
+            <button type="button" id="workspaceBadge" class="badge workspace-badge" data-action="open-panel" data-panel="workspace" title="{{html:setWorkspacePermissionsAndReviewRuns}}">{{html:workspaceOff}}</button>
+            <button type="button" id="followBadge" class="badge workspace-badge" data-action="open-panel" data-panel="proactive" title="{{html:viewFollowUpsAndBackgroundWork}}" hidden></button>
           </div>
           <div class="topbar-right">
             <label class="pill">
-              <select id="modelSelect" class="bare" aria-label="对话模型"></select>
+              <select id="modelSelect" class="bare" aria-label="{{html:chatModel}}"></select>
             </label>
-            <label class="pill" title="联网搜索">
-              <select id="searchSelect" class="bare" aria-label="联网搜索">
-                <option value="off">搜索关</option>
-                <option value="auto">搜索自动</option>
-                <option value="on">搜索强制</option>
+            <label class="pill" title="{{html:webSearch}}">
+              <select id="searchSelect" class="bare" aria-label="{{html:webSearch}}">
+                <option value="off">{{html:searchOff}}</option>
+                <option value="auto">{{html:searchAuto}}</option>
+                <option value="on">{{html:searchOn}}</option>
               </select>
             </label>
-            <button class="pill toggle" data-action="toggle-thinking" id="thinkingBtn" title="推理模型的思考过程">思考</button>
+            <button class="pill toggle" data-action="toggle-thinking" id="thinkingBtn" title="{{html:modelReasoning}}">{{html:thinking}}</button>
           </div>
         </header>
 
         <div class="thread-wrap">
           <div id="connectionNotice" class="connection-notice" role="status" hidden>
             <span id="connectionText"></span>
-            <button type="button" class="btn small" data-action="rerun-wizard">配置模型</button>
+            <button type="button" class="btn small" data-action="rerun-wizard">{{html:connectAModel}}</button>
           </div>
-          <div id="thread" class="thread" tabindex="-1" role="region" aria-label="对话消息"></div>
-          <button id="jumpLatest" type="button" class="jump-latest" data-action="jump-latest" hidden>↓ 回到最新</button>
+          <div id="thread" class="thread" tabindex="-1" role="region" aria-label="{{html:chatMessages}}"></div>
+          <button id="jumpLatest" type="button" class="jump-latest" data-action="jump-latest" hidden>{{html:jumpToLatest}}</button>
         </div>
 
         <div class="composer-wrap">
@@ -108,41 +109,41 @@
           <form id="composer" class="composer">
             <div id="attachStrip" class="attach-strip" hidden></div>
             <div id="polishBox" class="polish-box" hidden></div>
-            <textarea id="input" rows="1" aria-label="消息" aria-describedby="composerHint" placeholder="说说你想做什么…"></textarea>
+            <textarea id="input" rows="1" aria-label="{{html:message}}" aria-describedby="composerHint" placeholder="{{html:whatWouldYouLikeToDo}}"></textarea>
             <div class="composer-bar">
               <div class="composer-meta">
-                <select id="workspaceMode" class="pill" aria-label="本对话的工作区模式" title="只读规划可查看项目。执行任务可按工作区权限编辑文件或申请执行命令。" hidden>
-                  <option value="work">工作区 · 执行任务</option>
-                  <option value="read_only">工作区 · 只读规划</option>
+                <select id="workspaceMode" class="pill" aria-label="{{html:workspaceModeForThisChat}}" title="{{html:planModeCanInspectTheProjectWork}}" hidden>
+                  <option value="work">{{html:workspaceWork}}</option>
+                  <option value="read_only">{{html:workspaceReadOnlyPlan}}</option>
                 </select>
                 <span id="ctxChip" class="muted"></span>
               </div>
               <div class="composer-actions">
-                <button type="button" class="btn ghost small" data-action="polish" id="polishBtn" title="读上下文把你这句话补成可执行的请求（⌘⇧P）">润色</button>
-                <button type="button" class="btn ghost small" data-action="attach" title="添加图片（也可直接粘贴或拖进来）">图片</button>
-                <button type="button" class="btn ghost small" data-action="draw" title="直接出图">画图</button>
-                <button type="button" class="btn ghost" data-action="stop" id="stopBtn" hidden>停止</button>
-                <button type="submit" class="btn primary" id="sendBtn">发送</button>
+                <button type="button" class="btn ghost small" data-action="polish" id="polishBtn" title="{{html:refineThisRequestUsingTheConversationP}}">{{html:refine}}</button>
+                <button type="button" class="btn ghost small" data-action="attach" title="{{html:addAnImageOrPasteOrDrop}}">{{html:image}}</button>
+                <button type="button" class="btn ghost small" data-action="draw" title="{{html:generateAnImageDirectly}}">{{html:draw}}</button>
+                <button type="button" class="btn ghost" data-action="stop" id="stopBtn" hidden>{{html:stop}}</button>
+                <button type="submit" class="btn primary" id="sendBtn">{{html:send}}</button>
               </div>
             </div>
             <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
           </form>
           <div class="composer-help">
-            <span id="composerHint">Enter 发送 · Shift+Enter 换行</span>
+            <span id="composerHint">{{html:enterToSendShiftEnterForA}}</span>
             <span id="composerState" role="status" aria-live="polite"></span>
           </div>
         </div>
       </main>
 
-      <section id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="Echo 面板" tabindex="-1" hidden>
+      <section id="drawer" class="drawer" role="dialog" aria-modal="true" aria-label="{{html:echoPanels}}" tabindex="-1" hidden>
         <div class="drawer-head">
-          <div class="tabs" role="tablist" aria-label="面板">
-            <button id="tab-memory" class="tab" role="tab" aria-controls="panelMemory" aria-selected="false" tabindex="-1" data-action="tab" data-panel="memory">记忆</button>
-            <button id="tab-proactive" class="tab" role="tab" aria-controls="panelProactive" aria-selected="false" tabindex="-1" data-action="tab" data-panel="proactive">主动服务</button>
-            <button id="tab-workspace" class="tab" role="tab" aria-controls="panelWorkspace" aria-selected="false" tabindex="-1" data-action="tab" data-panel="workspace">工作区</button>
-            <button id="tab-settings" class="tab" role="tab" aria-controls="panelSettings" aria-selected="false" tabindex="-1" data-action="tab" data-panel="settings">设置</button>
+          <div class="tabs" role="tablist" aria-label="{{html:panels}}">
+            <button id="tab-memory" class="tab" role="tab" aria-controls="panelMemory" aria-selected="false" tabindex="-1" data-action="tab" data-panel="memory">{{html:memory}}</button>
+            <button id="tab-proactive" class="tab" role="tab" aria-controls="panelProactive" aria-selected="false" tabindex="-1" data-action="tab" data-panel="proactive">{{html:proactiveAssistance}}</button>
+            <button id="tab-workspace" class="tab" role="tab" aria-controls="panelWorkspace" aria-selected="false" tabindex="-1" data-action="tab" data-panel="workspace">{{html:workspace}}</button>
+            <button id="tab-settings" class="tab" role="tab" aria-controls="panelSettings" aria-selected="false" tabindex="-1" data-action="tab" data-panel="settings">{{html:settings}}</button>
           </div>
-          <button class="icon-btn" data-action="close-drawer" aria-label="关闭">
+          <button class="icon-btn" data-action="close-drawer" aria-label="{{html:close}}">
             <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
           </button>
         </div>

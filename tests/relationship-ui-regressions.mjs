@@ -2,8 +2,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { localizeWebAsset } from '../public/ui-locale.mjs'
 
-const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8')
+const source = localizeWebAsset('app.js', await readFile(new URL('../public/app.js', import.meta.url), 'utf8'), 'zh-CN')
 const program = source.split('/* --------------------------------- start ----------------------------------- */')[0]
 const tests = []
 const test = (name, run) => tests.push({ name, run })

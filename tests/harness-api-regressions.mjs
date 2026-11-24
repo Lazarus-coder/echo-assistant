@@ -410,7 +410,7 @@ try {
     assert.equal(await exists(path.join(sandbox, 'escaped.txt')), false)
     const run = await getRun(done.message.runId)
     assert.equal(run.status, 'failed')
-    assert.match(run.steps[0].error, /traversal|outside/i)
+    assert.match(run.steps[0].error, /禁止访问上级路径/)
     const prefix = `/api/runs/${shellRun.id}/artifacts/${shellRun.steps[0].id}`
     for (const suffix of ['..%2Fconfig.json', '%2Fetc%2Fpasswd', 'not-registered.txt']) {
       const response = await fetch(`${base}${prefix}/${suffix}`)

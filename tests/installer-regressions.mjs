@@ -12,6 +12,7 @@ const quarantine = source.match(/^APP_PATH="\$TARGET\/Echo\.app"\nif [^\n]*quara
 const credentials = source.slice(source.indexOf('ENV_FILE='), source.indexOf('# ── 4.'))
 assert.ok(options && copyApp && quarantine && credentials.startsWith('ENV_FILE='), 'Installer fragments must be available for the isolated check')
 
+const catalog = await readFile(new URL('../bin/locales/en.sh', import.meta.url), 'utf8')
 const sandbox = await mkdtemp(path.join(os.tmpdir(), 'echo-installer-regression-'))
 try {
   const sourceDir = path.join(sandbox, 'package')
@@ -27,6 +28,7 @@ DO_LAUNCHD=1
 DO_OPEN=1
 ASSUME_YES=0
 UID_NUM=999
+${catalog}
 MENUBAR_LABEL=com.echo.menubar
 record() { printf '%s\\0' "$@" >> "$INSTALLER_TEST_CALLS"; printf '\\0' >> "$INSTALLER_TEST_CALLS"; }
 rm() { record rm "$@"; }
@@ -63,6 +65,7 @@ ${quarantine}
     const result = spawnSync('/bin/bash', ['-c', `set -euo pipefail
 TARGET="$INSTALLER_TEST_TARGET"
 ASSUME_YES=1
+${catalog}
 ok() { :; }
 info() { :; }
 ${credentials}`], {
@@ -76,6 +79,17 @@ ${credentials}`], {
     console.log(`✓ UTF-8 installer credentials (${key === 'fixture-first-key' ? 'first install' : 'upgrade preserves existing key'})`)
   }
   for (const installer of [source, await readFile(new URL('../install.sh', import.meta.url), 'utf8')]) {
+    const plistTemplates = [...installer.matchAll(/cat > "\$[A-Z_]*PLIST" <<PLISTEOF\n([\s\S]*?)\nPLISTEOF/g)]
+    assert.equal(plistTemplates.length, 2)
+    for (const [, template] of plistTemplates) {
+      for (const language of ['zh-CN', 'en']) {
+        const plist = spawnSync('/bin/bash', ['-c', 'cat <<PLISTEOF\n' + template + '\nPLISTEOF'], {
+          env: { ECHO_DISPLAY_LANGUAGE: language, PATH: '/usr/bin:/bin' }, encoding: 'utf8',
+        })
+        assert.equal(plist.status, 0, plist.stderr)
+        assert.ok(plist.stdout.includes('<key>ECHO_LANGUAGE</key><string>' + language + '</string>'), 'Both launch agents must receive the selected language even when launchd has no shell locale')
+      }
+    }
     const pref = installer.match(/^ *SAVED_BIND=.*\n[\s\S]*?case "\$SAVED_BIND" in [^\n]+/m)?.[0]
     assert.ok(pref && installer.includes('$BIND_XML'), 'preserve the launchd override in the installed plist')
     for (const [saved, override, expected] of [['', undefined, ''], ['all', undefined, 'all'], ['all', 'local', 'local'], ['', 'all', 'all'], ['all', '', 'local']]) {
@@ -89,7 +103,22 @@ printf '%s' "$BIND_XML"`], { encoding: 'utf8', env: { PLIST: 'fixture.plist', PR
   console.log('✓ both installers preserve and override explicit launchd binding preferences')
   await mkdir(path.join(target, 'bin'))
   const cli = path.join(target, 'bin', 'echo')
-  await copyFile(new URL('../bin/echo', import.meta.url), cli)
+  await mkdir(path.join(target, 'bin/locales'))
+  for (const name of ['echo', 'language.sh', 'cli-format.mjs', 'locales/en.sh', 'locales/zh-CN.sh', 'locales/zh-CN.cli.json']) {
+    await copyFile(new URL('../bin/' + name, import.meta.url), path.join(target, 'bin', name))
+  }
+  await mkdir(path.join(target, 'public/locales'), { recursive: true })
+  for (const language of ['en', 'zh-CN']) {
+    await copyFile(new URL('../public/locales/' + language + '.json', import.meta.url), path.join(target, 'public/locales', language + '.json'))
+    const format = (data) => spawnSync(process.execPath, [path.join(target, 'bin/cli-format.mjs'), 'say', language], { input: JSON.stringify(data), encoding: 'utf8' })
+    const deferred = format({ result: { acted: false, skipped: 'quiet_hours' } })
+    assert.equal(deferred.status, 0, deferred.stderr)
+    assert.doesNotMatch(deferred.stdout, /quiet_hours/)
+    if (language === 'en') assert.doesNotMatch(deferred.stdout, /\p{Script=Han}/u)
+    else assert.match(deferred.stdout, /静默/)
+    const content = 'Meeting with 阿明 — 100% ready'
+    assert.ok(format({ result: { acted: true, message: { content } } }).stdout.includes(content))
+  }
   const fixture = path.join(sandbox, 'listener-fixture.sh')
   await writeFile(fixture, `pgrep() { return 1; }
 curl() { case "$*" in */api/health*) printf %s "$FAKE_HEALTH" ;; */api/summary*) printf %s "$FAKE_SUMMARY" ;; *) return 1 ;; esac; }`)
@@ -104,8 +133,47 @@ curl() { case "$*" in */api/health*) printf %s "$FAKE_HEALTH" ;; */api/summary*)
     if (lanUrl) assert.ok(result.stdout.includes(lanUrl))
     else assert.doesNotMatch(result.stdout, /同一网络访问|192\.0\.2\./)
   }
+  for (const [stored, override, system, expected] of [
+    [null, null, 'en_US.UTF-8', 'Usage:'], [null, null, 'zh_CN.UTF-8', '用法:'],
+    ['zh-CN', null, 'C', '用法:'], ['zh-CN', 'en', 'zh_CN.UTF-8', 'Usage:'],
+    ['en', 'zh-CN', 'C', '用法:'], ['unsupported', null, 'C', '用法:'], ['legacy', null, 'en_US.UTF-8', '用法:'],
+  ]) {
+    const config = path.join(target, 'config.json')
+    if (stored === null) await rm(config, { force: true })
+    else await writeFile(config, JSON.stringify(stored === 'legacy' ? {} : { language: stored }))
+    const env = { PATH: path.dirname(process.execPath) + ':/usr/bin:/bin', HOME: sandbox, LANG: system, ECHO_CONFIG: config }
+    if (override) env.ECHO_LANGUAGE = override
+    const result = spawnSync('/bin/bash', [cli, 'help'], { env, encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.ok(result.stdout.startsWith(expected), result.stdout)
+    if (expected === 'Usage:') assert.doesNotMatch(result.stdout, /\p{Script=Han}/u)
+  }
+  const passwordFixture = path.join(sandbox, 'password-fixture.sh')
+  const sent = path.join(sandbox, 'sent.json')
+  await writeFile(passwordFixture, `curl() {
+    case "$*" in
+      */api/bootstrap*) printf '%s' "$FAKE_BOOTSTRAP" ;;
+      */api/password*) cat > "$SENT_BODY" ;;
+      *) return 1 ;;
+    esac
+  }`)
+  for (const hasPassword of [false, true]) {
+    const current = hasPassword ? 'existing password' : ''
+    const password = 'new pass "with quotes"'
+    const result = spawnSync('/bin/bash', [cli, 'passwd'], {
+      input: (hasPassword ? current + '\n' : '') + password + '\n', encoding: 'utf8',
+      env: { HOME: sandbox, PATH: path.dirname(process.execPath) + ':/usr/bin:/bin',
+        ECHO_LANGUAGE: 'en', BASH_ENV: passwordFixture, SENT_BODY: sent,
+        FAKE_BOOTSTRAP: JSON.stringify({ config: { auth: { required: true, passwordSet: hasPassword } } }) },
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(JSON.parse(await readFile(sent, 'utf8')), { current, password })
+    assert.ok(!result.stdout.includes(password) && (!current || !result.stdout.includes(current)))
+  }
+  console.log('✓ password setup and protected rotation send credentials through stdin')
+  console.log('✓ CLI language follows override, profile, and system locale in order')
   console.log('✓ installed CLI reports the real listener and only offers an active LAN address')
 } finally {
   await rm(sandbox, { recursive: true, force: true })
 }
-console.log('6/6 isolated installer checks passed')
+console.log('Isolated installer checks passed')

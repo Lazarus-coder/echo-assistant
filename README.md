@@ -9,7 +9,7 @@ Plan a change, edit a project, run its checks, and keep track of the work in cha
 
 **macOS · Bring your own model · Alpha**
 
-[Download](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6) · [Explore Echo](site/) · [中文](README.zh-CN.md)
+[Download](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6) · [Explore Echo](site/en.html) · [中文](README.zh-CN.md)
 
 </div>
 
@@ -19,31 +19,33 @@ Plan a change, edit a project, run its checks, and keep track of the work in cha
 
 Echo brings conversations, personal context, and ongoing goals into one place. Start with a question, keep what matters, and return to a clear next step. Choose your own compatible model endpoint and API key; Echo runs on your Mac and stores its records there.
 
-**Which version has these features?** The public alpha.6 installer supports goals through the **主动服务** panel. The alpha.9 source and local Mac build also include chat-created goals, the reminder preview, read-only workspace planning and command review. [Alpha.9 notes](docs/release-notes-0.1.0-alpha.9.md) · [Source setup](docs/development.md#requirements-and-source-setup)
+**Choose your language.** In alpha.10, choose English or Simplified Chinese during sign-in or setup, or change it later under **Settings → Language**. Echo uses that language for the interface, system instructions and new reminders. Your original chat history stays readable as written. [Alpha.10 notes](docs/release-notes-0.1.0-alpha.10.md)
+
+The public alpha.6 installer includes the goals panel. The current source also supports creating goals in chat, previewing reminders, planning in a workspace and reviewing commands. [Run from source](docs/development.md#requirements-and-source-setup)
 
 ## Made for work that continues
 
 | When you want to… | Echo helps you… |
 |---|---|
 | **Work through a question** | Discuss ideas, refine a prompt, search for sources, and revisit a conversation. Image input and generation are available when supported by your selected models. |
-| **Prepare for a goal** | Ask Echo to track a goal with a due date. It prepares a draft in the background. Ask “show me the draft” to read the current result and its sources in chat, even with proactive messages off. Or define it in **主动服务** and choose each goal's sources. With research enabled, it uses public sources, attached documents, and selected folders, and follows relevant dates or source changes. |
+| **Prepare for a goal** | Ask Echo to track a goal with a due date. It prepares a draft in the background. Ask “show me the draft” to read the current result and its sources in chat, even with proactive messages off. Or define it in **Proactive assistance** and choose each goal's sources. With research enabled, it uses public sources, attached documents, and selected folders, and follows relevant dates or source changes. |
 | **Work on a project** | Connect a local workspace to read files and, with the relevant permissions enabled, edit them or run commands. Follow the current step and outcome, then return to saved steps and outputs. |
 
 ### Work on a repository
 
-On your Mac, open **工作区**, choose the project folder and enable workspace access. In the chat composer choose **只读规划** and ask “Find where the CSV is exported and show me what needs to change to add a date column.” Echo can search source text and read the matching lines. For an implementation, switch the same conversation to **执行任务**, enable editing and Shell as needed, and ask it to make the change and run the relevant tests. Review each proposed command. Under the reply, **查看步骤与结果** shows changed files, snapshots and command exit codes in execution order. [Workspace permissions](docs/permissions.md#7-workspace-tools-and-mcp)
+On your Mac, open **Workspace**, choose the project folder and enable workspace access. In the chat composer choose **Read-only plan** and ask “Find where the CSV is exported and show me what needs to change to add a date column.” Echo can search source text and read the matching lines. For an implementation, switch the same conversation to **Work**, enable editing and Shell as needed, and ask it to make the change and run the relevant tests. Review each proposed command. Under the reply, **View steps and results** shows changed files, snapshots and command exit codes in execution order. [Workspace permissions](docs/permissions.md#7-workspace-tools-and-mcp)
 
 ## Context that stays useful
 
 **Memory you can manage.** On a reply that recalled personal facts, open its memory details to see which facts Echo retrieved for that turn. You can inspect, protect, revive, or remove facts in the memory panel.
 
-**When a draft needs your input.** In the current source, open the draft in **主动服务**, answer its question, and submit. Echo saves your answer with the question and queues another draft for the same goal. You can come back later with proactive messages off.
+**When a draft needs your input.** In the current source, open the draft in **Proactive assistance**, answer its question, and submit. Echo saves your answer with the question and queues another draft for the same goal. You can come back later with proactive messages off.
 
-**Follow-up on your terms.** Background research starts off. Turn it on in **主动服务**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **加入跟进** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Return to chat after six hours away to see a brief of recorded activity and open any current draft directly. You can review a result, correct it, pause a goal, or mark it complete.
+**Follow-up on your terms.** Background research starts off. Turn it on in **Proactive assistance**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **Start follow-up** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Return to chat after six hours away to see a brief of recorded activity and open any current draft directly. You can review a result, correct it, pause a goal, or mark it complete.
 
-**Teach Echo what to bring up, and when.** In the current source, Quiet, Balanced and Engaged set starting values for spacing, waiting for a usual chat window, and the minimum content score. Each personal profile adapts from actual chats and explicit feedback. **有用 / 没用** rates the content. **来得正好 / 时机不合适** rates its timing. Before any wording request, a local engine picks one eligible topic and its evidence. You can inspect the reasons on the message and the starting and effective parameters in **主动服务 → 打扰时机与反馈学习**.
+**Teach Echo what to bring up, and when.** In the current source, Quiet, Balanced and Engaged set starting values for spacing, waiting for a usual chat window, and the minimum content score. Each personal profile adapts from actual chats and explicit feedback. **Useful / Not useful** rates the content. **Good timing / Bad timing** rates its timing. Before any wording request, a local engine picks one eligible topic and its evidence. You can inspect the reasons on the message and the starting and effective parameters in **Proactive assistance → Interruption timing and feedback**.
 
-**Preview what Echo would send.** Open **主动服务 → 预览候选提醒** to see up to three candidates, their ranking, and anything delaying them. Mute a topic there or on a delivered suggestion. Other topics can still surface, and a draft you explicitly requested retains its priority. Companion mini-chat offers the same control for a particular kind of screen cue. Previewing uses no model calls.
+**Preview what Echo would send.** Open **Proactive assistance → Preview candidates** to see up to three candidates, their ranking, and anything delaying them. Mute a topic there or on a delivered suggestion. Other topics can still surface, and a draft you explicitly requested retains its priority. Companion mini-chat offers the same control for a particular kind of screen cue. Previewing uses no model calls.
 
 **Optional screen context.** Screen awareness and companion mode start off. If you enable them and grant macOS Screen Recording permission, Echo can use recent screen context and offer brief suggestions. Selecting the deep memory profile also enables screen awareness. Capture can be paused from the menu bar.
 
@@ -80,6 +82,6 @@ This repository describes the current source. Published packages may lag behind 
 - [Getting started](docs/getting-started.md) · [Permissions and data](docs/permissions.md)
 - [Development, tests, and source installation](docs/development.md)
 - [Open-source personal agents, interruption timing and what Echo adopted](docs/landscape.md)
-- [Release history](CHANGELOG.md) · [Report an issue](https://github.com/Lazarus-coder/echo-assistant/issues)
+- [Current release notes](docs/release-notes-0.1.0-alpha.10.md) · [Report an issue](https://github.com/Lazarus-coder/echo-assistant/issues)
 
 No license file is currently included in this repository. Contact the maintainers about reuse.

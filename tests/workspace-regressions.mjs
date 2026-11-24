@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { setActiveLanguage } from '../lib/language.mjs'
 
 const sandbox = await fs.mkdtemp(path.join(os.tmpdir(), 'echo-workspace-'))
 let workspaceRoot = path.join(sandbox, 'workspace')
@@ -18,6 +19,7 @@ await fs.mkdir(process.env.ECHO_DATA_DIR)
 await fs.writeFile(path.join(process.env.ECHO_DATA_DIR, 'private.txt'), 'private memory')
 await fs.writeFile(process.env.ECHO_CONFIG, '{"private":"settings"}')
 const { WORKSPACE_TOOLS, executeWorkspaceTool, validateWorkspaceRoot } = await import('../lib/workspace.mjs')
+setActiveLanguage('en')
 let sequence = 0
 const options = (extra = {}) => ({ workspaceRoot, allowWrites: true, allowShell: true, outputDir: path.join(sandbox, 'output', String(++sequence)), ...extra })
 const call = (name, args, extra = {}) => executeWorkspaceTool(name, args, options(extra))

@@ -24,6 +24,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const LIVE = args.includes('--live')
 const JSON_OUT = args.includes('--json')
+// Imported modules log progress to stdout. Machine output is a single JSON report.
+if (JSON_OUT) console.log = () => {}
 const KEEP = args.includes('--keep')
 let PORT = Number(args[args.indexOf('--port') + 1]) || 0
 let BASE
@@ -1072,7 +1074,9 @@ async function main() {
   }
   const report = { at: new Date().toISOString(), live: LIVE, score: Number(score.toFixed(4)), passed, total, byTrack, results }
   await fs.writeFile(path.join(ROOT, 'tests', 'last-report.json'), JSON.stringify(report, null, 2))
-  if (JSON_OUT) console.log(JSON.stringify(report, null, 2))
+  if (JSON_OUT) {
+    await new Promise((resolve) => process.stdout.write(JSON.stringify(report, null, 2) + '\n', resolve))
+  }
   else {
     console.log(`\n\x1b[1m结果\x1b[0m  ${passed}/${total}  ·  分数 ${(score * 100).toFixed(1)}%`)
     for (const [k, v] of Object.entries(byTrack)) console.log(`  ${k} 轨：${v.pass}/${v.total}`)

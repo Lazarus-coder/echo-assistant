@@ -1,3 +1,6 @@
+import { runtimeText } from './lib/runtime-language.mjs'
+import { APP_LANGUAGES, normalizeLanguage, languageText } from './lib/language.mjs'
+import { localizeWebAsset } from './public/ui-locale.mjs'
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 import crypto from 'node:crypto'
@@ -11,6 +14,8 @@ import { log } from './lib/log.mjs'
 import { readJSON, writeJSON, nowIso, clip, assertId, newId } from './lib/util.mjs'
 import {
   listConversations,
+  hasDefaultTitle,
+  conversationTitle,
   getConversation,
   createConversation,
   deleteConversation,
@@ -207,7 +212,27 @@ function rateLimited(ip) {
 
 /* -------------------------------- helpers ---------------------------------- */
 
+const apiErrorMessages = {
+  'invalid_language': ['请选择英语或简体中文', 'Choose English or Simplified Chinese.'],
+  'unknown_run_route': ['运行记录地址无效', 'Unknown run route'],
+  'not found': ['未找到这项内容', 'Item not found'],
+  'bad path': ['路径无效', 'Invalid path'],
+  'unknown_relationship_route': ['人物资料地址无效', 'Unknown relationship route'],
+  'local_tools_only': ['请在这台 Mac 的浏览器中操作', 'Open Echo in a browser on this Mac'],
+  'privacy_reset_running': ['正在清除个人资料，请稍后重试', 'A privacy reset is in progress. Try again shortly.'],
+  'unknown route': ['未知的请求地址', 'Unknown route'],
+  'loopback_only': ['请在本机操作', 'Use a browser on this Mac'],
+  'bad_current': ['当前口令不正确', 'The current password is incorrect'],
+  'weak': ['口令至少需要 6 个字符', 'Use a password with at least 6 characters'],
+  'invalid request URL': ['请求网址无效', 'Invalid request URL'],
+  'method not allowed': ['此请求方法不可用', 'Method not allowed'],
+  'invalid id': ['标识无效', 'Invalid identifier'],
+}
+
 function send(res, status, body, headers = {}) {
+  if (status >= 400 && !body?.message && Object.hasOwn(apiErrorMessages, body?.error)) {
+    body = { ...body, message: languageText(...apiErrorMessages[body.error]) }
+  }
   const payload = typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body)
   res.writeHead(status, { 'content-type': typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers })
   res.end(payload)
@@ -228,7 +253,7 @@ function publicChatMessage(message) {
 async function publicConversation(conv) {
   const messages = conv.messages ?? []
   const agency = messages.some((m) => m?.proactive || m?.companion) ? (await readState()).agency : null
-  return { ...conv, messages: messages.map((m) => {
+  return { ...conv, title: conversationTitle(conv), messages: messages.map((m) => {
     const message = publicChatMessage(messageWithFeedback(m, conv.id, agency?.outcomes))
     const key = optionalReminderTopic(m)?.topicKey
     return key ? { ...message, topicMuted: Boolean(agency?.mutedTopics?.[key]) } : message
@@ -252,7 +277,7 @@ async function readBody(req, limit = MAX_BODY) {
     req.on('data', (c) => {
       size += c.length
       if (size > limit) {
-        reject(Object.assign(new Error('请求体过大'), { status: 413 }))
+        reject(Object.assign(new Error(runtimeText('server.bodyTooLarge')), { status: 413 }))
         req.destroy()
         return
       }
@@ -264,11 +289,11 @@ async function readBody(req, limit = MAX_BODY) {
       try {
         const body = JSON.parse(raw)
         if (body === null || typeof body !== 'object' || Array.isArray(body)) {
-          return reject(Object.assign(new Error('请求体需要是 JSON 对象'), { status: 400 }))
+          return reject(Object.assign(new Error(runtimeText('server.invalidBody')), { status: 400 }))
         }
         resolve(body)
       } catch {
-        reject(Object.assign(new Error('JSON 解析失败'), { status: 400 }))
+        reject(Object.assign(new Error(runtimeText('server.invalidJson')), { status: 400 }))
       }
     })
     req.on('error', reject)
@@ -290,7 +315,7 @@ const MIME = {
   '.png': 'image/png',
 }
 
-async function serveStatic(req, res, urlPath) {
+async function serveStatic(req, res, url) {
   const map = {
     '/': 'index.html',
     '/index.html': 'index.html',
@@ -301,27 +326,35 @@ async function serveStatic(req, res, urlPath) {
     '/mini.html': 'mini.html',
     '/mini.js': 'mini.js',
   }
-  const file = map[urlPath]
+  const file = Object.hasOwn(map, url.pathname) && map[url.pathname]
   if (!file) return send(res, 404, 'not found')
   const full = path.join(PUBLIC_DIR, file)
   try {
     const stat = await fs.stat(full)
-    // 资源带上 mtime 版本号，避免浏览器拿到旧 JS/CSS（升级后无需手动清缓存）
-    if (file === 'index.html') {
-      let html = await fs.readFile(full, 'utf8')
-      for (const asset of ['app.js', 'style.css', 'logo.svg', 'mini.js']) {
-        const st = await fs.stat(path.join(PUBLIC_DIR, asset)).catch(() => null)
-        if (st) html = html.replaceAll(`"/${asset}"`, `"/${asset}?v=${Math.round(st.mtimeMs)}"`)
+    const language = normalizeLanguage(url.searchParams.get('lang'), (await loadConfig()).language)
+    const localized = file.endsWith('.html') || file.endsWith('.js') || file.endsWith('.webmanifest')
+    let body = await fs.readFile(full)
+    if (localized) {
+      let source = localizeWebAsset(file, body.toString('utf8'), language)
+      if (file.endsWith('.html')) {
+        for (const asset of ['app.js', 'mini.js', 'manifest.webmanifest', 'style.css', 'logo.svg']) {
+          const st = await fs.stat(path.join(PUBLIC_DIR, asset))
+          source = source.replaceAll(`"/${asset}"`, `"/${asset}?v=${Math.round(st.mtimeMs)}&amp;lang=${language}"`)
+        }
       }
-      return send(res, 200, html, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      body = Buffer.from(source)
     }
-    const etag = `W/"${stat.mtimeMs}-${stat.size}"`
+    const headers = {
+      'content-type': MIME[path.extname(file)] ?? 'application/octet-stream',
+      'cache-control': file.endsWith('.html') ? 'no-store' : 'no-cache',
+      ...(localized ? { 'content-language': language } : {}),
+    }
+    const etag = localized ? '"' + crypto.createHash('sha256').update(body).digest('base64url') + '"' : `W/"${stat.mtimeMs}-${stat.size}"`
     if (req.headers['if-none-match'] === etag) {
-      res.writeHead(304, { etag })
+      res.writeHead(304, { ...headers, etag })
       return res.end()
     }
-    const body = await fs.readFile(full)
-    send(res, 200, body, { 'content-type': MIME[path.extname(file)] ?? 'application/octet-stream', etag, 'cache-control': 'no-cache' })
+    send(res, 200, body, { ...headers, etag })
   } catch (err) {
     send(res, 500, `static error: ${err.message}`)
   }
@@ -362,8 +395,8 @@ async function generateTitle(conversationId, userText, assistantText) {
       body: JSON.stringify({
         model: cfg.upstream.utilityModel || cfg.upstream.defaultModel,
         messages: [
-          { role: 'system', content: '给这段对话起一个 4-12 字的中文标题，只输出标题本身，不要引号、不要标点结尾。' },
-          { role: 'user', content: `用户：${clip(userText, 600)}\n助手：${clip(assistantText, 400)}` },
+          { role: 'system', content: runtimeText('server.titlePrompt') },
+          { role: 'user', content: runtimeText('server.titleInput', clip(userText, 600), clip(assistantText, 400)) },
         ],
         max_tokens: 40,
         temperature: 0.2,
@@ -374,9 +407,11 @@ async function generateTitle(conversationId, userText, assistantText) {
     if (!res.ok) return
     const data = await res.json()
     const title = String(data.choices?.[0]?.message?.content ?? '').trim().replace(/^["'「《]+|["'」》]+$/g, '').slice(0, 30)
-    if (title) await patchConversation(conversationId, { title })
+    if (title) await mutateConversation(conversationId, conv => {
+      if (hasDefaultTitle(conv)) { conv.title = title; conv.defaultTitle = false }
+    })
   } catch (err) {
-    log.debug('标题生成失败', err.message)
+    log.debug(runtimeText('server.titleFailed'), err.message)
   }
 }
 
@@ -387,7 +422,7 @@ async function maybeExtractMemory(conv, assistant) {
     const out = await extractMemory({ userText: user.content, assistantText: assistant.content, cfg, source: conv.id })
     return out
   } catch (err) {
-    log.warn('记忆抽取异常', err.message)
+    log.warn(runtimeText('server.extractionFailed'), err.message)
   }
 }
 
@@ -434,7 +469,7 @@ async function persistEnvValues(values) {
     if (v === undefined || v === null) continue
     // 键名不合法或值里带换行的条目直接拒收：写进文件会注入出别的环境变量
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || /[\r\n]/.test(String(v))) {
-      log.warn(`已忽略可疑的 env 条目：${clip(k, 40)}`)
+      log.warn(runtimeText('server.skippedEnvEntry', clip(k, 40)))
       continue
     }
     applied.set(k, String(v))
@@ -473,55 +508,55 @@ function wizardConnection(body) {
   const changed = baseUrl !== current.baseUrl
   const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
   if (baseUrl) {
-    if (!URL.canParse(baseUrl) || !/^https?:\/\//.test(baseUrl) || /[\r\n]/.test(baseUrl)) fail('请输入完整的 HTTP 或 HTTPS 端点地址')
+    if (!URL.canParse(baseUrl) || !/^https?:\/\//.test(baseUrl) || /[\r\n]/.test(baseUrl)) fail(runtimeText('server.invalidEndpoint'))
     const parsed = new URL(baseUrl)
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) fail('端点地址只包含协议、主机和 API 路径；密钥请填入 API Key')
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) fail(runtimeText('server.endpointContainsCredentials'))
   }
-  if (apiKey && !baseUrl) fail('请先输入该 API Key 对应的模型端点')
-  if (/[\r\n]/.test(apiKey)) fail('API Key 不能包含换行')
-  if (changed && !apiKey) fail('更换模型端点时，请输入该端点的 API Key')
-  if (changed && launchEnvNames.has(current.baseUrlEnv)) fail(`请先更新启动环境变量 ${current.baseUrlEnv} 并重启 Echo`)
-  if (apiKey && apiKey !== current.apiKey && launchEnvNames.has(current.apiKeyEnv)) fail(`请先更新启动环境变量 ${current.apiKeyEnv} 并重启 Echo`)
+  if (apiKey && !baseUrl) fail(runtimeText('server.missingKeyEndpoint'))
+  if (/[\r\n]/.test(apiKey)) fail(runtimeText('server.multilineKey'))
+  if (changed && !apiKey) fail(runtimeText('server.replacementKeyRequired'))
+  if (changed && launchEnvNames.has(current.baseUrlEnv)) fail(runtimeText('server.restartForEnvChange', current.baseUrlEnv))
+  if (apiKey && apiKey !== current.apiKey && launchEnvNames.has(current.apiKeyEnv)) fail(runtimeText('server.restartForEnvChange', current.apiKeyEnv))
   return { ...current, baseUrl, apiKey: apiKey || current.apiKey, changed }
 }
 
 // Credential names come from the installed profile. A settings request may change their values.
 function providerSettings(patch, supplied = {}) {
   const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
-  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) fail('提供方环境设置必须为对象')
+  if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) fail(runtimeText('server.invalidProviderEnv'))
   const env = { ...supplied }
   const current = upstreamCreds(cfg)
   const object = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-  if (!object(patch) || ('upstream' in patch && !object(patch.upstream)) || ('search' in patch && !object(patch.search))) fail('模型与搜索设置必须为对象')
-  if (patch.search && 'providers' in patch.search && !object(patch.search.providers)) fail('搜索提供方设置必须为对象')
+  if (!object(patch) || ('upstream' in patch && !object(patch.upstream)) || ('search' in patch && !object(patch.search))) fail(runtimeText('server.invalidProviderSettings'))
+  if (patch.search && 'providers' in patch.search && !object(patch.search.providers)) fail(runtimeText('server.invalidSearchSettings'))
   const up = patch.upstream ?? {}
-  if ('apiKey' in up) fail('模型密钥应填入环境变量')
+  if ('apiKey' in up) fail(runtimeText('server.modelKeyLocation'))
   for (const field of ['defaultModel', 'utilityModel', 'defaultImageModel']) {
-    if (field in up && typeof up[field] !== 'string') fail('模型 ID 需要是文本')
+    if (field in up && typeof up[field] !== 'string') fail(runtimeText('server.invalidModelId'))
   }
   for (const field of ['models', 'imageModels']) {
-    if (field in up && (!Array.isArray(up[field]) || up[field].some((m) => typeof (m?.id ?? m) !== 'string' || !(m?.id ?? m).trim()))) fail('模型列表中的每一项都需要模型 ID')
+    if (field in up && (!Array.isArray(up[field]) || up[field].some((m) => typeof (m?.id ?? m) !== 'string' || !(m?.id ?? m).trim()))) fail(runtimeText('server.missingModelId'))
   }
   const providers = searchProviderCatalog(cfg)
   const names = new Set(['OPENAI_API_KEY', 'OPENAI_BASE_URL', current.apiKeyEnv, current.baseUrlEnv,
     ...Object.values(SEARCH_PROVIDERS).map((p) => p.envVar), ...providers.map((p) => p.envVar)].filter(Boolean))
   for (const [name, value] of Object.entries(env)) {
-    if (!names.has(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) fail('只能写入已配置的提供方环境变量')
-    if (typeof value !== 'string' || /[\r\n]/.test(value)) fail('提供方环境变量需要单行文本')
-    if (launchEnvNames.has(name) && value !== process.env[name]) fail(`请先更新启动环境变量 ${name} 并重启 Echo`)
+    if (!names.has(name) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) fail(runtimeText('server.unknownProviderEnv'))
+    if (typeof value !== 'string' || /[\r\n]/.test(value)) fail(runtimeText('server.multilineProviderEnv'))
+    if (launchEnvNames.has(name) && value !== process.env[name]) fail(runtimeText('server.restartForEnvChange', name))
   }
   for (const name of ['apiKeyEnv', 'baseUrlEnv']) {
-    if (name in up && up[name] !== current[name]) fail('请在本机 config.json 中配置环境变量名称')
+    if (name in up && up[name] !== current[name]) fail(runtimeText('server.configureEnvLocally'))
   }
   if ('baseUrl' in up || current.baseUrlEnv in env) {
-    const clean = (v) => typeof v === 'string' ? v.trim().replace(/\/+$/, '') : fail('模型端点地址必须为文本')
+    const clean = (v) => typeof v === 'string' ? v.trim().replace(/\/+$/, '') : fail(runtimeText('server.invalidEndpointType'))
     const configBase = 'baseUrl' in up ? clean(up.baseUrl) : undefined
     const envBase = current.baseUrlEnv in env ? clean(env[current.baseUrlEnv]) : undefined
-    if (envBase && configBase && envBase !== configBase) fail('配置与环境中的模型端点必须一致')
+    if (envBase && configBase && envBase !== configBase) fail(runtimeText('server.endpointMismatch'))
     const baseUrl = envBase || configBase || ''
     if (baseUrl) wizardConnection({ baseUrl, apiKey: env[current.apiKeyEnv] })
-    else if (env[current.apiKeyEnv]) fail('请先输入该 API Key 对应的模型端点')
-    else if (launchEnvNames.has(current.baseUrlEnv) && current.baseUrl) fail(`请先更新启动环境变量 ${current.baseUrlEnv} 并重启 Echo`)
+    else if (env[current.apiKeyEnv]) fail(runtimeText('server.missingKeyEndpoint'))
+    else if (launchEnvNames.has(current.baseUrlEnv) && current.baseUrl) fail(runtimeText('server.restartForEnvChange', current.baseUrlEnv))
     if (!launchEnvNames.has(current.baseUrlEnv)) env[current.baseUrlEnv] = baseUrl
     if (baseUrl && baseUrl !== current.baseUrl) {
       patch.upstream = { models: [], defaultModel: '', utilityModel: '', imageModels: [], defaultImageModel: '', fallback: [], ...up, baseUrl, providerChangedAt: nowIso() }
@@ -532,15 +567,15 @@ function providerSettings(patch, supplied = {}) {
   for (const provider of providers) {
     const next = patch.search?.providers?.[provider.id]
     if (next === undefined) continue
-    if (!object(next)) fail('每个搜索提供方的设置必须为对象')
+    if (!object(next)) fail(runtimeText('server.invalidSearchProviderSettings'))
     delete next.credentialRevision
-    if ('envVar' in next && next.envVar !== provider.envVar) fail('请在本机 config.json 中配置搜索提供方的环境变量名称')
-    if ('apiKey' in next) fail('搜索密钥应填入环境变量')
+    if ('envVar' in next && next.envVar !== provider.envVar) fail(runtimeText('server.configureSearchEnvLocally'))
+    if ('apiKey' in next) fail(runtimeText('server.searchKeyLocation'))
     if (!Object.hasOwn(next, 'endpoint') || (next.endpoint || SEARCH_PROVIDERS[provider.id].endpoint) === provider.endpoint) continue
-    if (provider.needsKey && !env[provider.envVar]) fail(`更换 ${provider.label} 端点时，请输入该端点的密钥`)
+    if (provider.needsKey && !env[provider.envVar]) fail(runtimeText('server.replacementSearchKeyRequired', provider.label))
     if (provider.id === 'custom' && Object.keys(cfg.search.providers.custom?.headers ?? {}).length) {
       // Deep-merge must not carry unmentioned authenticated headers to another server.
-      if (next.headers && Object.keys(cfg.search.providers.custom.headers).some((name) => !Object.hasOwn(next.headers, name))) fail('更换自定义搜索端点时，请完整指定新请求头或清空请求头')
+      if (next.headers && Object.keys(cfg.search.providers.custom.headers).some((name) => !Object.hasOwn(next.headers, name))) fail(runtimeText('server.replacementHeadersRequired'))
       next.headers ??= null
     }
   }
@@ -566,25 +601,25 @@ function providerSettings(patch, supplied = {}) {
 /** BYOK 引导页第二步用：拿 key 去问端点有哪些模型。 */
 async function discoverModels({ baseUrl, apiKey }) {
   const base = String(baseUrl ?? '').replace(/\/+$/, '')
-  if (!/^https?:\/\//.test(base)) throw new Error('端点地址要写成 https://… 的完整 URL')
-  if (!apiKey) throw new Error('缺少 API Key')
+  if (!/^https?:\/\//.test(base)) throw new Error(runtimeText('server.fullUrlRequired'))
+  if (!apiKey) throw new Error(runtimeText('server.missingApiKey'))
   const res = await fetch(`${base}/models`, {
     headers: { authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(20000),
   })
   if (!res.ok) {
     await res.body?.cancel()
-    const hint = [401, 403].includes(res.status) ? '请检查此端点的 API Key 和模型列表权限' : '可检查端点地址，或直接输入已知的模型 ID'
-    throw new Error(`模型列表请求返回 HTTP ${res.status}，${hint}`)
+    const hint = [401, 403].includes(res.status) ? runtimeText('server.checkModelListPermission') : runtimeText('server.checkEndpointOrModel')
+    throw new Error(runtimeText('server.modelListHttpError', res.status, hint))
   }
   let data
   try {
     data = await res.json()
   } catch {
-    throw new Error('端点没有返回 JSON，请确认是 OpenAI 兼容的 /v1 地址')
+    throw new Error(runtimeText('server.invalidProviderJson'))
   }
   const rows = data?.data ?? data?.models
-  if (!Array.isArray(rows)) throw new Error('此端点没有返回模型列表，可直接输入已知的模型 ID')
+  if (!Array.isArray(rows)) throw new Error(runtimeText('server.emptyModelList'))
   const models = [...new Set(rows.map((m) => typeof m === 'string' ? m : m?.id).filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim()))]
   return { baseUrl: base, count: models.length, models: models.slice(0, 400) }
 }
@@ -609,7 +644,7 @@ async function permissionsReport(req) {
     node: process.version,
     platform: process.platform,
     port: listener.port,
-    bind: listener.bind === 'all' ? '0.0.0.0（局域网监听）' : '127.0.0.1（仅本机）',
+    bind: listener.bind === 'all' ? runtimeText('server.lanBinding') : runtimeText('server.localBinding'),
     lanAddresses: listener.lanAddresses, lanUrl: listener.lanUrl,
     authRequired: cfg.requirePassword === true,
     canSetInitialPassword: !authState.passwordSet && isLocalToolsRequest(req),
@@ -618,11 +653,11 @@ async function permissionsReport(req) {
     dataDir: DATA,
     tools: { swiftc, screencapture },
     notes: {
-      screen: '屏幕感知需要「屏幕录制」权限：点状态栏图标里的授权项，或在 系统设置 → 隐私与安全性 → 屏幕录制 里勾选 EchoBar。授权后重启状态栏图标。',
-      swifts: swiftc ? '可以编译状态栏 App（./bin/echo up 用的是已编译好的 build/EchoBar）' : '没找到 swiftc：先装 Xcode Command Line Tools（xcode-select --install）再跑 ./install.sh',
-      notifications: '主动消息用 osascript 发通知；首次可能需要在 系统设置 → 通知 里允许',
-      persist: '常驻与开机自启用 ./install.sh 注册 launchd：com.echo.chat（服务）+ com.echo.menubar（图标）',
-      store: '所有数据都在本机 data/ 目录：明文可读、可备份、可删除',
+      screen: runtimeText('server.screenPermissionGuide'),
+      swifts: swiftc ? runtimeText('server.compilerAvailable') : runtimeText('server.compilerMissing'),
+      notifications: runtimeText('server.notificationGuide'),
+      persist: runtimeText('server.startupGuide'),
+      store: runtimeText('server.storageGuide'),
     },
   }
 }
@@ -640,7 +675,7 @@ async function screenPermissionProbe() {
     return {
       granted: ok && size > 2000,
       bytes: size,
-      hint: ok && size > 2000 ? '已授权' : '未授权或抓不到画面：到 系统设置 → 隐私与安全性 → 屏幕录制 勾选 EchoBar（或你启动它的终端），然后重启状态栏图标',
+      hint: ok && size > 2000 ? runtimeText('server.permissionGranted') : runtimeText('server.screenPermissionMissing'),
     }
   } finally {
     await fs.rm(file, { force: true }).catch(() => {})
@@ -652,6 +687,7 @@ async function screenPermissionProbe() {
 async function api(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean) // ['api', ...]
   const method = req.method
+  cfg = await loadConfig()
   const authRequired = cfg.requirePassword === true
   const needsAuth = authRequired && !(method === 'GET' && seg[1] === 'health')
   let who = null
@@ -659,26 +695,22 @@ async function api(req, res, url) {
     const auth = await readJSON(P.auth, {})
     if (!auth.password) {
       if (method === 'POST' && seg[1] === 'password') return setupPassword(req, res)
-      return send(res, 401, { error: 'no_password', message: '还没有设置访问口令，请先设置' })
+      return send(res, 401, { error: 'no_password', message: runtimeText('server.setPasswordFirst') })
     }
     who = await authed(req)
     if (!who) {
       if (method === 'POST' && seg[1] === 'login') return doLogin(req, res)
-      return send(res, 401, { error: 'unauthorized', message: '口令不正确或未登录' })
+      return send(res, 401, { error: 'unauthorized', message: runtimeText('server.signInRequired') })
     }
     if (method !== 'GET' && req.headers['x-echo-request'] !== 'echo') {
-      return send(res, 403, { error: 'csrf', message: '缺少 x-echo-request 头' })
+      return send(res, 403, { error: 'csrf', message: runtimeText('server.missingCsrfHeader') })
     }
   } else if (method !== 'GET' && seg[1] !== 'login' && seg[1] !== 'password' && seg[1] !== 'logout' && req.headers['x-echo-request'] !== 'echo') {
     // 免登录也保留这一层：跨站网页无法伪造自定义头，也就打不到你的额度
-    return send(res, 403, { error: 'csrf', message: '缺少 x-echo-request 头' })
+    return send(res, 403, { error: 'csrf', message: runtimeText('server.missingCsrfHeader') })
   }
 
   const p = seg.slice(1).join('/')
-
-  // 每次请求都对齐配置（loadConfig 带 mtime 缓存，代价是一次 stat）：
-  // 这样 CLI、状态栏、别的接口改过配置后都立即生效
-  cfg = await loadConfig()
 
   if (method === 'GET' && p === 'health') {
     const { address, port } = server.address()
@@ -699,7 +731,7 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'auth') {
     const body = await readBody(req)
     cfg = await saveConfig({ requirePassword: Boolean(body.required) })
-    log.warn(`访问控制：${cfg.requirePassword ? '已开启口令验证' : '已关闭口令验证'}`)
+    log.warn(runtimeText('server.accessControl', cfg.requirePassword ? runtimeText('server.passwordEnabled') : runtimeText('server.passwordDisabled')))
     return send(res, 200, { required: cfg.requirePassword, passwordSet: authState.passwordSet })
   }
 
@@ -733,6 +765,7 @@ async function api(req, res, url) {
       ok: true,
       listener: describeListener(server.address()),
       version: VERSION,
+      language: cfg.language,
       busy: inflight.size,
       unread: main?.unread ?? 0,
       proactiveLastAt: state?.proactive?.lastAt ?? null,
@@ -761,7 +794,7 @@ async function api(req, res, url) {
         intervalSeconds: cfg.companion?.intervalSeconds ?? 20,
         pending: (await pendingBubbles({ busyConversations: () => new Set(inflight.keys()) })).length,
       },
-      mainTitle: main?.title ?? '主对话',
+      mainTitle: conversationTitle(main ?? { id: MAIN_ID }),
       lastPreview: clip(String(main?.messages?.at(-1)?.content ?? ''), 80),
     })
   }
@@ -769,20 +802,23 @@ async function api(req, res, url) {
   if (method === 'PATCH' && p === 'settings') {
     const body = await readBody(req)
     let patch = body.config ?? {}
+    if (patch && typeof patch === 'object' && 'language' in patch && !APP_LANGUAGES.includes(patch.language)) {
+      return send(res, 400, { error: 'invalid_language' })
+    }
     const env = providerSettings(patch, body.env)
     if (Object.hasOwn(patch, 'attention')) {
       const a = patch.attention
-      if (!a || typeof a !== 'object' || Array.isArray(a)) return send(res, 400, { error: '提醒设置必须为对象' })
+      if (!a || typeof a !== 'object' || Array.isArray(a)) return send(res, 400, { error: runtimeText('server.invalidReminderSettings') })
       if (Object.hasOwn(a, 'style') && !ATTENTION_STYLES.includes(a.style)) {
-        return send(res, 400, { error: '请选择安静、均衡或积极的提醒风格' })
+        return send(res, 400, { error: runtimeText('server.invalidReminderStyle') })
       }
     }
     if ((patch.harness !== undefined || patch.mcpServers !== undefined || body.restartMcp) && !isLocalToolsRequest(req)) {
-      return send(res, 403, { error: 'local_tools_only', message: '工作区与 MCP 能力只能在本机浏览器配置' })
+      return send(res, 403, { error: 'local_tools_only', message: runtimeText('server.localWorkspaceOnly') })
     }
     if (patch.harness !== undefined) patch.harness = await validateHarnessConfig(patch.harness, cfg.harness)
     if (patch.proactive?.research !== undefined) {
-      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '后台研究只能在本机浏览器配置' })
+      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: runtimeText('server.localResearchOnly') })
       patch.proactive.research = validateResearchSettings(patch.proactive.research, cfg.proactive?.research)
     }
     // 记忆档位是预设：选档就把具体旋钮一次性写实，避免"档位与数值打架"
@@ -790,15 +826,15 @@ async function api(req, res, url) {
     const written = await writeEnvValues(env)
     cfg = await saveConfig(patch)
     if (patch.proactive?.research) {
-      if (!cfg.proactive.research.enabled || !cfg.proactive.research.discoverChats) await cancelDiscovery('后台研究权限已改变')
+      if (!cfg.proactive.research.enabled || !cfg.proactive.research.discoverChats) await cancelDiscovery(runtimeText('server.researchPermissionChanged'))
       if (!cfg.proactive.research.enabled) {
-        cancelCommitmentWork('后台研究已关闭', { researchOnly: true })
-        await cancelAndDrainResearch('后台研究已关闭')
+        cancelCommitmentWork(runtimeText('server.researchDisabled'), { researchOnly: true })
+        await cancelAndDrainResearch(runtimeText('server.researchDisabled'))
       }
       else kickPreparation()
     }
-    if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns('工具权限已更改，请重新发起')
-    if (written.length) log.info(`设置页写入提供方变量：${written.join(',')}`)
+    if (patch.harness !== undefined || patch.mcpServers !== undefined) cancelHarnessRuns(runtimeText('server.toolPermissionsChanged'))
+    if (written.length) log.info(runtimeText('server.providerEnvSaved', written.join(',')))
     if (patch.mcpServers !== undefined || body.restartMcp) await connectMcp()
     return send(res, 200, { config: publicConfig(cfg, req), mcp: mcp.status() })
   }
@@ -811,15 +847,15 @@ async function api(req, res, url) {
     })
   }
   if (method === 'PATCH' && p === 'harness') {
-    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '请在本机用 localhost 或 127.0.0.1 打开 Echo 来设置工作区' })
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: runtimeText('server.openLocalWorkspace') })
     const body = await readBody(req)
     const harness = await validateHarnessConfig(body.config ?? body, cfg.harness)
-    if (JSON.stringify(harness) !== JSON.stringify(cfg.harness)) cancelHarnessRuns('工作区权限已更改，请重新发起')
+    if (JSON.stringify(harness) !== JSON.stringify(cfg.harness)) cancelHarnessRuns(runtimeText('server.workspacePermissionsChanged'))
     cfg = await saveConfig({ harness })
     return send(res, 200, { config: cfg.harness, local: true })
   }
   if (seg[1] === 'runs') {
-    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '运行记录与工具确认仅在本机提供' })
+    if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: runtimeText('server.localRunsOnly') })
     if (method === 'GET' && !seg[2]) return send(res, 200, { runs: await listRuns({ conversationId: url.searchParams.get('conversationId') || undefined }) })
     if (seg[2]) {
       const runId = assertId(seg[2])
@@ -843,7 +879,7 @@ async function api(req, res, url) {
 
   if (method === 'POST' && p === 'conversations') {
     const body = await readBody(req)
-    const conv = await createConversation({ title: body.title ?? '新对话', model: body.model, system: body.system })
+    const conv = await createConversation({ title: body.title, model: body.model, system: body.system })
     return send(res, 200, await publicConversation(conv))
   }
   if (method === 'GET' && p === 'conversations') return send(res, 200, { conversations: await listConversations() })
@@ -855,7 +891,7 @@ async function api(req, res, url) {
       const messageId = assertId(seg[4])
       const conv = await getConversation(id)
       const reply = conv?.messages?.find((message) => message.id === messageId && message.role === 'assistant')
-      if (!reply) return send(res, 404, { error: '找不到这条回复' })
+      if (!reply) return send(res, 404, { error: runtimeText('server.replyNotFound') })
       return send(res, 200, await recalledFactsForReply(reply.recalled))
     }
     if (method === 'GET' && !action) {
@@ -866,14 +902,14 @@ async function api(req, res, url) {
     if (method === 'PATCH' && !action) {
       const body = await readBody(req)
       if ('workspaceMode' in body) {
-        if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: '请在本机设置工作区模式' })
-        if (inflight.has(id)) return send(res, 409, { error: 'busy', message: '请等本轮运行结束后再切换模式' })
+        if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only', message: runtimeText('server.localWorkspaceMode') })
+        if (inflight.has(id)) return send(res, 409, { error: 'busy', message: runtimeText('server.waitForRun') })
       }
       const conv = await patchConversation(id, body)
       return send(res, conv ? 200 : 404, conv ? await publicConversation(conv) : { error: 'not found' })
     }
     if (method === 'DELETE' && !action) {
-      if (id === MAIN_ID) return send(res, 400, { error: '主对话不能删除' })
+      if (id === MAIN_ID) return send(res, 400, { error: runtimeText('server.cannotDeleteMain') })
       await deleteConversation(id)
       return send(res, 200, { ok: true })
     }
@@ -921,7 +957,7 @@ async function api(req, res, url) {
       const msg = {
         id: newId('m'),
         role: 'assistant',
-        content: `画好了：${result.prompt}`,
+        content: runtimeText('server.imageReady', result.prompt),
         images: [{ url: result.path, prompt: result.prompt, model: result.model }],
         model: result.model,
         createdAt: nowIso(),
@@ -987,7 +1023,7 @@ async function api(req, res, url) {
       if (method === 'PATCH') return send(res, 200, { person: await updateRelationshipPerson(id, await readBody(req)) })
       if (method === 'DELETE') {
         const removed = await deleteRelationshipPerson(id)
-        return send(res, removed ? 200 : 404, removed ? { ok: true } : { error: '人物背景不存在' })
+        return send(res, removed ? 200 : 404, removed ? { ok: true } : { error: runtimeText('server.personNotFound') })
       }
     }
     return send(res, 404, { error: 'unknown_relationship_route' })
@@ -1020,7 +1056,7 @@ async function api(req, res, url) {
       researchDocuments: await Promise.all((await listResearchDocuments()).map((document) => getResearchDocument(document.id))),
       agencyOutcomes: state.agency?.outcomes ?? {},
       relationship: await getRelationships(),
-      note: '凭据（API key / 口令哈希 / 会话 cookie）不在此备份里',
+      note: runtimeText('server.backupExcludesCredentials'),
     }
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
@@ -1031,11 +1067,11 @@ async function api(req, res, url) {
 
   if (method === 'POST' && p === 'memory/wipe') {
     const body = await readBody(req)
-    if (body.confirm !== 'WIPE') return send(res, 400, { error: 'confirm_required', message: '需要 {"confirm":"WIPE"} 才执行' })
+    if (body.confirm !== 'WIPE') return send(res, 400, { error: 'confirm_required', message: runtimeText('server.confirmWipe') })
     const scope = body.scope === 'all' ? 'all' : 'memory'
     const before = await memoryStats()
     const wiped = await wipeEverything({ includeConversations: scope === 'all' })
-    log.warn(`用户执行了「全部忘掉」（scope=${scope}）`)
+    log.warn(runtimeText('server.wipedByUser', scope))
     return send(res, 200, { ok: true, scope, before, wiped, stats: await memoryStats() })
   }
 
@@ -1063,20 +1099,20 @@ async function api(req, res, url) {
     const body = await readBody(req)
     const password = body.password ?? ''
     if (password !== '') {
-      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'loopback_only', message: '请在 Mac 本机浏览器设置口令' })
-      if (typeof password !== 'string' || password.length < 6) return send(res, 400, { error: 'weak', message: '口令至少 6 位' })
-      if (authState.passwordSet) return send(res, 409, { error: 'password_exists', message: '已有访问口令，请在设置中管理' })
+      if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'loopback_only', message: runtimeText('server.localPasswordOnly') })
+      if (typeof password !== 'string' || password.length < 6) return send(res, 400, { error: 'weak', message: runtimeText('server.passwordTooShort') })
+      if (authState.passwordSet) return send(res, 409, { error: 'password_exists', message: runtimeText('server.existingPassword') })
     }
     const connection = wizardConnection(body)
-    if (!connection.baseUrl || !connection.apiKey) return send(res, 400, { error: 'missing_connection', message: '请填写模型端点和该端点的 API Key' })
+    if (!connection.baseUrl || !connection.apiKey) return send(res, 400, { error: 'missing_connection', message: runtimeText('server.missingConnection') })
     const defaultModel = body.defaultModel ?? (connection.changed ? '' : cfg.upstream.defaultModel)
-    if (typeof defaultModel !== 'string' || !defaultModel.trim()) return send(res, 400, { error: 'missing_model', message: '请选择或输入一个默认模型' })
+    if (typeof defaultModel !== 'string' || !defaultModel.trim()) return send(res, 400, { error: 'missing_model', message: runtimeText('server.missingDefaultModel') })
     for (const rows of [body.models, body.imageModels]) {
       if (rows !== undefined && (!Array.isArray(rows) || rows.some((m) => typeof (m?.id ?? m) !== 'string' || !(m?.id ?? m).trim()))) {
-        return send(res, 400, { error: 'invalid_models', message: '模型列表中的每一项都需要模型 ID' })
+        return send(res, 400, { error: 'invalid_models', message: runtimeText('server.missingModelId') })
       }
     }
-    if (body.search?.order !== undefined && !Array.isArray(body.search.order)) return send(res, 400, { error: 'invalid_search', message: '搜索顺序需要是列表' })
+    if (body.search?.order !== undefined && !Array.isArray(body.search.order)) return send(res, 400, { error: 'invalid_search', message: runtimeText('server.invalidSearchOrder') })
     const envValues = {}
     for (const p of searchProviderCatalog(cfg)) {
       if (p.needsKey && body.keys?.[p.envVar]) envValues[p.envVar] = String(body.keys[p.envVar]).trim()
@@ -1087,7 +1123,7 @@ async function api(req, res, url) {
     if (body.baseUrl) upstream.baseUrl = connection.baseUrl
     if (Array.isArray(body.models)) {
       const previous = new Map((connection.changed ? [] : cfg.upstream.models).map((m) => [m.id, m]))
-      upstream.models = body.models.map((m) => typeof m === 'string' ? previous.get(m) ?? { id: m, label: m, group: '已发现' } : m)
+      upstream.models = body.models.map((m) => typeof m === 'string' ? previous.get(m) ?? { id: m, label: m, groupKind: 'discovered' } : m)
     }
     upstream.defaultModel = defaultModel.trim()
     if (typeof body.utilityModel === 'string') upstream.utilityModel = body.utilityModel.trim()
@@ -1106,7 +1142,7 @@ async function api(req, res, url) {
       await createSession(res)
     }
     if (body.restartMcp) await connectMcp()
-    log.info(`引导完成：端点 ${cfg.upstream.baseUrl || '(来自环境变量)'} · 模型 ${cfg.upstream.models.length} 个 · 记忆档 ${cfg.memory.profile} · 搜索链 ${(cfg.search.order ?? []).join('→')}${written.length ? ` · 写入密钥 ${written.join(',')}` : ''}`)
+    log.info(runtimeText('server.setupComplete', cfg.upstream.baseUrl || runtimeText('server.fromEnvironment'), cfg.upstream.models.length, cfg.memory.profile, (cfg.search.order ?? []).join('→'), written.length ? runtimeText('server.savedKeys', written.join(',')) : ''))
     return send(res, 200, { ok: true, envKeys: written, onboarding: onboardingState(), config: publicConfig(cfg, req) })
   }
 
@@ -1201,7 +1237,7 @@ async function api(req, res, url) {
   }
   if (method === 'POST' && p === 'memory/forget') {
     const body = await readBody(req)
-    const target = await forgetById(String(body.id ?? ''), String(body.why ?? '用户要求忘记'))
+    const target = await forgetById(String(body.id ?? ''), String(body.why ?? runtimeText('server.forgetByUser')))
     if (!target) return send(res, 404, { error: 'not found' })
     return send(res, 200, { ok: true, forgotten: { id: target.id, text: target.text }, stats: await memoryStats() })
   }
@@ -1247,7 +1283,7 @@ async function api(req, res, url) {
   if (method === 'PUT' && p === 'memory/core') {
     const body = await readBody(req)
     const text = String(body.text ?? '')
-    if (text.length > 40000) return send(res, 400, { error: '太长' })
+    if (text.length > 40000) return send(res, 400, { error: runtimeText('server.tooLong') })
     await saveCore(text, { backup: true })
     return send(res, 200, { ok: true, stats: await memoryStats() })
   }
@@ -1267,7 +1303,7 @@ async function api(req, res, url) {
   }
 
   if (method === 'POST' && p === 'dream') {
-    if (dreamRunning()) return send(res, 409, { error: 'dream 正在运行' })
+    if (dreamRunning()) return send(res, 409, { error: runtimeText('server.dreamBusy') })
     const result = await runDream({ trigger: 'manual' })
     return send(res, 200, { result, status: await dreamStatus(), memory: await memoryStats() })
   }
@@ -1306,7 +1342,7 @@ async function api(req, res, url) {
       const patch = await readBody(req)
       if (patch.scope?.folders?.length && !isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
       const commitment = await updateCommitment(id, patch)
-      if (!commitment) return send(res, 404, { error: '目标不存在' })
+      if (!commitment) return send(res, 404, { error: runtimeText('server.goalNotFound') })
       if (patch.status === 'done') record({ kind: 'commitment_completed', commitmentId: id })
       send(res, 200, { commitment })
       if (commitment.status === 'active') kickPreparation()
@@ -1314,7 +1350,7 @@ async function api(req, res, url) {
     }
     if (method === 'POST' && seg[3] === 'prepare' && !seg[4]) {
       const commitment = await requestPreparation(id)
-      if (!commitment) return send(res, 404, { error: '目标不存在' })
+      if (!commitment) return send(res, 404, { error: runtimeText('server.goalNotFound') })
       send(res, 202, { queued: true, commitment })
       kickPreparation()
       return
@@ -1339,7 +1375,7 @@ async function api(req, res, url) {
   if (method === 'GET' && p === 'proactive/preview') return send(res, 200, await proactivePreview({ busyConversations }))
   if ((method === 'PUT' || method === 'DELETE') && p === 'proactive/topic-mutes') {
     const { topicKey, conversationId, messageId } = await readBody(req)
-    if (typeof topicKey !== 'string' || !/^(proactive|companion):[0-9a-f]{24}$/.test(topicKey)) return send(res, 400, { error: '无效的话题' })
+    if (typeof topicKey !== 'string' || !/^(proactive|companion):[0-9a-f]{24}$/.test(topicKey)) return send(res, 400, { error: runtimeText('server.invalidTopic') })
     const muted = method === 'PUT'
     let selection
     if (muted) {
@@ -1352,7 +1388,7 @@ async function api(req, res, url) {
         const preview = await proactivePreview({ busyConversations })
         selection = preview.items.find((row) => !row.requested && row.topicKey === topicKey)
       }
-      if (selection?.topicKey !== topicKey) return send(res, 409, { error: '候选话题已变化，请刷新预览或从原提醒操作。' })
+      if (selection?.topicKey !== topicKey) return send(res, 409, { error: runtimeText('server.staleTopic') })
     }
     if (backgroundSuspended) return send(res, 409, { error: 'privacy_reset_running' })
     await setTopicMute(topicKey, selection)
@@ -1384,7 +1420,7 @@ async function api(req, res, url) {
   if (method === 'GET' && p === 'mcp') return send(res, 200, { servers: mcp.status(), tools: mcp.tools() })
   if (method === 'POST' && p === 'mcp/reload') {
     if (!isLocalToolsRequest(req)) return send(res, 403, { error: 'local_tools_only' })
-    cancelHarnessRuns('MCP 连接正在重新加载')
+    cancelHarnessRuns(runtimeText('server.reloadingMcp'))
     await refreshConfig()
     return send(res, 200, { servers: await connectMcp() })
   }
@@ -1400,13 +1436,13 @@ function upstreamReady() {
 /** 隐私兜底：把记忆（可选连同会话）清空，但在遗忘日志里留一条可解释的记录。 */
 let wiping = false
 async function wipeEverything({ includeConversations = false } = {}) {
-  if (wiping) throw Object.assign(new Error('wipe 已在进行'), { status: 409 })
+  if (wiping) throw Object.assign(new Error(runtimeText('server.wipeInProgress')), { status: 409 })
   wiping = true
   backgroundSuspended = true
   try {
-  await cancelDiscovery('隐私重置')
-  cancelCommitmentWork('隐私重置')
-  await cancelAndDrainResearch('隐私重置')
+  await cancelDiscovery(runtimeText('server.privacyReset'))
+  cancelCommitmentWork(runtimeText('server.privacyReset'))
+  await cancelAndDrainResearch(runtimeText('server.privacyReset'))
   await clearResearchDocuments()
   await clearRuns()
   // Revoke background work before any file I/O so an in-flight run cannot restore it.
@@ -1423,13 +1459,13 @@ async function wipeEverything({ includeConversations = false } = {}) {
   const before = await memoryStats()
   const counts = { observations: before.observations, conversations: 0 }
   await logForgetting(
-    [{ id: 'ALL', text: `用户清空了全部记忆（${before.observations} 条有效事实、${before.total} 条历史）`, kind: 'system', importance: 5 }],
-    { trigger: 'user', kind: 'wiped', note: '隐私兜底操作：只留这条记录用于解释' },
+    [{ id: 'ALL', text: runtimeText('server.wipedMemory', before.observations, before.total), kind: 'system', importance: 5 }],
+    { trigger: 'user', kind: 'wiped', note: runtimeText('server.wipeNote') },
   )
   await fs.writeFile(path.join(memDir, 'observations.jsonl'), '')
   await fs.writeFile(path.join(memDir, 'working.jsonl'), '')
   await fs.rm(path.join(memDir, 'graph.json'), { force: true })
-  const seed = `# Echo 核心记忆\n\n> 这份文件会注入每一次对话。刚刚被清空过（${nowIso()}），从零开始。\n\n## 关于你\n\n## 正在跟进\n\n## 偏好与约定\n\n## 待办与提醒\n`
+  const seed = runtimeText('server.clearedCoreSeed', nowIso())
   await saveCore(seed, { backup: true })
   if (includeConversations) {
     for (const m of await listConversations()) {
@@ -1437,7 +1473,8 @@ async function wipeEverything({ includeConversations = false } = {}) {
         await mutateConversation(MAIN_ID, (conv) => {
           conv.messages = []
           conv.digest = null
-          conv.title = '主对话'
+          conv.defaultTitle = true
+          conv.title = conversationTitle(conv)
         })
         continue
       }
@@ -1506,8 +1543,23 @@ async function diagnostics() {
   }
 }
 
+const modelGroups = {
+  manual: ['手动配置', 'Manually configured'],
+  discovered: ['已发现', 'Discovered'],
+  image: ['出图', 'Generate image'],
+}
+
+function displayModel(model, language) {
+  // Older onboarding rows saved the translated group alongside an unmodified ID and label.
+  const kind = model.groupKind ?? (model.id === model.label && Object.keys(modelGroups).find(k => modelGroups[k].includes(model.group)))
+  return Object.hasOwn(modelGroups, kind)
+    ? { ...model, groupKind: kind, group: languageText(...modelGroups[kind], language) }
+    : model
+}
+
 function publicConfig(c, req) {
   return {
+    language: c.language,
     bind: c.bind,
     port: c.port,
     listener: describeListener(server.address()),
@@ -1515,8 +1567,8 @@ function publicConfig(c, req) {
     onboarding: onboardingState(),
     providers: { search: searchProviderCatalog(c), upstream: UPSTREAM_PRESETS, profiles: Object.keys(MEMORY_PROFILES) },
     upstreamConfigured: Boolean(upstreamCreds(c).configured),
-    models: c.upstream.models,
-    imageModels: c.upstream.imageModels ?? [],
+    models: c.upstream.models.map(m => displayModel(m, c.language)),
+    imageModels: (c.upstream.imageModels ?? []).map(m => displayModel(m, c.language)),
     defaultImageModel: c.upstream.defaultImageModel,
     media: c.media,
     defaultModel: c.upstream.defaultModel,
@@ -1541,19 +1593,19 @@ function setupAllowed(req) {
 }
 
 async function setupPassword(req, res) {
-  if (!setupAllowed(req)) return send(res, 403, { error: 'setup_from_loopback_only', message: '首次设置口令只能在本机浏览器完成' })
+  if (!setupAllowed(req)) return send(res, 403, { error: 'setup_from_loopback_only', message: runtimeText('server.firstPasswordLocal') })
   const body = await readBody(req)
   const password = String(body.password ?? '')
-  if (password.length < 6) return send(res, 400, { error: 'weak', message: '口令至少 6 位' })
+  if (password.length < 6) return send(res, 400, { error: 'weak', message: runtimeText('server.passwordTooShort') })
   await setPassword(password)
   await createSession(res)
-  log.info('已设置访问口令')
+  log.info(runtimeText('server.passwordSet'))
   return send(res, 200, { ok: true })
 }
 
 async function doLogin(req, res) {
   const ip = req.socket?.remoteAddress ?? '?'
-  if (rateLimited(ip)) return send(res, 429, { error: 'too_many_attempts', message: '尝试过多，等 5 分钟' })
+  if (rateLimited(ip)) return send(res, 429, { error: 'too_many_attempts', message: runtimeText('server.loginBackoff') })
   const body = await readBody(req)
   const auth = await readJSON(P.auth, {})
   const ok = auth.password ? verifyPassword(String(body.password ?? ''), auth.password) : false
@@ -1561,8 +1613,8 @@ async function doLogin(req, res) {
     const rec = loginAttempts.get(ip) ?? { first: Date.now(), count: 0 }
     rec.count++
     loginAttempts.set(ip, rec)
-    log.warn('口令错误', ip)
-    return send(res, 401, { error: 'bad_password', message: '口令不对' })
+    log.warn(runtimeText('server.wrongPassword'), ip)
+    return send(res, 401, { error: 'bad_password', message: runtimeText('server.badPassword') })
   }
   loginAttempts.delete(ip)
   await createSession(res)
@@ -1594,9 +1646,9 @@ async function streamChatHandler(req, res) {
   const conversationId = assertId(String(body.conversationId ?? ''))
   if ('editMessageId' in body) {
     assertId(body.editMessageId)
-    if (body.regenerate || typeof body.userText !== 'string' || !body.userText.trim()) return send(res, 400, { error: '请填写要替换的消息' })
+    if (body.regenerate || typeof body.userText !== 'string' || !body.userText.trim()) return send(res, 400, { error: runtimeText('server.missingReplacement') })
   }
-  if (inflight.has(conversationId)) return send(res, 409, { error: 'busy', message: '这个会话正在生成中' })
+  if (inflight.has(conversationId)) return send(res, 409, { error: 'busy', message: runtimeText('server.busyConversation') })
   const ctrl = new AbortController()
   inflight.set(conversationId, ctrl)
   if ('workspaceMode' in body || 'editMessageId' in body) {
@@ -1605,12 +1657,12 @@ async function streamChatHandler(req, res) {
       const workspaceMode = conv?.workspaceMode ?? 'work'
       if (!conv || ('workspaceMode' in body && workspaceMode !== body.workspaceMode)) {
         inflight.delete(conversationId)
-        if (!conv) return send(res, 404, { error: '会话不存在' })
-        return send(res, 409, { error: 'workspace_mode_changed', workspaceMode, message: '本对话的工作区模式已改变，请核对后再发送。' })
+        if (!conv) return send(res, 404, { error: runtimeText('server.missingConversation') })
+        return send(res, 409, { error: 'workspace_mode_changed', workspaceMode, message: runtimeText('server.modeChanged') })
       }
       if (body.editMessageId && !conv.messages.some((m) => m.role === 'user' && m.id === body.editMessageId)) {
         inflight.delete(conversationId)
-        return send(res, 409, { error: '原消息已变化，请刷新后再编辑' })
+        return send(res, 409, { error: runtimeText('server.messageChanged') })
       }
     } catch (error) {
       inflight.delete(conversationId)
@@ -1640,13 +1692,13 @@ async function streamChatHandler(req, res) {
       const parsed = parseDataUrl(dataUrl)
       if (!parsed) continue
       if (parsed.buffer.length > (cfg.media?.maxImageBytes ?? 8 * 1024 * 1024)) {
-        sseWrite(res, 'notice', { text: `有图片超过 ${Math.round((cfg.media.maxImageBytes ?? 8e6) / 1e6)}MB，已跳过` })
+        sseWrite(res, 'notice', { text: runtimeText('server.imageTooLarge', Math.round((cfg.media.maxImageBytes ?? 8e6) / 1e6)) })
         continue
       }
       const saved = await saveImage({ dataUrl, prefix: 'up' })
       attachments.push({ url: saved.path, bytes: saved.bytes })
     } catch (err) {
-      log.warn('附件保存失败', err.message)
+      log.warn(runtimeText('server.saveAttachmentFailed'), err.message)
     }
   }
 
@@ -1702,15 +1754,15 @@ async function streamChatHandler(req, res) {
     const emptyStoppedReply = !assistant?.content?.trim() && ['failed', 'cancelled'].includes(assistant?.runStatus)
     if (assistant?.role === 'assistant' && !body.regenerate && !emptyStoppedReply) {
       const user = [...(conv?.messages ?? [])].reverse().find((m) => m.role === 'user')
-      if (conv && conv.messages.filter((m) => m.role === 'user').length === 1 && conv.title === '新对话') {
+      if (conv && conv.messages.filter((m) => m.role === 'user').length === 1 && conv.id !== MAIN_ID && hasDefaultTitle(conv)) {
         generateTitle(conversationId, user?.content ?? '', assistant.content).catch(() => {})
       }
-      maybeExtractMemory(conv, assistant).catch((err) => log.warn('抽取失败', err.message))
-      maybeDigest(conversationId, cfg).catch((err) => log.warn('摘要失败', err.message))
+      maybeExtractMemory(conv, assistant).catch((err) => log.warn(runtimeText('server.extractFailed'), err.message))
+      maybeDigest(conversationId, cfg).catch((err) => log.warn(runtimeText('server.digestFailed'), err.message))
     }
   } catch (err) {
     if (err?.name !== 'AbortError') {
-      log.error('stream 失败', err.message)
+      log.error(runtimeText('server.streamFailed'), err.message)
       if (!res.writableEnded) sseWrite(res, 'error', { message: err.message })
     }
   } finally {
@@ -1738,7 +1790,7 @@ const server = http.createServer(async (req, res) => {
   }
   try {
     if (url.pathname.startsWith('/api/')) return await api(req, res, url)
-    if (req.method === 'GET' || req.method === 'HEAD') return await serveStatic(req, res, url.pathname)
+    if (req.method === 'GET' || req.method === 'HEAD') return await serveStatic(req, res, url)
     return send(res, 405, { error: 'method not allowed' })
   } catch (err) {
     const status = err?.status ?? 500
@@ -1758,14 +1810,14 @@ const tick = setInterval(async () => {
     for (const [ip, rec] of loginAttempts) if (Date.now() - rec.first > 5 * 60000) loginAttempts.delete(ip)
     if (Date.now() - lastMaintenance > 6 * 3600000) {
       lastMaintenance = Date.now()
-      await pruneStorage().catch((err) => log.warn('存储清理失败', err.message))
+      await pruneStorage().catch((err) => log.warn(runtimeText('server.cleanupFailed'), err.message))
       await sweepTempCaptures().catch(() => {})
       await pruneScreenData().catch(() => {})
-      await forgetScan({ trigger: 'schedule' }).catch((err) => log.warn('遗忘扫描失败', err.message))
+      await forgetScan({ trigger: 'schedule' }).catch((err) => log.warn(runtimeText('server.forgetScanFailed'), err.message))
     }
     if (cfg.screen?.enabled && Date.now() - lastScreenDigest > (cfg.screen.digestMinutes ?? 45) * 60000) {
       lastScreenDigest = Date.now()
-      await digestScreenSession().catch((err) => log.warn('屏幕摘要失败', err.message))
+      await digestScreenSession().catch((err) => log.warn(runtimeText('server.screenDigestFailed'), err.message))
     }
     if (!cfg.dream.enabled || dreamChecking || inflight.size) return
     dreamChecking = true
@@ -1779,12 +1831,12 @@ const tick = setInterval(async () => {
       const conversations = await listConversations()
       const hasMaterial = stats.observations > 0 || conversations.some((c) => c.messageCount > 0)
       if (idleOk && hasMaterial) {
-        log.info('触发 Dream 提炼')
+        log.info(runtimeText('server.dreamStarted'))
         await runDream({ trigger: 'schedule' })
       }
     }
   } catch (err) {
-    log.error('dream 调度异常', err.message)
+    log.error(runtimeText('server.dreamScheduleFailed'), err.message)
   } finally {
     dreamChecking = false
   }
@@ -1803,7 +1855,7 @@ function kickPreparation() {
   preparationWork = (async () => {
     await discoverNeeds()
     if (!backgroundSuspended) await prepareDueCommitments()
-  })().catch((err) => log.warn('目标准备失败', err.message)).finally(() => { preparationWork = null })
+  })().catch((err) => log.warn(runtimeText('server.preparationFailed'), err.message)).finally(() => { preparationWork = null })
 }
 const preparationTimer = setInterval(kickPreparation, 60000)
 const proactiveTimer = setInterval(async () => {
@@ -1815,9 +1867,9 @@ const proactiveTimer = setInterval(async () => {
     lastProactiveAttempt = Date.now()
     proactiveBusy = true
     const result = await proactiveTick({ busyConversations })
-    if (!result.acted && result.skipped !== 'quiet_hours' && result.skipped !== 'disabled') log.debug('主动服务跳过:', result.skipped)
+    if (!result.acted && result.skipped !== 'quiet_hours' && result.skipped !== 'disabled') log.debug(runtimeText('server.proactiveSkipped'), result.skipped)
   } catch (err) {
-    log.error('主动服务调度异常', err.message)
+    log.error(runtimeText('server.proactiveScheduleFailed'), err.message)
   } finally {
     proactiveBusy = false
   }
@@ -1827,6 +1879,11 @@ const proactiveTimer = setInterval(async () => {
 
 async function boot() {
   checkLegacyProfile()
+  if (!(await fs.stat(P.config).catch(() => null)) && !(await getConversation(MAIN_ID))) {
+    const hostLanguage = normalizeLanguage(Intl.DateTimeFormat().resolvedOptions().locale, 'en')
+    const systemLanguage = normalizeLanguage(process.env.ECHO_LANGUAGE, hostLanguage)
+    cfg = await saveConfig({ language: systemLanguage })
+  }
   await fs.mkdir(path.join(P.convDir), { recursive: true })
   await fs.mkdir(P.logs, { recursive: true })
   await ensureStorageDirs()
@@ -1834,7 +1891,7 @@ async function boot() {
   await ensureLocalToken()
   const envResult = await loadEnvFile(P.env)
   await ensureCore()
-  await createConversation({ isMain: true, title: '主对话' })
+  await createConversation({ isMain: true })
   await refreshConfig()
   await connectMcp()
   lastMaintenance = Date.now()
@@ -1846,7 +1903,7 @@ async function boot() {
   const auth = await readJSON(P.auth, {})
   authState.passwordSet = Boolean(auth.password)
   const bind = bindAddress(mode, cfg.requirePassword, authState.passwordSet)
-  if (mode === 'all' && bind === '127.0.0.1') log.warn('要求口令但还没设置，已退化为仅本机监听')
+  if (mode === 'all' && bind === '127.0.0.1') log.warn(runtimeText('server.localPasswordFallback'))
 
   await new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -1854,24 +1911,24 @@ async function boot() {
   })
 
   const listener = describeListener(server.address())
-  log.info(`Echo v${VERSION} 已启动 · 监听 ${listener.address}:${listener.port} · env文件=${envResult.loaded ? '已加载' : '无'}`)
-  log.info(`  本机   http://127.0.0.1:${listener.port}`)
-  if (listener.lanUrl) log.info(`  局域网 ${listener.lanUrl}`)
-  log.info(`  上游   ${upstreamCreds().baseUrl} · key=${upstreamCreds().apiKey ? '已配置' : '缺失'} · 模型=${cfg.upstream.defaultModel}`)
-  log.info(`  记忆   ${JSON.stringify(await memoryStats())}`)
+  log.info(runtimeText('server.started', VERSION, listener.address, listener.port, envResult.loaded ? runtimeText('server.loaded') : runtimeText('server.none')))
+  log.info(runtimeText('server.localAddress', listener.port))
+  if (listener.lanUrl) log.info(runtimeText('server.lanAddress', listener.lanUrl))
+  log.info(runtimeText('server.upstreamStatus', upstreamCreds().baseUrl, upstreamCreds().apiKey ? runtimeText('server.configured') : runtimeText('server.missing'), cfg.upstream.defaultModel))
+  log.info(runtimeText('server.memoryStatus', JSON.stringify(await memoryStats())))
   kickPreparation()
 }
 
 async function shutdown(signal) {
-  log.info(`收到 ${signal}，正在退出`)
+  log.info(runtimeText('server.stoppingOnSignal', signal))
   clearInterval(tick)
   clearInterval(proactiveTimer)
   clearInterval(preparationTimer)
-  cancelDiscovery('服务正在停止').catch(() => {})
-  cancelCommitmentWork('服务正在停止')
-  cancelAndDrainResearch('服务正在停止').catch(() => {})
+  cancelDiscovery(runtimeText('server.stopping')).catch(() => {})
+  cancelCommitmentWork(runtimeText('server.stopping'))
+  cancelAndDrainResearch(runtimeText('server.stopping')).catch(() => {})
   for (const [, ctrl] of inflight) ctrl.abort()
-  cancelHarnessRuns('服务正在停止')
+  cancelHarnessRuns(runtimeText('server.stopping'))
   try {
     await mcp.close()
   } catch {}
@@ -1885,6 +1942,6 @@ process.on('unhandledRejection', (err) => log.error('unhandledRejection', err))
 process.on('uncaughtException', (err) => log.error('uncaughtException', err))
 
 boot().catch((err) => {
-  log.error('启动失败', err)
+  log.error(runtimeText('server.startFailed'), err)
   process.exit(1)
 })

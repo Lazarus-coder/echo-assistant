@@ -1,8 +1,6 @@
 # Development
 
-This guide covers source setup, runtime controls, tests, and packaging. For the product overview and installer, start with [English](../README.md) or [中文](../README.zh-CN.md).
-
-本文集中说明源码安装、命令行、测试隔离与内部结构。日常使用请先看 README；这里的服务命令可能影响已安装实例，测试前请阅读隔离说明。
+[Simplified Chinese](zh-CN/development.md) · [Product overview](../README.md)
 
 ## Requirements and source setup
 
@@ -33,6 +31,7 @@ To install a persistent source instance, run `./install.sh`. It installs locked 
 | `ECHO_DATA_DIR` | Override the runtime data directory; defaults to `data/` in this checkout. |
 | `ECHO_CONFIG` | Override the config file; defaults to `config.json` in this checkout. |
 | `ECHO_BIND` | New profiles listen on loopback. `all` selects LAN listening on restart. `local` forces loopback. |
+| `ECHO_LANGUAGE` | Choose `en` or `zh-CN` for this terminal invocation or as the initial language of a new profile. The app saves subsequent changes through Settings. |
 | `ECHO_PORT` | Override the configured port. |
 | `ECHO_LOG_LEVEL` | Set `debug`, `info`, `warn`, or `error`. |
 
@@ -104,7 +103,7 @@ Memory combines recent working context, retrievable facts, a consolidated core, 
 
 ## Preview the product site
 
-The product site is separate from the chat application in `public/`. Its entry pages are [中文](../site/index.html) and [English](../site/en.html). GitHub displays these as source files; a repository link does not imply that a hosted site has been published.
+The product site is separate from the chat application in `public/`. Its entry pages are [Simplified Chinese](../site/index.html) and [English](../site/en.html). GitHub displays these as source files; a repository link does not imply that a hosted site has been published.
 
 From the repository root, serve only the site directory:
 

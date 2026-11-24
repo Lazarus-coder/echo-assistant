@@ -3,10 +3,11 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
+import { localizeWebAsset } from '../public/ui-locale.mjs'
 import { mock } from 'node:test'
 
 // Exercise the mini window without a browser, server, or model connection.
-const miniSource = (await fs.readFile(new URL('../public/mini.js', import.meta.url), 'utf8')).replace(/\ninit\(\)\s*$/, '')
+const miniSource = localizeWebAsset('mini.js', await fs.readFile(new URL('../public/mini.js', import.meta.url), 'utf8'), 'zh-CN').replace(/\ninit\(\)\s*$/, '')
 function miniWindow(response, token) {
   class Element {
     children = []
@@ -27,12 +28,15 @@ function miniWindow(response, token) {
   document.createElement = () => new Element()
   const paints = new Map()
   const requests = []
+  const navigation = []
+  const windowListeners = new Map()
   let frameId = 0
   const context = vm.createContext({
     document,
     __echoLocalToken: token,
-    location: { search: '?b=test', pathname: '/mini.html' },
-    URLSearchParams, AbortController, TextDecoder,
+    location: { search: '?b=test', pathname: '/mini.html', href: 'http://127.0.0.1:8787/mini.html?b=test', replace: url => navigation.push(url) },
+    addEventListener: (name, handler) => windowListeners.set(name, handler),
+    URL, URLSearchParams, AbortController, TextDecoder,
     fetch: async (url, options) => {
       requests.push({ url, ...options })
       if (url === '/api/chat') {
@@ -52,6 +56,8 @@ function miniWindow(response, token) {
     document,
     paints,
     requests,
+    navigation,
+    dispatch: (event, data) => windowListeners.get(event)(data),
     api: (expression) => vm.runInContext(expression, context),
     send: () => vm.runInContext('send("hello")', context),
     assistant: () => document.querySelector('#thread').children.at(-1),
@@ -64,6 +70,33 @@ function events(...frames) {
   })
 }
 
+{
+  const page = miniWindow()
+  const input = page.document.querySelector('#input')
+  input.value = '我的 draft with unsaved text'
+  page.dispatch('echo-profile-language', { detail: 'en' })
+  assert.equal(input.value, '我的 draft with unsaved text')
+  assert.deepEqual(page.navigation, [])
+  // A second switch back while busy cancels the earlier pending change.
+  page.dispatch('echo-profile-language', { detail: 'zh-CN' })
+  input.value = ''
+  input.listeners.input({ target: input })
+  assert.deepEqual(page.navigation, [])
+  input.value = 'another draft'
+  page.dispatch('storage', { key: 'echo.language', newValue: 'en' })
+  input.value = ''
+  input.listeners.input({ target: input })
+  assert.deepEqual(page.navigation, ['http://127.0.0.1:8787/mini.html?b=test&lang=en'])
+}
+{
+  const page = miniWindow(() => {
+    page.dispatch('echo-profile-language', { detail: 'en' })
+    assert.deepEqual(page.navigation, [], 'Let the reply finish before changing the mini language')
+    return events(['done', { message: { content: 'finished' } }])
+  })
+  await page.send()
+  assert.deepEqual(page.navigation, ['http://127.0.0.1:8787/mini.html?b=test&lang=en'])
+}
 {
   const topicKey = 'companion:0123456789abcdef01234567'
   const page = miniWindow((_url, { method }) => Response.json({ muted: method === 'PUT' }))

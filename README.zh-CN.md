@@ -19,7 +19,9 @@
 
 把对话、个人背景和持续跟进的目标放在一起。从一个问题开始，留下重要线索，下次回来时继续推进。你选择兼容的模型端点和 API Key；Echo 在你的 Mac 上运行，并在本机保存记录。
 
-**这些功能在哪个版本？** 公开的 alpha.6 安装包可以在「主动服务」面板中创建目标。alpha.9 源码与本地 Mac 候选包还支持对话内创建目标、候选提醒预览、工作区只读规划和命令结果复核。[alpha.9 说明](docs/release-notes-0.1.0-alpha.9.md) · [源码启动方式](docs/development.md#requirements-and-source-setup)
+**选择语言。** 从 alpha.10 起，可以在登录、首次设置或「设置 → 界面语言」中选择英语或简体中文。界面、助手指令与新提醒会使用所选语言，已有对话保留原文。[alpha.10 说明](docs/zh-CN/release-notes-0.1.0-alpha.10.md)
+
+公开的 alpha.6 安装包支持在面板中创建目标。当前源码还支持在对话中创建目标、预览候选提醒、只读规划和复核命令。[从源码启动](docs/zh-CN/development.md)
 
 ## 陪你推进需要持续投入的事
 
@@ -31,7 +33,7 @@
 
 ### 用 Echo 修改一个项目
 
-在本机打开 **工作区**，选定项目目录并开启读取权限。在聊天输入框选择 **只读规划**，例如问「找到导出 CSV 的代码，看看增加日期列要改哪里」。Echo 可以搜索源码并读取匹配行。要动手时，在同一对话切换到 **执行任务**，按需启用编辑和 Shell，再请它修改并运行相关测试。每条命令都可以先核对。回复下的 **查看步骤与结果** 按执行顺序列出修改文件、快照和命令退出码。[工作区权限](docs/permissions.md#7-workspace-tools-and-mcp)
+在本机打开 **工作区**，选定项目目录并开启读取权限。在聊天输入框选择 **只读规划**，例如问「找到导出 CSV 的代码，看看增加日期列要改哪里」。Echo 可以搜索源码并读取匹配行。要动手时，在同一对话切换到 **执行任务**，按需启用编辑和 Shell，再请它修改并运行相关测试。每条命令都可以先核对。回复下的 **查看步骤与结果** 按执行顺序列出修改文件、快照和命令退出码。[工作区权限](docs/zh-CN/permissions.md#工作区与-mcp)
 
 ## 让上下文持续有用
 
@@ -58,7 +60,7 @@
 
 屏幕采集默认在本机进行 OCR，提取的文字可能发送给模型；图片模式可发送截图。本机工作区执行与确认仅在宿主 Mac 上开放。
 
-从 alpha.8 起，新资料默认仅在本机监听。公开的 alpha.6 安装包默认开放局域网且免登录。升级会保留已显式配置的监听范围。[网络访问设置](docs/permissions.md#5-network-exposure)
+从 alpha.8 起，新资料默认仅在本机监听。公开的 alpha.6 安装包默认开放局域网且免登录。升级会保留已显式配置的监听范围。[网络访问设置](docs/zh-CN/permissions.md#登录启动与访问地址)
 
 ## 开始使用
 
@@ -66,7 +68,7 @@
 2. **连接你的模型。** 运行 **Install Echo.command**，在引导中填写兼容端点、API Key 和模型。安装器会添加状态栏应用及登录后启动的服务。
 3. **选择需要的能力。** 开始一段对话，选择记忆档位，再按需开启后台研究、屏幕上下文或工作区访问。
 
-模型与搜索调用可能产生所选提供方的费用。[开始使用指南](docs/getting-started.md#中文)说明安装、访问控制与卸载；源码安装见[开发指南](docs/development.md)。
+模型与搜索调用可能产生所选提供方的费用。[开始使用指南](docs/zh-CN/getting-started.md)说明安装、访问控制与卸载；源码安装见[开发指南](docs/zh-CN/development.md)。
 
 ## 仍在成长，也说明边界
 
@@ -76,10 +78,10 @@ Echo 目前处于 **alpha**。界面与数据格式可能调整，升级前请�
 
 ## 继续了解
 
-- [产品发布页文件](site/) · [中文页面](site/index.html) · [本地预览](docs/development.md#preview-the-product-site)
-- [开始使用](docs/getting-started.md#中文) · [权限与数据](docs/permissions.md)
-- [开发、测试与源码安装](docs/development.md)
-- [开源个人助手、打扰时机与 Echo 的取舍](docs/landscape.md)
+- [产品发布页文件](site/) · [中文页面](site/index.html) · [本地预览](docs/zh-CN/development.md#本地预览产品网站)
+- [开始使用](docs/zh-CN/getting-started.md) · [权限与数据](docs/zh-CN/permissions.md)
+- [开发、测试与源码安装](docs/zh-CN/development.md)
+- [开源个人助手、打扰时机与 Echo 的取舍](docs/zh-CN/landscape.md)
 - [版本记录](CHANGELOG.md) · [反馈问题](https://github.com/Lazarus-coder/echo-assistant/issues)
 
 仓库目前未包含许可证文件；如需复用，请联系维护者。

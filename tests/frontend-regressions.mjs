@@ -2,10 +2,13 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
+import { localizeWebAsset } from '../public/ui-locale.mjs'
 
 // Run the actual browser functions without booting a server or calling a model.
 const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8')
-const program = source.split('/* --------------------------------- start ----------------------------------- */')[0]
+const programs = Object.fromEntries(['en', 'zh-CN'].map(language => [
+  language, localizeWebAsset('app.js', source, language).split('/* --------------------------------- start ----------------------------------- */')[0],
+]))
 const tests = []
 const test = (name, run) => tests.push({ name, run })
 
@@ -46,7 +49,7 @@ function element(value = '') {
   }
 }
 
-function harness() {
+function harness(language = 'zh-CN') {
   const nodes = new Map()
   const collections = new Map()
   const storage = new Map()
@@ -99,7 +102,7 @@ function harness() {
     URL,
     console,
   })
-  vm.runInContext(program, context)
+  vm.runInContext(programs[language], context)
   return {
     context,
     get,
@@ -119,6 +122,59 @@ function harness() {
     },
   }
 }
+
+test('web locales cover the same authored messages and leave chat content intact', async () => {
+  const load = async file => JSON.parse(await readFile(new URL('../public/locales/' + file + '.json', import.meta.url), 'utf8'))
+  const [english, chinese] = await Promise.all([load('en'), load('zh-CN')])
+  assert.deepEqual(Object.keys(english).sort(), Object.keys(chinese).sort())
+  const template = await readFile(new URL('../public/index.html', import.meta.url), 'utf8')
+  const userText = 'New chat 新对话 {{html:send}}'
+  for (const [language, title] of [['en', 'Local chat'], ['zh-CN', '本地对话']]) {
+    const page = localizeWebAsset('index.html', template, language)
+    assert.ok(page.includes('<html lang="' + language + '">'))
+    assert.ok(page.includes('<title>Echo · ' + title + '</title>'))
+    assert.doesNotMatch(page, /\{\{(?:html|msg):/)
+    const h = harness(language)
+    assert.ok(h.run('languageSelector()').includes('lang="' + language + '" selected'))
+    assert.ok(h.run('md(' + JSON.stringify(userText) + ')').includes(userText))
+  }
+})
+
+test('language selection saves to the signed-in profile or waits for sign-in', async () => {
+  for (const signedIn of [true, false]) {
+    const h = harness('en')
+    const writes = []
+    const temporary = new Map()
+    const navigations = []
+    h.context.fetch = async (url, request) => { writes.push([url, JSON.parse(request.body)]); return Response.json({}) }
+    h.context.sessionStorage = { setItem: (key, value) => temporary.set(key, value) }
+    h.context.location = { href: 'http://localhost/?conv=example', replace: url => navigations.push(new URL(url)) }
+    h.context.control = { value: 'zh-CN', closest: () => null }
+    h.run('unsavedInputs = () => false; S.boot = ' + (signedIn ? '{}' : 'null'))
+    await h.run('changeLanguage(control)')
+    assert.equal(navigations.length, 1)
+    assert.equal(navigations[0].searchParams.get('lang'), 'zh-CN')
+    assert.equal(navigations[0].searchParams.get('conv'), 'example')
+    assert.deepEqual(writes, signedIn ? [['/api/settings', { config: { language: 'zh-CN' } }]] : [])
+    assert.equal(temporary.get('echo.pendingLanguage'), signedIn ? undefined : 'zh-CN')
+  }
+})
+
+test('password errors use the gate language before a profile is accessible', async () => {
+  for (const [locale, expected] of [['en', 'Incorrect password.'], ['zh-CN', '口令不正确。']]) {
+    const h = harness(locale)
+    h.context.fetch = () => Response.json({ error: 'bad_password', message: 'server-language' }, { status: 401 })
+    await assert.rejects(h.run('api("login", {method:"POST", body:{password:"wrong"}})'), { message: expected })
+  }
+})
+
+test('provider-defined group labels remain plain text and may match object keys', () => {
+  const h = harness('en')
+  const html = h.run('modelOptionsHtml([{id:"m", group:"__proto__", label:"My model"}, {id:"b", group:"<custom>", label:"<B>"}], "m")')
+  assert.match(html, /label="__proto__"/)
+  assert.match(html, /label="&lt;custom&gt;"/)
+  assert.match(html, /&lt;B&gt;/)
+})
 
 test('unfinished table text renders without freezing', () => {
   const h = harness()
@@ -1139,7 +1195,7 @@ test('an image that finishes processing after switching stays with its original 
 test('screen status distinguishes a pending request, source mode, missing permission and an expired request', () => {
   const h = harness()
   const render = (screen) => h.run(`screenBlock(${JSON.stringify({ screen, storage: { screenshots: {}, uploads: {} } })})`)
-  assert.match(render({ mode: 'image', captureRequested: true }), /截图发送给模型[\s\S]*等待状态栏 App 采集[\s\S]*data-action="look-now" disabled/)
+  assert.match(render({ mode: 'image', captureRequested: true }), /截图发送给模型[\s\S]*等待状态栏应用采集[\s\S]*data-action="look-now" disabled/)
   assert.match(render({ lastOk: false, permissionMissing: true }), /开启屏幕录制权限/)
   assert.match(render({ captureExpired: true }), /这次请求已过期/)
 })

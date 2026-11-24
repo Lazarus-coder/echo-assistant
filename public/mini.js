@@ -1,7 +1,6 @@
-/* 伴随模式的小对话窗：点开气泡后专注于那个话题。
-   复用主站的样式与 /api/chat SSE，不引入构建步骤。 */
 const $ = (s, r = document) => r.querySelector(s)
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+const scenarioLabel = { chat: '{{msg:chat}}', code: '{{msg:coding}}', work: '{{msg:officeWork}}', browse: '{{msg:browsing}}', video: '{{msg:watchingVideo}}', other: '{{msg:other}}' }
 const params = new URLSearchParams(location.search)
 const bubbleId = params.get('b') ?? location.pathname.split('/').filter(Boolean)[1] ?? ''
 const localHeaders = typeof globalThis.__echoLocalToken === 'string' ? { 'x-echo-local': globalThis.__echoLocalToken } : {}
@@ -9,11 +8,26 @@ delete globalThis.__echoLocalToken
 
 let conversationId = null
 let streaming = null
+let pendingLanguage = null
+
+function applyPendingLanguage() {
+  if (!pendingLanguage || streaming || $('#input').value) return
+  const url = new URL(location.href)
+  url.searchParams.set('lang', pendingLanguage)
+  pendingLanguage = null
+  location.replace(url.href)
+}
+
+function chooseLanguage(language) {
+  if (!['en', 'zh-CN'].includes(language)) return
+  pendingLanguage = language === '{{msg:locale}}' ? null : language
+  applyPendingLanguage()
+}
 
 function updateComposer() {
   $('#send').disabled = !conversationId || Boolean(streaming) || !$('#input').value.trim()
   $('[data-act="open-main"]').disabled = !conversationId
-  $('#send').textContent = streaming ? '回复中…' : '发送'
+  $('#send').textContent = streaming ? '{{msg:replying}}' : '{{msg:send}}'
   $('#thread').setAttribute('aria-busy', String(Boolean(streaming)))
 }
 
@@ -39,19 +53,19 @@ function renderMessage(m) {
     $('.content', el).innerHTML = mdLite(m.content ?? '')
     if (m.companion?.bubbleId === bubbleId && m.id) {
       const timing = m.feedbackTiming ?? m.feedback
-      $('.tail', el).innerHTML = `<fieldset class="mini-feedback" data-feedback-message="${esc(m.id)}" aria-label="评价这条气泡">
-        <button class="btn small ghost" data-signal="good" aria-pressed="${m.feedback === 'good'}">有用</button>
-        <button class="btn small ghost" data-signal="bad" aria-pressed="${m.feedback === 'bad'}">没用</button>
-        <button class="btn small ghost" data-signal="good_time" aria-pressed="${timing === 'good_time'}">来得正好</button>
-        <button class="btn small ghost" data-signal="wrong_time" aria-pressed="${timing === 'wrong_time'}">时机不合适</button>
-        ${typeof m.topicMuted === 'boolean' && m.companion.selection?.topicKey ? `<button class="btn small ghost" data-topic-key="${esc(m.companion.selection.topicKey)}" data-muted="${m.topicMuted}">${m.topicMuted ? '取消静音' : '静音这类气泡'}</button>` : ''}
+      $('.tail', el).innerHTML = `<fieldset class="mini-feedback" data-feedback-message="${esc(m.id)}" aria-label="{{html:rateThisSuggestion}}">
+        <button class="btn small ghost" data-signal="good" aria-pressed="${m.feedback === 'good'}">{{html:useful}}</button>
+        <button class="btn small ghost" data-signal="bad" aria-pressed="${m.feedback === 'bad'}">{{html:notUseful}}</button>
+        <button class="btn small ghost" data-signal="good_time" aria-pressed="${timing === 'good_time'}">{{html:goodTiming}}</button>
+        <button class="btn small ghost" data-signal="wrong_time" aria-pressed="${timing === 'wrong_time'}">{{html:badTiming}}</button>
+        ${typeof m.topicMuted === 'boolean' && m.companion.selection?.topicKey ? `<button class="btn small ghost" data-topic-key="${esc(m.companion.selection.topicKey)}" data-muted="${m.topicMuted}">${m.topicMuted ? '{{msg:unmute}}' : '{{msg:muteThisKindOfSuggestion}}'}</button>` : ''}
         <span class="muted small" role="status"></span></fieldset>`
     }
   }
   return el
 }
 
-/* 极简 markdown：小窗只需要代码、加粗、链接和换行 */
+/* Compact Markdown renderer for companion messages. */
 function mdLite(text) {
   let s = esc(text)
   s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, l, code) => `<pre class="code"><code>${code}</code></pre>`)
@@ -63,15 +77,15 @@ function mdLite(text) {
 
 async function loadThread(id) {
   const conv = await api(`conversations/${id}`)
-  $('#topic').textContent = conv.title ?? '伴随'
+  $('#topic').textContent = conv.title ?? '{{msg:companion}}'
   $('#model').textContent = conv.model ?? ''
   const thread = $('#thread')
   thread.innerHTML = ''
   for (const m of conv.messages ?? []) {
     thread.append(renderMessage(m))
     if (m.companion) {
-      $('#scenario').textContent = m.companion.scenario ?? '伴随'
-      $('#hint').textContent = `来自气泡 · ${m.companion.bubbleId ?? ''}`
+      $('#scenario').textContent = scenarioLabel[m.companion.scenario] ?? '{{msg:companion}}'
+      $('#hint').textContent = `{{msg:fromSuggestion}} ${m.companion.bubbleId ?? ''}`
     }
   }
   thread.scrollTop = thread.scrollHeight
@@ -136,9 +150,9 @@ async function send(text) {
           buffer += d.text
           paint()
         } else if (name === 'error') {
-          throw new Error(d.message ?? '回复失败，请重试。')
+          throw new Error(d.message ?? '{{msg:replyFailedTryAgain}}')
         } else if (name === 'tool_call') {
-          $('.tail', node).innerHTML = `<div class="notice">正在调用 ${esc(d.label ?? d.name)}…</div>`
+          $('.tail', node).innerHTML = `<div class="notice">{{html:calling}} ${esc(d.label ?? d.name)}…</div>`
         } else if (name === 'sources') {
           for (const s of d.items ?? []) if (!sources.some((x) => x.url === s.url)) sources.push(s)
         } else if (name === 'done') {
@@ -147,7 +161,7 @@ async function send(text) {
         }
       }
     }
-    if (!completed) throw new Error('连接已中断，回复可能不完整。请重试。')
+    if (!completed) throw new Error('{{msg:connectionLostTheReplyMayBeIncomplete}}')
   } catch (err) {
     if (err.name !== 'AbortError') error = err.message
   } finally {
@@ -163,12 +177,13 @@ async function send(text) {
     if (error) $('.tail', node).innerHTML += `<div class="err" role="alert">${esc(error)}</div>`
     streaming = null
     updateComposer()
+    applyPendingLanguage()
   }
 }
 
 async function init() {
   if (!bubbleId) {
-    $('#thread').innerHTML = '<div class="mini-empty">没有指定气泡。从状态栏的气泡点进来，或带 ?b=&lt;气泡id&gt; 打开。</div>'
+    $('#thread').innerHTML = '<div class="mini-empty">{{html:openASuggestionFromTheMenuBar}}</div>'
     return
   }
   try {
@@ -178,7 +193,7 @@ async function init() {
     updateComposer()
     $('#input').focus()
   } catch (err) {
-    $('#thread').innerHTML = `<div class="mini-empty">打不开这个气泡：${esc(err.message)}</div>`
+    $('#thread').innerHTML = `<div class="mini-empty">{{html:couldNotOpenThisSuggestion}}${esc(err.message)}</div>`
   }
 }
 
@@ -194,6 +209,7 @@ $('#input').addEventListener('input', (e) => {
   e.target.style.height = 'auto'
   e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`
   updateComposer()
+  applyPendingLanguage()
 })
 $('#input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -213,19 +229,19 @@ document.addEventListener('click', async (e) => {
         const reply = await api('proactive/topic-mutes', { method: button.dataset.muted === 'true' ? 'DELETE' : 'PUT',
           body: { topicKey: button.dataset.topicKey, conversationId, messageId: group.dataset.feedbackMessage } })
         button.dataset.muted = String(reply.muted)
-        button.textContent = reply.muted ? '取消静音' : '静音这类气泡'
-        status.textContent = reply.muted ? '同类气泡已静音。' : '已取消静音。'
+        button.textContent = reply.muted ? '{{msg:unmute}}' : '{{msg:muteThisKindOfSuggestion}}'
+        status.textContent = reply.muted ? '{{msg:thisKindOfSuggestionIsMuted}}' : '{{msg:unmuted}}'
         return
       }
       const reply = await api('feedback', { method: 'POST', body: { signal, conversationId, messageId: group.dataset.feedbackMessage } })
       const saved = signal.endsWith('_time') ? reply.outcome?.timing : reply.outcome?.utility
-      if (saved !== signal) throw new Error('无法确认反馈')
+      if (saved !== signal) throw new Error('{{msg:feedbackCouldNotBeConfirmed}}')
       for (const item of group.querySelectorAll('[aria-pressed]')) {
         if (item.dataset.signal.endsWith('_time') === signal.endsWith('_time')) item.setAttribute('aria-pressed', String(item.dataset.signal === signal))
       }
-      status.textContent = '反馈已保存。'
+      status.textContent = '{{msg:feedbackSaved}}'
     } catch (err) {
-      status.textContent = `保存失败：${err.message}。可再次点击重试。`
+      status.textContent = `{{msg:couldNotSave}}${err.message}{{msg:clickAgainToRetry}}`
     } finally {
       group.disabled = false
     }
@@ -235,6 +251,11 @@ document.addEventListener('click', async (e) => {
     window.open(`/?conv=${conversationId}`, '_blank')
   }
 })
+
+globalThis.addEventListener?.('storage', event => {
+  if (event.key === 'echo.language') chooseLanguage(event.newValue)
+})
+globalThis.addEventListener?.('echo-profile-language', event => chooseLanguage(event.detail))
 
 updateComposer()
 init()
