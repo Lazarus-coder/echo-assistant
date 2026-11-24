@@ -70,7 +70,7 @@ Run checks appropriate to the change after reading the isolation notes below. Re
 | `node tests/server-regressions.mjs` | Malformed Host/request-target responses and continued service availability. |
 | `node tests/storage-regressions.mjs` | Failed deletions, age/budget cleanup, retries, and referenced-upload protection. |
 
-The HTTP parsing and cleanup-accounting fixes in current source were added after the published v0.1.0-alpha.6 packages. These checks describe the current checkout, not a claim that the published package contains those fixes.
+Alpha.10 includes the HTTP parsing and cleanup-accounting fixes covered by these regressions.
 
 ### Test isolation
 

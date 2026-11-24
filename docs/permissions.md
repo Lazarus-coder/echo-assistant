@@ -44,7 +44,7 @@ Without the grant, Echo degrades quietly: captures are skipped, the log says so,
 
 Companion mode (off by default, enabled from the menu bar or *Settings → Companion mode*) reuses the same Screen Recording grant but captures far more often (default every 20 s instead of every 5 minutes). Everything above still applies: on-device OCR, text only, screenshots deleted after analysis, block-list respected, and nothing is sent to the model when the screen hasn't changed. It can be paused instantly from the menu bar, and it silences itself after three dismissals in a row.
 
-**Published alpha.6 users.** Companion OCR in that package can send text from an excluded window to your model. Keep companion mode off in alpha.6 if you rely on exclusions. The current source applies the same app, title and text filters to companion OCR and ordinary screen awareness.
+**If you still use alpha.6.** Companion OCR in that package can send text from an excluded window to your model. Keep companion mode off in alpha.6 if you rely on exclusions. Alpha.10 applies the same app, title and text filters to companion OCR and ordinary screen awareness.
 
 ## 2c. Why macOS sometimes asks again (and how to stop it)
 
@@ -61,7 +61,7 @@ Echo never *initiates* a permission dialog on its own: without the grant it simp
 
 Proactive messages announce themselves through `osascript`. If a banner is missing, check the notification settings for the sending app in **System Settings → Notifications**, or just rely on the unread dot in the menu bar.
 
-### How timing is personalized in the current source
+### How timing is personalized
 
 The timing policy belongs to the Mac's Echo data profile. Anyone chatting through a shared installation contributes to that same profile. While proactive messages or companion bubbles are enabled, Echo records which three-hour local time bands contained a user chat, at most once per band and date. The timing sample contains no chat text. The policy considers the last 14 local dates in the current time zone. **Forget everything** clears the learned timing history.
 
@@ -96,7 +96,7 @@ xcode-select --install      # only if you want the menu-bar app and lack swiftc
 
 ## 5. Network exposure
 
-- Fresh profiles from alpha.8 onward listen on `127.0.0.1:8787`. The public alpha.6 installer defaults to all interfaces without a password.
+- Fresh profiles from alpha.8 onward listen on `127.0.0.1:8787`. If you installed alpha.6, review your network settings when upgrading. That version listened on all interfaces without a password by default.
 - Before sharing the listener, set a password with `./bin/echo passwd`, then enable authentication with `./bin/echo auth on`. Sessions are HttpOnly + SameSite=Strict; write requests additionally require a custom header that cross-site pages cannot forge.
 - For phone access, enable password protection, set `"bind": "all"` in `config.json` and restart Echo. An explicit `ECHO_BIND` overrides the saved value.
 

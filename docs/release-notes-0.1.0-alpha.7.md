@@ -1,6 +1,6 @@
 # Echo v0.1.0-alpha.7 — 任务反馈、健壮性与跟进闭环
 
-本版本为**本地候选版，尚未上传 GitHub Release**。公开下载仍是 [v0.1.0-alpha.6](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6)。
+本版本为**本地候选版，尚未上传 GitHub Release**。本阶段的公开版本为 alpha.6。[下载当前的 alpha.10 预发布版](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10)。
 
 ## 本次变化
 
@@ -25,7 +25,7 @@
 
 升级前备份安装目录中的 **`data/` 和 `config.json`**。`data/runs/` 保存独立的执行输出与文件快照，对话导出不包含这些内容。Alpha 阶段的界面与数据格式仍可能调整。
 
-安装操作与模型设置见[安装指南](zh-CN/getting-started.md)。其中的公开下载链接仍指向 alpha.6；本地候选包以本次交付文件为准。
+安装操作与模型设置见[安装指南](zh-CN/getting-started.md)。该指南的下载链接指向当前公开预发布版。
 
 ## 验证与状态
 

@@ -9,7 +9,7 @@ Plan a change, edit a project, run its checks, and keep track of the work in cha
 
 **macOS · Bring your own model · Alpha**
 
-[Download](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6) · [Explore Echo](site/en.html) · [中文](README.zh-CN.md)
+[Download alpha.10 for macOS](https://github.com/Lazarus-coder/echo-assistant/releases/download/v0.1.0-alpha.10/Echo-0.1.0-alpha.10-macos.dmg) · [Explore Echo](site/en.html) · [中文](README.zh-CN.md)
 
 </div>
 
@@ -21,7 +21,7 @@ Echo brings conversations, personal context, and ongoing goals into one place. S
 
 **Choose your language.** In alpha.10, choose English or Simplified Chinese during sign-in or setup, or change it later under **Settings → Language**. Echo uses that language for the interface, system instructions and new reminders. Your original chat history stays readable as written. [Alpha.10 notes](docs/release-notes-0.1.0-alpha.10.md)
 
-The public alpha.6 installer includes the goals panel. The current source also supports creating goals in chat, previewing reminders, planning in a workspace and reviewing commands. [Run from source](docs/development.md#requirements-and-source-setup)
+The alpha.10 installer supports creating goals in chat, previewing reminders, planning in a workspace and reviewing commands. [Run from source](docs/development.md#requirements-and-source-setup)
 
 ## Made for work that continues
 
@@ -39,11 +39,11 @@ On your Mac, open **Workspace**, choose the project folder and enable workspace 
 
 **Memory you can manage.** On a reply that recalled personal facts, open its memory details to see which facts Echo retrieved for that turn. You can inspect, protect, revive, or remove facts in the memory panel.
 
-**When a draft needs your input.** In the current source, open the draft in **Proactive assistance**, answer its question, and submit. Echo saves your answer with the question and queues another draft for the same goal. You can come back later with proactive messages off.
+**When a draft needs your input.** Open the draft in **Proactive assistance**, answer its question, and submit. Echo saves your answer with the question and queues another draft for the same goal. You can come back later with proactive messages off.
 
 **Follow-up on your terms.** Background research starts off. Turn it on in **Proactive assistance**, then choose each goal's sources. Research and notifications have separate controls, with quiet hours and delivery limits. A message Echo sends on its own can carry a **Start follow-up** button, so a lead it noticed becomes a goal with one click — nothing is created until you click. Return to chat after six hours away to see a brief of recorded activity and open any current draft directly. You can review a result, correct it, pause a goal, or mark it complete.
 
-**Teach Echo what to bring up, and when.** In the current source, Quiet, Balanced and Engaged set starting values for spacing, waiting for a usual chat window, and the minimum content score. Each personal profile adapts from actual chats and explicit feedback. **Useful / Not useful** rates the content. **Good timing / Bad timing** rates its timing. Before any wording request, a local engine picks one eligible topic and its evidence. You can inspect the reasons on the message and the starting and effective parameters in **Proactive assistance → Interruption timing and feedback**.
+**Teach Echo what to bring up, and when.** Quiet, Balanced and Engaged set starting values for spacing, waiting for a usual chat window, and the minimum content score. Each personal profile adapts from actual chats and explicit feedback. **Useful / Not useful** rates the content. **Good timing / Bad timing** rates its timing. Before any wording request, a local engine picks one eligible topic and its evidence. You can inspect the reasons on the message and the starting and effective parameters in **Proactive assistance → Interruption timing and feedback**.
 
 **Preview what Echo would send.** Open **Proactive assistance → Preview candidates** to see up to three candidates, their ranking, and anything delaying them. Mute a topic there or on a delivered suggestion. Other topics can still surface, and a draft you explicitly requested retains its priority. Companion mini-chat offers the same control for a particular kind of screen cue. Previewing uses no model calls.
 
@@ -60,11 +60,11 @@ On your Mac, open **Workspace**, choose the project folder and enable workspace 
 
 Screen capture uses on-device OCR by default; extracted text can be sent to your model. Image mode can send screenshots. Local workspace execution and approvals are available only on the host Mac.
 
-New profiles from alpha.8 onward listen on this Mac by default. The public alpha.6 installer defaults to LAN access without a password. Explicit network settings carry over on upgrade. [Network controls](docs/permissions.md#5-network-exposure)
+New alpha.10 profiles listen on this Mac by default. Upgrades retain your configured network settings. If you installed alpha.6, check your listener and password settings, since that release enabled LAN access by default. [Network controls](docs/permissions.md#5-network-exposure)
 
 ## Start with Echo
 
-1. **Download for macOS.** Choose a macOS package from [v0.1.0-alpha.6](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.6). The current installer targets macOS 13+ on Apple Silicon or Intel and requires Node.js 22.13 or newer.
+1. **Download for macOS.** The installer works on Apple Silicon and Intel Macs running macOS 13 or newer. Install Node.js 22.13 or newer first. The release page includes the DMG, ZIP and SHA-256 checksums. [Get v0.1.0-alpha.10](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10)
 2. **Connect your model.** Run **Install Echo.command**, then use the setup wizard to enter a compatible endpoint, API key, and model. The installer adds a menu-bar app and a service that starts at login.
 3. **Choose what to enable.** Start a conversation, select a memory level, and enable background research, screen context, or workspace access when useful.
 

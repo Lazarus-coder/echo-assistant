@@ -8,4 +8,4 @@
 
 新资料优先采用系统语言，不支持的系统语言默认使用英语。旧资料默认保留简体中文。可用 `ECHO_LANGUAGE=zh-CN ./bin/echo status` 指定单次终端命令的语言。
 
-此版本提供源码与本地 macOS 候选安装包。公开的 alpha.6 安装包尚无语言选择功能。
+此预发布版支持 macOS 13 或更高版本，兼容 Apple Silicon 与 Intel。请先安装 Node.js 22.13 或更高版本。使用安装包在独立目录试装后，全部 98 项离线检查通过。[下载 macOS 安装包](https://github.com/Lazarus-coder/echo-assistant/releases/download/v0.1.0-alpha.10/Echo-0.1.0-alpha.10-macos.dmg) · [ZIP、源码与校验文件](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10)

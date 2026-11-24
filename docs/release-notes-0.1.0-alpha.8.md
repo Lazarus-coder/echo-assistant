@@ -6,4 +6,4 @@ The wizard connects to your own endpoint and accepts a manual model ID if the pr
 
 Returning to a screen Echo already commented on can skip the wording request. New evidence on that screen remains eligible. Old bubbles expire, duplicate dismissals count once, and opening a bubble twice returns the same conversation. Native capture uses the selected profile's private temporary directory. When the model flags a capture as sensitive, Echo masks its text before saving or displaying the event. Manual capture reports permission failures and expires after two minutes if the menu-bar app is unavailable.
 
-The local package targets macOS 13 or newer and requires Node.js 22.13 or newer. The public download is alpha.6. [Setup and upgrade instructions](getting-started.md)
+The local package targets macOS 13 or newer and requires Node.js 22.13 or newer. The public download at the time was alpha.6. [Download alpha.10](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10). [Setup and upgrade instructions](getting-started.md)

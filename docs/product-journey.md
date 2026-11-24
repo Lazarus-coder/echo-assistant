@@ -236,5 +236,5 @@ Chrome 验收使用临时资料和模拟模型。在主对话交代一个 12 月
 - **依赖债**：现在是 2 个运行时依赖（MCP SDK、pdfjs-dist）。是否把 MCP 客户端回退为可选（动态 import + 回退实现）以恢复"零 npm 安装即可用"，尚未决定。
 - **未验证**：研究质量/漏报率、伴随模式的真实接受度、bandit 的真人数据——都需要真实使用几天后回看 `./bin/echo diag`。
 - **未做**：computer use（模型提议、App 执行的 GUI 层）仍在路线图；视频/语音受网关限制。
-- **发布与源码**：公开下载为 alpha.6。当前源码和本地安装候选版为 0.1.0-alpha.10，见[候选版说明](zh-CN/release-notes-0.1.0-alpha.10.md)。
+- **发布与源码**：[公开预发布版为 0.1.0-alpha.10](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10)。可下载已验证的 macOS 安装包、源码包及校验文件，详见[版本说明](zh-CN/release-notes-0.1.0-alpha.10.md)。
 - **入口仍少于能力**：跟进的创建现在有对话、一键接管与面板三条路，但文件夹/文档范围的目标、研究开关仍需在本机面板设置。能力与入口的差距是每一轮迭代的主战场。

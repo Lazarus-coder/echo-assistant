@@ -8,4 +8,4 @@ The switch works locally without using a model key. Your configured endpoint, ke
 
 New profiles use English or Simplified Chinese according to the host's locale, with English as the fallback. Profiles created by earlier versions start in Simplified Chinese. Terminal tools accept a one-command override, for example `ECHO_LANGUAGE=en ./bin/echo status`.
 
-This is a source and local macOS build. The public alpha.6 installer predates language selection.
+The macOS prerelease supports macOS 13 or newer on Apple Silicon and Intel. Install Node.js 22.13 or newer before running the installer. The installed copy passed all 98 offline checks. [Download the macOS installer](https://github.com/Lazarus-coder/echo-assistant/releases/download/v0.1.0-alpha.10/Echo-0.1.0-alpha.10-macos.dmg) · [ZIP, source archive and checksums](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10)

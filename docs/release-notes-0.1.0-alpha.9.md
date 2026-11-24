@@ -6,4 +6,4 @@ Switch the same conversation to **Work** to use the editing and command permissi
 
 Echo uses the endpoint, credential and model you configure. The official DeepSeek Chat Completions route can continue thinking-mode tool calls across rounds. Workspace execution needs a model that supports streamed function calls. Shell and MCP operations require individual approval.
 
-This Mac candidate targets Apple Silicon and Intel on macOS 13 or newer and requires Node.js 22.13 or newer. The public download is alpha.6. [Setup instructions](getting-started.md)
+This Mac candidate targets Apple Silicon and Intel on macOS 13 or newer and requires Node.js 22.13 or newer. The public download at the time was alpha.6. [Download alpha.10](https://github.com/Lazarus-coder/echo-assistant/releases/tag/v0.1.0-alpha.10). [Setup instructions](getting-started.md)
